@@ -1,0 +1,28 @@
+﻿{
+  "name": "running-server",
+  "version": "1.0.0",
+  "description": "RUN & STUDY LOG 高可靠轻量服务端与 SQLite 持久化",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node verify-all.js"
+  },
+  "keywords": [
+    "running",
+    "study",
+    "self-discipline",
+    "sqlite",
+    "aliyun"
+  ],
+  "author": "OpenMausBot & Kiwi",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.3",
+    "multer": "^1.4.5-lts.2"
+  }
+}

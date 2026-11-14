@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f2f1e8">
+<meta name="description" content="RUN & STUDY LOG · 多人竞技、学习、自律与运动综合性打卡网页。每天早起奔跑、专注学习、结伴自律。">
+<title>next_sigmaman · RUN & STUDY LOG · 运动 · 学习 · 自律竞技打卡</title>
+<link rel="icon" href="logo.svg" type="image/svg+xml">
+<link rel="stylesheet" href="style.css?v=20261114m">
+<link rel="stylesheet" href="pixel-progress.css?v=20261114m">
+<link rel="stylesheet" href="desktop.css?v=20261114m">
+<script src="pixel-progress.js?v=20261114m" defer></script>
+<script src="app.js?v=20261114m" defer></script>
+</head>
+<body>
+<aside class="studio-left">
+  <a href="index.html" class="studio-logo">Become<br><em>Sigma</em>Man</a>
+  <p>早起奔跑，<br>专注学习，<br>和伙伴一起把自律变成日常。</p>
+  <a class="rail-film" href="film.html"><span class="rail-play">▶</span><span>品牌动效 30s</span><small>FILM</small></a>
+  <div class="studio-caption">MOVE. STUDY.<br>COMPETE &amp; GROW.</div>
+  <span class="edition">运动 · 学习 · 自律 / VOL. 003</span>
+</aside>
+<div class="app" id="app">
+  <header class="topbar">
+    <span class="top-mark">↗</span>
+    <strong>综合自律打卡 <small>RUN · STUDY · DISCIPLINE · PK</small></strong>
+    <button class="motion-toggle" id="motion-toggle" aria-pressed="false">暂停动效 Ⅱ</button>
+    <button class="icon-button" id="open-settings" aria-label="设置与数据备份">☷</button>
+  </header>
+  <div class="masthead">
+    <a class="brand" href="index.html"><img src="logo.svg" alt=""> next_sigmaman</a>
+    <span id="today-date"></span>
+    <button id="rename">改名字</button>
+  </div>
+  <div class="ticker" aria-hidden="true"><div id="ticker-content"></div></div>
+  <div class="blue-ticker">
+    <div class="blue-flow" id="blue-flow" aria-hidden="true"></div>
+    <time id="clock">06:10:00</time>
+  </div>
+  <div class="progress-strip" id="global-progress-strip">
+    <b>LIVE</b>
+    <div class="live-marquee" id="live-marquee" aria-hidden="true"></div>
+  </div>
+  <main id="page" tabindex="-1"></main>
+  <nav class="bottom-nav" aria-label="页面导航"></nav>
+</div>
+<aside class="studio-right">
+  <span class="kicker">RUN · STUDY · DISCIPLINE</span>
+  <h1>自律。<br><em>即自由。</em></h1>
+  <p>运动强健体魄，学习拓展边界。<br>把每一次出发与专注，都刻进自己的节律里。</p>
+  <a class="film-link" href="film.html"><span>▶</span> 播放品牌动效 <small>30 SEC</small></a>
+  <span class="right-bottom">SMALL STEPS.<br>EVERY DAY.</span>
+</aside>
+<div class="desktop-footer" aria-hidden="true">
+  <span>EST. 06:10 / RUN · STUDY · SELF-DISCIPLINE · MULTIPLAYER PK</span>
+  <span>ONE MORE STEP. ↗</span>
+</div>
+<div id="modal-root"></div>
+<div id="toast" role="status" aria-live="polite"></div>
+<div id="confetti" aria-hidden="true"></div>
+<dialog id="editor">
+  <form method="dialog" id="editor-form">
+    <div class="dialog-heading">
+      <span id="editor-title"></span>
+      <button value="cancel" aria-label="关闭">×</button>
+    </div>
+    <div id="editor-body"></div>
+    <div class="dialog-actions">
+      <button value="cancel">取消</button>
+      <button id="editor-save" value="save">保存 →</button>
+    </div>
+  </form>
+</dialog>
+</body>
+</html>

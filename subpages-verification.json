@@ -1,0 +1,700 @@
+{
+  "testReport": "RUN LOG 子页面宽窄屏布局、关键交互及跨刷新持久化验收报告",
+  "testedAt": "2026-11-14T07:05:00+08:00",
+  "environment": "Built-in Browser (Chrome) / Local HTTP Origin http://127.0.0.1:8089",
+  "sourceInfo": {
+    "hashes": {
+      "app.js": "e080eb34dabbe3131b04f1298770b9db2d2a4f7ae29e04d6037aa28ce22123cf",
+      "style.css": "364662dc8c43c76b8ce076c555f48c806c55ab98d3f958975668adf7a518fdc2",
+      "desktop.css": "bf1b556372f91ed1661c3ef0fcd97cc75cdf351ac23ae7df8d977855e0847eae",
+      "index.html": "af316af217414b8a34d3db40f3d1c1d90cd1538aa40724256c5648710dc237be"
+    },
+    "lastModified": {
+      "app.js": "2026-11-14 06:57:55",
+      "style.css": "2026-11-14 06:59:40",
+      "desktop.css": "2026-11-14 06:59:41",
+      "index.html": "2026-11-13 23:55:58"
+    }
+  },
+  "summary": {
+    "totalLayoutChecks": 63,
+    "passedLayoutChecks": 63,
+    "totalInteractions": 10,
+    "passedInteractions": 10,
+    "crossRefreshPersistence": "PASS"
+  },
+  "layout": [
+    {
+      "width": 1920,
+      "height": 1080,
+      "view": "home",
+      "appWidth": 1600,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "view": "progress",
+      "appWidth": 1600,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "view": "plan",
+      "appWidth": 1600,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "view": "ranking",
+      "appWidth": 1600,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "view": "achievements",
+      "appWidth": 1600,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "view": "records",
+      "appWidth": 1600,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "view": "people",
+      "appWidth": 1600,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "view": "home",
+      "appWidth": 1165,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "view": "progress",
+      "appWidth": 1165,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "view": "plan",
+      "appWidth": 1165,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "view": "ranking",
+      "appWidth": 1165,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "view": "achievements",
+      "appWidth": 1165,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "view": "records",
+      "appWidth": 1165,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1440,
+      "height": 900,
+      "view": "people",
+      "appWidth": 1165,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1366,
+      "height": 768,
+      "view": "home",
+      "appWidth": 1091,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1366,
+      "height": 768,
+      "view": "progress",
+      "appWidth": 1091,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1366,
+      "height": 768,
+      "view": "plan",
+      "appWidth": 1091,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1366,
+      "height": 768,
+      "view": "ranking",
+      "appWidth": 1091,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1366,
+      "height": 768,
+      "view": "achievements",
+      "appWidth": 1091,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1366,
+      "height": 768,
+      "view": "records",
+      "appWidth": 1091,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1366,
+      "height": 768,
+      "view": "people",
+      "appWidth": 1091,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "view": "home",
+      "appWidth": 805,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "view": "progress",
+      "appWidth": 805,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "view": "plan",
+      "appWidth": 805,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "view": "ranking",
+      "appWidth": 805,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "view": "achievements",
+      "appWidth": 805,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "view": "records",
+      "appWidth": 805,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 1024,
+      "height": 768,
+      "view": "people",
+      "appWidth": 805,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 800,
+      "height": 600,
+      "view": "home",
+      "appWidth": 581,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 800,
+      "height": 600,
+      "view": "progress",
+      "appWidth": 581,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 800,
+      "height": 600,
+      "view": "plan",
+      "appWidth": 581,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 800,
+      "height": 600,
+      "view": "ranking",
+      "appWidth": 581,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 800,
+      "height": 600,
+      "view": "achievements",
+      "appWidth": 581,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 800,
+      "height": 600,
+      "view": "records",
+      "appWidth": 581,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 800,
+      "height": 600,
+      "view": "people",
+      "appWidth": 581,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "view": "home",
+      "appWidth": 564,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "view": "progress",
+      "appWidth": 564,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "view": "plan",
+      "appWidth": 564,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "view": "ranking",
+      "appWidth": 564,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "view": "achievements",
+      "appWidth": 564,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "view": "records",
+      "appWidth": 564,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 768,
+      "height": 1024,
+      "view": "people",
+      "appWidth": 564,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 540,
+      "height": 800,
+      "view": "home",
+      "appWidth": 536,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 540,
+      "height": 800,
+      "view": "progress",
+      "appWidth": 536,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 540,
+      "height": 800,
+      "view": "plan",
+      "appWidth": 536,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 540,
+      "height": 800,
+      "view": "ranking",
+      "appWidth": 536,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 540,
+      "height": 800,
+      "view": "achievements",
+      "appWidth": 536,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 540,
+      "height": 800,
+      "view": "records",
+      "appWidth": 536,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 540,
+      "height": 800,
+      "view": "people",
+      "appWidth": 536,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "view": "home",
+      "appWidth": 386,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "view": "progress",
+      "appWidth": 386,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "view": "plan",
+      "appWidth": 386,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "view": "ranking",
+      "appWidth": 386,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "view": "achievements",
+      "appWidth": 386,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "view": "records",
+      "appWidth": 386,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "view": "people",
+      "appWidth": 386,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 360,
+      "height": 640,
+      "view": "home",
+      "appWidth": 356,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 360,
+      "height": 640,
+      "view": "progress",
+      "appWidth": 356,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 360,
+      "height": 640,
+      "view": "plan",
+      "appWidth": 356,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 360,
+      "height": 640,
+      "view": "ranking",
+      "appWidth": 356,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 360,
+      "height": 640,
+      "view": "achievements",
+      "appWidth": 356,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 360,
+      "height": 640,
+      "view": "records",
+      "appWidth": 356,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    },
+    {
+      "width": 360,
+      "height": 640,
+      "view": "people",
+      "appWidth": 356,
+      "horizontalOverflow": false,
+      "navClickable": true,
+      "navVisible": true
+    }
+  ],
+  "interactions": [
+    {
+      "name": "跑道环行 CSS 动画就绪",
+      "pass": true,
+      "detail": {
+        "animationName": "runLap",
+        "offsetPath": "path SVG infield"
+      }
+    },
+    {
+      "name": "动效暂停与恢复控制",
+      "pass": true,
+      "detail": {
+        "pausedClass": true,
+        "motionToggle": "#motion-toggle"
+      }
+    },
+    {
+      "name": "进度页：时间维度 Tab 切换",
+      "pass": true,
+      "detail": {
+        "activeTab": "近 7 天柱图",
+        "action": "progress-tab"
+      }
+    },
+    {
+      "name": "计划页：月度目标步进调整与预设切换",
+      "pass": true,
+      "detail": {
+        "goalHeading": "210 KM",
+        "preset": "200K",
+        "step": "+10 km"
+      }
+    },
+    {
+      "name": "计划页：每周跑步计划日勾选联动",
+      "pass": true,
+      "detail": {
+        "day": "周三",
+        "action": "day",
+        "toggle": "planned"
+      }
+    },
+    {
+      "name": "排名页：榜单周期与指标维度联动切换",
+      "pass": true,
+      "detail": {
+        "activePeriod": "总榜",
+        "activeMetric": "按配速"
+      }
+    },
+    {
+      "name": "成就页：分类过滤与卡片 3D 翻牌",
+      "pass": true,
+      "detail": {
+        "filter": "已解锁",
+        "cardFlipped": true,
+        "action": "flip"
+      }
+    },
+    {
+      "name": "记录页：图表类型切换与记录点赞交互",
+      "pass": true,
+      "detail": {
+        "activeChart": "出发时间",
+        "likeToggled": true
+      }
+    },
+    {
+      "name": "伙伴/明早页：明早跑步计划约定切换",
+      "pass": true,
+      "detail": {
+        "toggleTomorrow": true,
+        "activeClass": true
+      }
+    },
+    {
+      "name": "打卡弹窗开启与关闭交互",
+      "pass": true,
+      "detail": {
+        "modalVisible": true,
+        "action": "checkin"
+      }
+    }
+  ],
+  "persistence": {
+    "name": "跨刷新缓存边界检查：localStorage 与 DOM 一致性持久化",
+    "pass": true,
+    "storageKey": "run-log-v1",
+    "persistedGoal": 210,
+    "persistedDays": [
+      1,
+      2,
+      6,
+      0
+    ],
+    "recordsCount": 4,
+    "afterReloadDomHeading": "210 KM",
+    "consistent": true
+  },
+  "failures": [],
+  "artifacts": {
+    "previewGrid": "D:\\running\\subpages-preview.png",
+    "modulesPreview": "D:\\running\\modules-preview.png"
+  }
+}

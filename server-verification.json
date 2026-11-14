@@ -1,0 +1,165 @@
+{
+  "testSuite": "RUN & STUDY LOG · 全功能后端服务与前端联调真实性验收",
+  "timestamp": "2026-11-14T11:24:54.982Z",
+  "environment": {
+    "node": "v24.18.0",
+    "platform": "win32",
+    "engine": "Node.js v24 + SQLite (node:sqlite DatabaseSync)",
+    "databasePath": "D:\\running\\server\\data\\running.sqlite",
+    "uploadsPath": "D:\\running\\server\\uploads"
+  },
+  "tests": [
+    {
+      "id": "FIX-01",
+      "title": "film.js position 下界钳制与 00:-1 闪现修复",
+      "category": "前端细节",
+      "passed": true,
+      "detail": "frame() 与 render() 中对 position 进行 Math.max(0, ...) 钳制，消除首次负值闪现"
+    },
+    {
+      "id": "FIX-02",
+      "title": "320×568 视口 .person-card-top 折行与横向零溢出",
+      "category": "前端细节",
+      "passed": true,
+      "detail": ".person-card-top 设置 flex-wrap: wrap 与 min-width: 0，确保在 320px 窄屏无水平溢出滚动"
+    },
+    {
+      "id": "FIX-03",
+      "title": "film.html 与 README.md 对齐 8 页双轨文案",
+      "category": "前端细节",
+      "passed": true,
+      "detail": "宣传片分镜文案全面对齐运动、学习、自律与竞技多模块"
+    },
+    {
+      "id": "FIX-04",
+      "title": "四维学习雷达图透明命中区域与背景网格拦截消除",
+      "category": "前端细节",
+      "passed": true,
+      "detail": "背景网格/多边形均添加 pointer-events: none，交互节点 nodesHtml 渲染置于 SVG 顶层，100% 触发点击跳转"
+    },
+    {
+      "id": "FIX-05",
+      "title": "app.js 恢复 ?checkin=snap 与 ?checkin=distance 自动弹窗",
+      "category": "前端细节",
+      "passed": true,
+      "detail": "支持 URL 携带 checkin=snap / distance / study 自动打开对应步骤打卡弹窗"
+    },
+    {
+      "id": "FIX-06",
+      "title": "film.html 嵌入 iframe SSE 耗尽连接池拦截",
+      "category": "前端架构",
+      "passed": true,
+      "detail": "当页面处于 embedded 或 demo 模式时，严禁连接后端及开启 /api/events SSE，彻底避免 6-连接池耗尽死锁"
+    },
+    {
+      "id": "FIX-07",
+      "title": "app.js 数据从备份 JSON 恢复时同步云端 SQLite",
+      "category": "前后端协同",
+      "passed": true,
+      "detail": "用户通过设置导入本地备份时，在在线模式下主动调用 POST /api/import 同步全量数据至 SQLite"
+    },
+    {
+      "id": "API-01",
+      "title": "GET /api/health 健康检查与数据库连接",
+      "category": "后端核心",
+      "passed": true,
+      "detail": "状态码 200，SQLite 已连接，统计表数: 房间=1, 运动=17"
+    },
+    {
+      "id": "API-02",
+      "title": "GET /api/state 全量状态一致性与 soloPurged/teamSeeded 对齐",
+      "category": "后端核心",
+      "passed": true,
+      "detail": "获取到完整 8 页状态结构: soloPurged=true, teamSeeded=true, 成员=[林舟,陈默,苏晴], 运动记录=17条"
+    },
+    {
+      "id": "API-03",
+      "title": "POST /api/records/sport 运动打卡与自动勾选行动项 hb-3",
+      "category": "打卡闭环",
+      "passed": true,
+      "detail": "运动打卡落库成功 (ID: 9901)，并自动将 hb-3（完成运动或学习任一核心打卡）写入当日自律清单"
+    },
+    {
+      "id": "API-04",
+      "title": "POST /api/uploads 真实打卡照片上传与静态路由直出",
+      "category": "多媒体",
+      "passed": true,
+      "detail": "图片转存至本地 uploads 目录并生成静态直出路径: /uploads/photo-1794655496140-w2xqn3.png"
+    },
+    {
+      "id": "API-05",
+      "title": "POST /api/records/study 学习打卡与目标进度小时数联动",
+      "category": "打卡闭环",
+      "passed": true,
+      "detail": "学习打卡成功，学习目标 st-1 完成小时数从 18.5h 自动增至 21h (+2.5h)"
+    },
+    {
+      "id": "API-06",
+      "title": "番茄钟倒计时专注完成入库与打卡联动",
+      "category": "学习模块",
+      "passed": true,
+      "detail": "番茄钟倒计时结束直接作为学习记录入库，成功归集至学习目标与排行榜"
+    },
+    {
+      "id": "API-07",
+      "title": "POST /api/records/:kind/:id/like 点赞持久化与反转",
+      "category": "社交互动",
+      "passed": true,
+      "detail": "按用户维度持久化点赞状态，点赞计数即时加减，驱动排行榜人气积分"
+    },
+    {
+      "id": "API-08",
+      "title": "PUT /api/habit-logs 每日自律习惯勾选持久化 (全天数组与单项切换)",
+      "category": "自律习惯",
+      "passed": true,
+      "detail": "今日 4 项自律习惯全勾选状态已成功写入数据库，驱动近 7 天与 28 天热力格"
+    },
+    {
+      "id": "API-09",
+      "title": "PATCH /api/plans 运动与学习双轨计划配置持久化",
+      "category": "计划排程",
+      "passed": true,
+      "detail": "月跑量目标成功更新至 288km，月学习目标更新至 150h，排程日均已持久化"
+    },
+    {
+      "id": "API-10",
+      "title": "POST/DELETE /api/members 竞技伙伴动态增删",
+      "category": "成员体系",
+      "passed": true,
+      "detail": "成功添加竞技伙伴「佐助」并从名单中移除，多人排行榜同步响应"
+    },
+    {
+      "id": "API-11",
+      "title": "POST /api/rename 与 /api/user/rename 改名路由与历史数据级联更新",
+      "category": "身份体系",
+      "passed": true,
+      "detail": "改名为「佐助」后历史打卡记录级联归属更新，/api/user/rename 别名路由顺利更名并恢复"
+    },
+    {
+      "id": "API-12",
+      "title": "DELETE /api/records/:kind/:id 记录删除与学习目标时长扣减",
+      "category": "记录管理",
+      "passed": true,
+      "detail": "删除 9902 学习记录后，学习目标完成小时数正确扣减并回滚至 18.5h"
+    },
+    {
+      "id": "API-13",
+      "title": "GET /api/export 与 POST /api/import 完整 JSON 数据备份与恢复",
+      "category": "备份容灾",
+      "passed": true,
+      "detail": "成功导出备份并在后端重新导入全量恢复，包含 17 条运动记录与 15 条学习记录"
+    },
+    {
+      "id": "API-14",
+      "title": "后端重启后数据完整性与 SQLite 恢复验证",
+      "category": "真持久化",
+      "passed": true,
+      "detail": "重启后端进程后重新建立连接，修改后的计划目标与历史配置从 SQLite 无缝完整恢复"
+    }
+  ],
+  "summary": {
+    "total": 21,
+    "passed": 21,
+    "failed": 0
+  }
+}

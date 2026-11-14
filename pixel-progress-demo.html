@@ -1,0 +1,399 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PixelProgressBar · Claude 色系像素能量条演示</title>
+<link rel="stylesheet" href="pixel-progress.css">
+<style>
+  :root {
+    --bg: #1E1D1B;
+    --card: #24221F;
+    --ink: #F2EEE8;
+    --muted: #A9A197;
+    --line: #393530;
+    --mono: "Cascadia Mono", Consolas, monospace;
+    --body: "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 30px 20px 56px;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--body);
+    line-height: 1.5;
+  }
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+  .hero {
+    border: 1px solid var(--line);
+    background: var(--card);
+    padding: 20px 24px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+  .hero h1 {
+    margin: 0 0 6px;
+    font-size: 20px;
+    letter-spacing: -0.3px;
+    color: #F4D0C3;
+  }
+  .hero p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 7px 12px;
+    border: 1px solid #595249;
+    background: #2B2926;
+    color: #F4D0C3;
+    text-decoration: none;
+    font: 700 12px var(--mono);
+  }
+  .back-link:hover {
+    border-color: #D97757;
+    background: #352A25;
+  }
+  .grid-2 {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 18px;
+  }
+  @media (max-width: 900px) {
+    .grid-2 { grid-template-columns: 1fr; }
+  }
+  .panel {
+    border: 1px solid var(--line);
+    background: var(--card);
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .panel-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    gap: 8px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--line);
+    flex-wrap: wrap;
+  }
+  .panel-head h2 {
+    margin: 0;
+    font-size: 13.5px;
+    font-family: var(--mono);
+    color: #E89D82;
+  }
+  .panel-head small {
+    font: 600 11px var(--mono);
+    color: var(--muted);
+  }
+  .demo-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+  .controls {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    padding: 14px;
+    background: #1B1A18;
+    border: 1px solid var(--line);
+  }
+  .ctrl {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+  }
+  .ctrl label {
+    font: 700 11px var(--mono);
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+  }
+  .ctrl label strong { color: #F4D0C3; }
+  .btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .btn {
+    cursor: pointer;
+    padding: 5px 10px;
+    border: 1px solid #4B463F;
+    background: #2B2926;
+    color: #E8E2D9;
+    font: 700 11.5px var(--mono);
+  }
+  .btn:hover { border-color: #D97757; }
+  .btn.active {
+    background: #D97757;
+    border-color: #F4D0C3;
+    color: #1E1D1B;
+  }
+  .sandbox-box {
+    padding: 18px;
+    border: 1px dashed #4A453E;
+    background: #1E1D1B;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .a11y-dump {
+    margin: 0;
+    padding: 10px 12px;
+    background: #171614;
+    border: 1px solid var(--line);
+    font: 600 11.5px/1.5 var(--mono);
+    color: #B9B0A4;
+    overflow-x: auto;
+  }
+  .narrow-frame {
+    width: 260px;
+    max-width: 100%;
+    padding: 14px;
+    border: 1px dashed #4F4942;
+    background: #1E1D1B;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <div>
+      <h1>Claude 色系像素能量条 · 三层结构与动态渐变</h1>
+      <p>背景 #1E1D1B · 轨道 #2B2926 · 赤陶棕 #D97757 + 暖沙色 #E89D82 + 浅杏色 #F4D0C3 · 默认 560×24px（4px 基础像素 × 6 行阶梯缩进 16/8/0/4/12/20px + 固定分离 4×4px 像素）</p>
+    </div>
+    <a class="back-link" href="index.html">← 返回打卡主应用</a>
+  </header>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>01 / 60% 核心视觉原型（线性进度条 + 环形进度条 · 内部流光 6s · 后方柔光呼吸 4s · 6行阶梯错峰闪烁）</h2>
+      <small>560px × 24px 线性条 &amp; 24px 环宽像素能量环 · 4px 像素 × 6 行 · 无定时器伪装进度</small>
+    </div>
+    <div style="display:flex;align-items:center;gap:28px;flex-wrap:wrap">
+      <div id="demo-hero-60" style="flex:1;min-width:280px"></div>
+      <div id="demo-hero-ring-60"></div>
+    </div>
+    <div id="demo-rings-matrix" style="display:flex;gap:18px;flex-wrap:wrap;justify-content:space-between;padding-top:14px;border-top:1px solid var(--line)"></div>
+  </section>
+
+  <section class="grid-2">
+    <div class="panel">
+      <div class="panel-head">
+        <h2>02 / 关键进度验收矩阵 (0% · 5% · 25% · 60% · 90% · 100%)</h2>
+        <small>全部严格按 progress% 裁切边界</small>
+      </div>
+      <div class="demo-stack" id="demo-milestones"></div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h2>03 / 状态与窄屏自适应 (paused · error · indeterminate)</h2>
+        <small>文字与 ARIA 属性完整区分</small>
+      </div>
+      <div class="demo-stack" id="demo-states"></div>
+      <div class="panel-head" style="padding-top:6px;">
+        <h2>04 / 窄屏容器自适应 (260px)</h2>
+        <small>width: 100% 自动缩放尾迹</small>
+      </div>
+      <div class="narrow-frame" id="demo-narrow"></div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>05 / 实时交互验证台（手动调节 progress 数值，250ms 平滑过渡）</h2>
+      <small>保留原有 PixelProgressBar 接口</small>
+    </div>
+    <div class="controls">
+      <div class="ctrl">
+        <label><span>PROGRESS 数值</span><strong id="ctrl-pct-val">60%</strong></label>
+        <input type="range" id="ctrl-pct" min="0" max="100" step="1" value="60">
+        <div class="btn-row" id="preset-btns">
+          <button type="button" class="btn" data-pct="0">0%</button>
+          <button type="button" class="btn" data-pct="5">5%</button>
+          <button type="button" class="btn" data-pct="25">25%</button>
+          <button type="button" class="btn active" data-pct="60">60%</button>
+          <button type="button" class="btn" data-pct="90">90%</button>
+          <button type="button" class="btn" data-pct="100">100%</button>
+        </div>
+      </div>
+      <div class="ctrl">
+        <label><span>HEIGHT 轨道高度</span><strong id="ctrl-h-val">24px (4px 像素 · 6 行)</strong></label>
+        <div class="btn-row" id="height-btns">
+          <button type="button" class="btn" data-h="12">12px (2px像素)</button>
+          <button type="button" class="btn" data-h="18">18px (3px像素)</button>
+          <button type="button" class="btn active" data-h="24">24px (4px像素)</button>
+        </div>
+      </div>
+      <div class="ctrl">
+        <label><span>STATE 状态切换</span><strong id="ctrl-state-val">loading</strong></label>
+        <div class="btn-row" id="state-btns">
+          <button type="button" class="btn active" data-state="loading">loading</button>
+          <button type="button" class="btn" data-state="paused">paused</button>
+          <button type="button" class="btn" data-state="success">success</button>
+          <button type="button" class="btn" data-state="error">error</button>
+          <button type="button" class="btn" data-state="indeterminate">indeterminate</button>
+        </div>
+      </div>
+    </div>
+    <div class="sandbox-box">
+      <div style="display:flex;align-items:center;gap:24px;flex-wrap:wrap">
+        <div id="demo-playground" style="flex:1;min-width:280px"></div>
+        <div id="demo-playground-ring"></div>
+      </div>
+      <pre class="a11y-dump" id="a11y-dump"></pre>
+    </div>
+  </section>
+</div>
+
+<script src="pixel-progress.js"></script>
+<script>
+(function () {
+  PixelProgressBar.mount(document.getElementById('demo-hero-60'), {
+    label: '60% · 能量核心原型（左侧浓郁赤陶渐变 + 6 行阶梯 16/8/0/4/12/20px + 4×4 分离像素）',
+    progress: 60,
+    height: 24,
+    state: 'loading'
+  });
+  PixelProgressBar.mountRing(document.getElementById('demo-hero-ring-60'), {
+    label: '60% 环形原型',
+    progress: 60,
+    size: 136,
+    thickness: 24,
+    labelText: 'ENERGY',
+    state: 'loading'
+  });
+  const ringMilestones = [
+    { label: '0% · 纯白轨道', progress: 0, variant: 'orange', state: 'loading' },
+    { label: '25% · 运动橙 (#E5492B)', progress: 25, variant: 'orange', state: 'loading' },
+    { label: '60% · 学习蓝 (#203F91)', progress: 60, variant: 'blue', state: 'loading' },
+    { label: '90% · 自律金 (#E4A334)', progress: 90, variant: 'gold', state: 'loading' },
+    { label: '100% · 竞技墨 (#262624)', progress: 100, variant: 'ink', state: 'success' },
+    { label: 'Claude 赤陶 (#D97757)', progress: 68, variant: 'claude', state: 'loading' }
+  ];
+  document.getElementById('demo-rings-matrix').innerHTML = ringMilestones.map(m =>
+    PixelProgressBar.renderRingHtml({ label: m.label, progress: m.progress, variant: m.variant, state: m.state, size: 116, thickness: 18, showStatus: false })
+  ).join('');
+
+  const milestones = [
+    { label: '0% · 纯白轨道 #FFFFFF（完全隐藏填充、光晕与像素）', progress: 0, variant: 'orange', state: 'loading' },
+    { label: '5% · 极小进度（运动红橙 #E5492B）', progress: 5, variant: 'orange', state: 'loading' },
+    { label: '25% · 运动主题红橙 (#E5492B · 6行阶梯轮廓)', progress: 25, variant: 'orange', state: 'loading' },
+    { label: '60% · 学习主题深蓝 (#203F91 · 主体流光与错峰尾迹)', progress: 60, variant: 'blue', state: 'loading' },
+    { label: '90% · 自律主题琥珀金 (#E4A334 · 严格对齐 90% 边界)', progress: 90, variant: 'gold', state: 'loading' },
+    { label: '100% · 竞技主题墨黑 (#262624 · 完整终态)', progress: 100, variant: 'ink', state: 'success' }
+  ];
+  document.getElementById('demo-milestones').innerHTML = milestones.map(m =>
+    PixelProgressBar.renderHtml(m)
+  ).join('');
+
+  const stateSamples = [
+    { label: 'paused · 保留 62% 断点，停止装饰动画', progress: 62, state: 'paused' },
+    { label: 'error · 保留 38% 断点并明确提示异常', progress: 38, state: 'error', errorText: '同步校对中断：已保留 38% 真实进度等待重试' },
+    { label: 'indeterminate · 仅在真实进度未知时启用', progress: 0, state: 'indeterminate' }
+  ];
+  document.getElementById('demo-states').innerHTML = stateSamples.map(s =>
+    PixelProgressBar.renderHtml(s)
+  ).join('');
+
+  PixelProgressBar.mount(document.getElementById('demo-narrow'), {
+    label: '窄容器 260px · 60% 示例',
+    progress: 60,
+    width: '100%',
+    height: 24,
+    state: 'loading'
+  });
+
+  const pgOpts = {
+    label: '可交互真实进度条（支持 250ms 平滑过渡）',
+    progress: 60,
+    height: 24,
+    state: 'loading',
+    errorText: '连接超时：保留当前断点'
+  };
+  const pgEl = PixelProgressBar.mount(document.getElementById('demo-playground'), pgOpts);
+  let pgRingEl = PixelProgressBar.mountRing(document.getElementById('demo-playground-ring'), {
+    progress: pgOpts.progress,
+    size: 120,
+    thickness: pgOpts.height,
+    state: pgOpts.state,
+    label: '同步环形预览',
+    showStatus: false
+  });
+
+  function syncPlayground() {
+    PixelProgressBar.update(pgEl, pgOpts);
+    pgRingEl = PixelProgressBar.updateRing(pgRingEl, {
+      progress: pgOpts.progress,
+      size: 120,
+      thickness: pgOpts.height,
+      state: pgOpts.state,
+      label: '同步环形预览',
+      showStatus: false
+    });
+    const px = Math.max(2, Math.round(pgOpts.height / 6));
+    document.getElementById('ctrl-pct-val').textContent = pgOpts.progress + '%';
+    document.getElementById('ctrl-h-val').textContent = pgOpts.height + 'px (' + px + 'px 像素 · 6 行)';
+    document.getElementById('ctrl-state-val').textContent = pgOpts.state;
+    document.getElementById('ctrl-pct').value = String(pgOpts.progress);
+    document.querySelectorAll('#preset-btns .btn').forEach(b => b.classList.toggle('active', Number(b.dataset.pct) === pgOpts.progress));
+    document.querySelectorAll('#height-btns .btn').forEach(b => b.classList.toggle('active', Number(b.dataset.h) === pgOpts.height));
+    document.querySelectorAll('#state-btns .btn').forEach(b => b.classList.toggle('active', b.dataset.state === pgOpts.state));
+
+    const trk = pgEl.querySelector('.ppb-track');
+    const now = trk.getAttribute('aria-valuenow');
+    document.getElementById('a11y-dump').textContent =
+      'role="' + trk.getAttribute('role') + '" | aria-valuemin="0" | aria-valuemax="100" | '
+      + (now === null ? 'aria-valuenow=<omitted>' : 'aria-valuenow="' + now + '"')
+      + ' | state="' + pgOpts.state + '" | width-pct="' + (pgOpts.state === 'success' ? '100' : pgOpts.progress) + '%"';
+  }
+  syncPlayground();
+
+  document.getElementById('ctrl-pct').addEventListener('input', function (e) {
+    pgOpts.progress = Number(e.target.value);
+    if (pgOpts.state === 'indeterminate' || pgOpts.state === 'success') pgOpts.state = 'loading';
+    syncPlayground();
+  });
+  document.getElementById('preset-btns').addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-pct]');
+    if (!btn) return;
+    pgOpts.progress = Number(btn.dataset.pct);
+    if (pgOpts.state === 'indeterminate' || pgOpts.state === 'success') pgOpts.state = 'loading';
+    syncPlayground();
+  });
+  document.getElementById('height-btns').addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-h]');
+    if (!btn) return;
+    pgOpts.height = Number(btn.dataset.h);
+    syncPlayground();
+  });
+  document.getElementById('state-btns').addEventListener('click', function (e) {
+    const btn = e.target.closest('[data-state]');
+    if (!btn) return;
+    pgOpts.state = btn.dataset.state;
+    if (pgOpts.state === 'success') pgOpts.progress = 100;
+    syncPlayground();
+  });
+})();
+</script>
+</body>
+</html>
