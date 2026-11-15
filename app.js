@@ -87,7 +87,7 @@ function seed() {
 
 function hydrateState(raw) {
   const base = seed();
-  if (!raw || raw.version !== 1 || !Array.isArray(raw.records)) return base;
+  if (!raw || (raw.version !== 1 && raw.schemaVersion !== 2) || !Array.isArray(raw.records)) return base;
   const userName = raw.name || base.name;
   let members = Array.isArray(raw.members) ? raw.members.filter(Boolean) : [];
   let records = raw.records;
@@ -116,8 +116,12 @@ function hydrateState(raw) {
     studyDays: Array.isArray(raw.studyDays) ? raw.studyDays : base.studyDays,
     sportDatePlan: raw.sportDatePlan && typeof raw.sportDatePlan === 'object' ? { ...raw.sportDatePlan } : {},
     studyDatePlan: raw.studyDatePlan && typeof raw.studyDatePlan === 'object' ? { ...raw.studyDatePlan } : {},
-    studyTargets: Array.isArray(raw.studyTargets) && raw.studyTargets.length ? raw.studyTargets : base.studyTargets,
-    habits: Array.isArray(raw.habits) && raw.habits.length ? raw.habits : base.habits,
+    studyTargets: (Array.isArray(raw.studyTargets) && raw.studyTargets.length ? raw.studyTargets : base.studyTargets).map(t => {
+      const linkedH = studyRecords.filter(r => r.person === userName && r.targetId === t.id).reduce((s, r) => s + (Number(r.hours) || 0), 0);
+      const baseH = Number.isFinite(t.baseHours) ? t.baseHours : Math.max(0, Math.round(((Number(t.doneHours) || 0) - linkedH) * 100) / 100);
+      return { ...t, archived: Boolean(t.archived), baseHours: baseH };
+    }),
+    habits: (Array.isArray(raw.habits) && raw.habits.length ? raw.habits : base.habits).map(h => ({ ...h, archived: Boolean(h.archived) })),
     habitLogs: raw.habitLogs && typeof raw.habitLogs === 'object' ? raw.habitLogs : base.habitLogs,
     memberHabitLogs
   };
@@ -127,7 +131,7 @@ let state, _rawStored = null;
 try {
   _rawStored = JSON.parse(localStorage.getItem(STORE) || 'null');
   state = demo ? seed() : hydrateState(_rawStored);
-  if (!demo && _rawStored && !_rawStored.soloPurged) persist();
+  if (!demo && _rawStored && !_rawStored.soloPurged && typeof localStorage !== 'undefined') { try { localStorage.setItem(STORE, JSON.stringify(state)); } catch {} }
 } catch {
   state = seed();
 }
@@ -137,7 +141,12 @@ if (demo) {
   state.habitLogs[today()] = ['hb-1', 'hb-2', 'hb-3', 'hb-4'];
 }
 
-let view = params.get('view') || 'home';
+const POMO_KEY = STORE + '_pomo_session';
+const PENDING_OPS_KEY = STORE + '_pending_ops';
+const VALID_VIEWS = ['home', 'progress', 'plan', 'study', 'ranking', 'achievements', 'records', 'people'];
+const hashView = (typeof location !== 'undefined' && location.hash) ? location.hash.replace(/^#/, '').split('?')[0] : '';
+let view = params.get('view') || (VALID_VIEWS.includes(hashView) ? hashView : 'home');
+let showArchivedTargets = false, showArchivedHabits = false, pendingImportBackup = null;
 let rankPeriod = '本月', rankMetric = '综合积分', progressTab = '双轨总览', chartType = '7天趋势', achFilter = '全部';
 let recordKindFilter = 'all'; // 'all' | 'sport' | 'study'
 let recordSelectKey = ''; // 'sport:id' or 'study:id'
@@ -154,10 +163,43 @@ let chartScaleMode = 'cum'; // 'cum' | 'single'
 let chartPersonFilter = 'all'; // 'all' or specific competitor name
 let selectedNodeKey = ''; // 'sport:1004' or 'study:2004'
 
-// Pomodoro timer state for Study Goals page
-let pomodoroTotal = 25 * 60, pomodoroLeft = 25 * 60, pomodoroRunning = false, pomodoroTick = null, pomodoroTargetId = state.studyTargets[0]?.id || 'st-1';
+// Real-timestamp Pomodoro timer state (persisted across reloads)
+function loadPomoSession() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(POMO_KEY) || 'null');
+    if (raw && typeof raw === 'object' && Number.isFinite(raw.totalSec)) return raw;
+  } catch {}
+  return {
+    sessionId: 'pomo-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
+    targetId: state.studyTargets[0]?.id || 'st-1',
+    totalSec: 25 * 60,
+    state: 'idle',
+    startedAt: 0,
+    pausedAccumMs: 0,
+    pauseStartedAt: 0,
+    completedAt: 0,
+    errorMsg: ''
+  };
+}
+let pomoSession = loadPomoSession();
+function savePomoSession() { try { localStorage.setItem(POMO_KEY, JSON.stringify(pomoSession)); } catch {} }
+function getPomoElapsedSec() {
+  if (pomoSession.state === 'idle') return 0;
+  if (pomoSession.state === 'completed' || pomoSession.state === 'saving' || pomoSession.state === 'saved') {
+    if (pomoSession.completedAt && pomoSession.startedAt) {
+      return Math.max(0, Math.round((pomoSession.completedAt - pomoSession.startedAt - (pomoSession.pausedAccumMs || 0)) / 1000));
+    }
+    return pomoSession.totalSec;
+  }
+  const refNow = pomoSession.state === 'paused' ? (pomoSession.pauseStartedAt || Date.now()) : Date.now();
+  const ms = Math.max(0, refNow - (pomoSession.startedAt || refNow) - (pomoSession.pausedAccumMs || 0));
+  return Math.min(pomoSession.totalSec, Math.floor(ms / 1000));
+}
+function getPomoLeftSec() { return Math.max(0, pomoSession.totalSec - getPomoElapsedSec()); }
+let pomodoroTotal = pomoSession.totalSec, pomodoroLeft = getPomoLeftSec(), pomodoroRunning = pomoSession.state === 'running', pomodoroTick = null;
+let pomodoroTargetId = pomoSession.targetId || state.studyTargets[0]?.id || 'st-1';
 
-let quoteIndex = 0, quoteTimer, step = 0, draft = null, modalPreviousFocus = null, toastTimer, dialogSave = null;
+let quoteIndex = params.has('quote') ? Number(params.get('quote')) : 1, quoteTimer, step = 0, draft = null, modalPreviousFocus = null, toastTimer, dialogSave = null;
 if (!['home', 'progress', 'plan', 'study', 'ranking', 'achievements', 'records', 'people'].includes(view)) view = 'home';
 
 const nav = [
@@ -208,13 +250,38 @@ const hasLocalStorage = (() => {
   try { const k = '__rl_chk'; localStorage.setItem(k, '1'); localStorage.removeItem(k); return true; } catch { return false; }
 })();
 
-/* ---------- Dual-Mode Server Sync Client (Online REST+SSE + Offline localStorage) ---------- */
+/* ---------- Dual-Mode Server Sync Client (Online REST+SSE + PendingOps + Structured Errors) ---------- */
 let isServerOnline = false;
 let currentRoomCode = params.get('room') || (hasLocalStorage ? (() => { try { return localStorage.getItem('running_room_code'); } catch { return null; } })() : null) || 'default';
 let sseSource = null;
+let lastSyncError = '';
+let pendingOps = (() => {
+  try { const a = JSON.parse(localStorage.getItem(PENDING_OPS_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; }
+})();
+function savePendingOps() { try { localStorage.setItem(PENDING_OPS_KEY, JSON.stringify(pendingOps)); } catch {} }
+function nextOpId(prefix = 'op') { return prefix + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8); }
+function removePendingOp(opId) { pendingOps = pendingOps.filter(x => x.operationId !== opId); savePendingOps(); }
+async function flushPendingOps() {
+  if (!isServerOnline || !pendingOps.length) return;
+  const copy = [...pendingOps];
+  for (const op of copy) {
+    const res = await serverFetch(op.endpoint, op.method || 'POST', op.payload);
+    if (res && res.ok) {
+      removePendingOp(op.operationId);
+      lastSyncError = '';
+    } else if (res && res.status >= 400 && res.status < 500) {
+      removePendingOp(op.operationId);
+      lastSyncError = res.error || '数据校验未通过';
+    } else {
+      lastSyncError = (res && res.error) || '网络连接失败';
+      break;
+    }
+  }
+}
 
 async function checkServerHealth() {
-  if (typeof location !== 'undefined' && (location.hostname.endsWith('.github.io') || location.protocol === 'file:' || location.origin === 'null' || window.mausbot)) return false;
+  if (embedded || demo) return false;
+  if (typeof location !== 'undefined' && (location.protocol === 'file:' || location.origin === 'null' || window.mausbot)) return false;
   try {
     const res = await fetch('/api/health?roomCode=' + encodeURIComponent(currentRoomCode), { cache: 'no-cache' });
     if (!res.ok) return false;
@@ -226,7 +293,7 @@ async function checkServerHealth() {
 }
 
 async function serverFetch(endpoint, method = 'GET', data = null) {
-  if (!isServerOnline) return null;
+  if (!isServerOnline) return { ok: false, offline: true, status: 0, error: '当前处于离线模式' };
   const headers = {
     'X-Room-Code': currentRoomCode,
     'X-Person': encodeURIComponent(state?.name || '')
@@ -240,12 +307,31 @@ async function serverFetch(endpoint, method = 'GET', data = null) {
   }
   try {
     const res = await fetch('/api' + endpoint, opts);
-    if (!res.ok) return null;
-    return await res.json();
+    let json = {};
+    try { json = await res.json(); } catch {}
+    if (!res.ok) {
+      const errMsg = json.error || json.message || ('请求失败 (' + res.status + ')');
+      if (method !== 'GET') lastSyncError = errMsg;
+      return { ok: false, success: false, status: res.status, error: errMsg, ...json };
+    }
+    if (method !== 'GET') lastSyncError = '';
+    if (json && typeof json === 'object' && !Array.isArray(json)) {
+      return Object.assign(json, { ok: true, status: res.status });
+    }
+    return { ok: true, status: res.status, data: json };
   } catch (e) {
     console.warn('[ServerSync] API call failed:', endpoint, e);
-    return null;
+    if (method !== 'GET') lastSyncError = '网络连接异常';
+    return { ok: false, success: false, status: 0, error: '无法连接到服务器' };
   }
+}
+
+function hasActiveEditingState() {
+  if (draft) return true;
+  if ($('#editor')?.open) return true;
+  const ae = document.activeElement;
+  if (ae && ['INPUT', 'TEXTAREA', 'SELECT'].includes(ae.tagName)) return true;
+  return false;
 }
 
 function initSSE() {
@@ -253,12 +339,15 @@ function initSSE() {
   if (sseSource) sseSource.close();
   try {
     sseSource = new EventSource('/api/events?roomCode=' + encodeURIComponent(currentRoomCode));
-    sseSource.addEventListener('state_change', async (e) => {
-      console.log('[SSE] Remote change event received:', e.data);
+    sseSource.addEventListener('state_change', async () => {
+      if (hasActiveEditingState() || pendingOps.length > 0) {
+        toast('收到远端数据更新，保存当前编辑后自动同步');
+        return;
+      }
       const remoteState = await serverFetch('/state');
-      if (remoteState) {
+      if (remoteState && remoteState.ok) {
         state = hydrateState(remoteState);
-        try { localStorage.setItem(STORE, JSON.stringify(state)); } catch {}
+        persistLocalOnly();
         render(true);
       }
     });
@@ -274,29 +363,37 @@ function initSSE() {
 
 async function syncLocalToCloud() {
   if (!isServerOnline) { toast('当前处于离线模式，无法同步至云端'); return; }
-  try {
-    const res = await serverFetch('/import', 'POST', state);
-    if (res && res.success) {
-      toast('本地全部数据已成功迁移同步至云端 SQLite！');
-      const latest = await serverFetch('/state');
-      if (latest) { state = hydrateState(latest); render(true); }
-    } else {
-      toast('同步失败，请检查网络或后端状态。');
+  await flushPendingOps();
+  if (lastSyncError) { toast('部分变更同步失败：' + lastSyncError); return; }
+  const res = await serverFetch('/import', 'POST', state);
+  if (res && res.ok) {
+    toast('本地全部数据已成功迁移同步至云端 SQLite！');
+    const latest = await serverFetch('/state');
+    if (latest && latest.ok) {
+      state = hydrateState(latest);
+      persistLocalOnly();
+      render(true);
     }
-  } catch (err) {
-    toast('同步失败：' + err.message);
+  } else {
+    toast('同步失败：' + (res?.error || '请检查网络或后端状态'));
   }
 }
 
-function persist() {
+function persistLocalOnly() {
   if (demo || !hasLocalStorage) return;
   try { localStorage.setItem(STORE, JSON.stringify(state)); } catch { toast('浏览器存储空间不足，请先导出备份。'); }
-  if (isServerOnline) {
+}
+
+function persist(syncPlans = false) {
+  persistLocalOnly();
+  if (syncPlans && isServerOnline) {
     serverFetch('/plans', 'PATCH', {
       goal: state.goal,
       days: state.days,
       studyGoal: state.studyGoal,
-      studyDays: state.studyDays
+      studyDays: state.studyDays,
+      sportDatePlan: state.sportDatePlan,
+      studyDatePlan: state.studyDatePlan
     });
   }
 }
@@ -333,13 +430,29 @@ function isStudyPlanned(dk) {
   return state.studyDays.includes(new Date(dk + 'T12:00:00').getDay());
 }
 
+function activeHabits() { return state.habits.filter(h => !h.archived); }
+function activeStudyTargets() { return state.studyTargets.filter(t => !t.archived); }
+function targetStats(t, person = state.name) {
+  const linked = state.studyRecords.filter(r => r.person === person && r.targetId === t.id);
+  const recTotal = Math.round(totalStudy(linked) * 100) / 100;
+  const baseH = Number(t.baseHours) || 0;
+  return { recTotal, baseH, cumulative: Math.round((baseH + recTotal) * 10) / 10, count: linked.length };
+}
+function recomputeStudyTargetDoneHours() {
+  state.studyTargets.forEach(t => {
+    const st = targetStats(t, state.name);
+    if (t.baseHours !== undefined || st.recTotal > 0) t.doneHours = Math.max(st.cumulative, 0);
+  });
+}
+
 function habitRateForPerson(name = state.name, dk = today()) {
-  const totalH = Math.max(1, state.habits.length);
+  const list = activeHabits();
+  const totalH = Math.max(1, list.length);
   const doneIds = name === state.name
     ? (state.habitLogs[dk] || [])
     : (state.memberHabitLogs?.[name]?.[dk] || []);
-  const validDone = state.habits.filter(h => doneIds.includes(h.id)).length;
-  return { done: validDone, total: state.habits.length, pct: Math.round(validDone / totalH * 100) };
+  const validDone = list.filter(h => doneIds.includes(h.id)).length;
+  return { done: validDone, total: list.length, pct: Math.round(validDone / totalH * 100) };
 }
 function habitRateForDate(dk = today()) { return habitRateForPerson(state.name, dk); }
 function weeklyHabitPct(name = state.name) {
@@ -525,30 +638,32 @@ function cta(coral = false) {
 }
 
 const quotes = [
-  ['SMALL STEPS.<br><em>EVERY</em> DAY.', '', '运动与学习，每天都往前走一点。'],
-  ['DISCIPLINE IS<br><em>FREEDOM.</em>', 'orange', '先迈开双腿，再打开书页，把自律握在手里。'],
-  ['SHARP MIND.<br>STRONG <em>BODY.</em>', 'black', '清晨跑出多巴胺，白昼沉入深度学习。'],
-  ['ONE MORE<br><em>CHAPTER.</em>', '', '多跑一公里，多啃透一页笔记。'],
-  ['EARN YOUR<br><em>PEACE.</em>', 'orange', '把汗水和思考留给今天，安心睡个好觉。'],
-  ['YOUR PACE.<br><em>YOUR</em> FUTURE.', 'black', '不盲从他人节奏，跑赢昨天的自己。'],
-  ['SHOW UP<br><em>BEFORE</em> DAWN.', '', '当多数人还在犹豫，你已经跑过第一个弯道。'],
-  ['DEEP WORK.<br><em>ZERO</em> EXCUSES.', 'orange', '关掉干扰，让每一分钟专注都留下作品。'],
-  ['RUN WITH<br><em>RIVALS.</em>', 'black', '和厉害的伙伴同频竞技，自律会变得更有力量。'],
-  ['CONSISTENCY<br>BEATS <em>TALENT.</em>', '', '长期主义从不喧哗，时间会给坚持发奖牌。'],
-  ['SWEAT NOW.<br><em>SHINE</em> LATER.', 'orange', '跑道上咽下的每一口喘息，都会变成底气。'],
-  ['READ HARD.<br>THINK <em>CLEAR.</em>', 'black', '运动让你精力充沛，阅读让你眼神清澈。'],
-  ['START EARLY.<br><em>FINISH</em> STRONG.', '', '早起完成当天最重要的两件事，余生尽是从容。'],
-  ['BUILD HABITS.<br><em>SHAPE</em> DESTINY.', 'orange', '今天的四项微习惯，拼出一年后全新的自己。'],
-  ['KEEP MOVING.<br><em>NO</em> SHORTCUTS.', 'black', '没有白跑的步数，也没有白写的每一页思考。']
+  ['SMALL STEPS.<br><em>EVERY</em> DAY.', 'flame', '不积跬步，无以至千里'],
+  ['DISCIPLINE IS<br><em>FREEDOM.</em>', 'lightning', '自律的尽头，是真正的自由'],
+  ['SHARP MIND.<br>STRONG <em>BODY.</em>', 'black', '头脑清醒，体魄强健'],
+  ['ONE MORE<br><em>CHAPTER.</em>', 'flame', '再多学一章，再多跑一程'],
+  ['EARN YOUR<br><em>PEACE.</em>', 'lightning', '流过汗与墨，才配得上从容'],
+  ['YOUR PACE.<br><em>YOUR</em> FUTURE.', 'black', '按自己的配速，跑向自己的未来'],
+  ['SHOW UP<br><em>BEFORE</em> DAWN.', 'flame', '在天亮之前出发，在喧嚣之前沉思'],
+  ['DEEP WORK.<br><em>ZERO</em> EXCUSES.', 'lightning', '深度专注，绝不拖延'],
+  ['RUN WITH<br><em>RIVALS.</em>', 'black', '与强手并肩，在竞技中共同进化'],
+  ['CONSISTENCY<br>BEATS <em>TALENT.</em>', 'flame', '持续执行，远胜一时天赋'],
+  ['SWEAT NOW.<br><em>SHINE</em> LATER.', 'flame', '此刻流汗，来日闪光'],
+  ['READ HARD.<br>THINK <em>CLEAR.</em>', 'lightning', '深读硬啃，思考清澈'],
+  ['START EARLY.<br><em>FINISH</em> STRONG.', 'flame', '清晨启程，强势收官'],
+  ['BUILD HABITS.<br><em>SHAPE</em> DESTINY.', 'lightning', '习惯成自然，日常塑命运'],
+  ['KEEP MOVING.<br><em>NO</em> SHORTCUTS.', 'black', '步履不停，没有捷径']
 ];
 
 function quoteMarkup() {
   const idx = quoteIndex % quotes.length;
   const q = quotes[idx];
-  const dots = quotes.map((_, i) => '<button type="button" class="quote-dot ' + (i === idx ? 'active' : '') + '" data-quote="' + i + '" aria-label="切换到第 ' + (i + 1) + ' 句语录"><i class="quote-dot-fill"></i></button>').join('');
-  return '<section class="quote ' + q[1] + '" id="quote" role="button" tabindex="0" aria-label="切换今日语录">'
-    + '<canvas class="pixel-matrix-canvas" data-pixel-theme="' + (q[1] || 'blue') + '" aria-hidden="true"></canvas>'
-    + '<div class="quote-meta"><span>[ 今日宣言 · PIXEL.MATRIX_0' + pad(idx + 1) + ' ]</span><span>' + pad(idx + 1) + ' / ' + pad(quotes.length) + '</span></div>'
+  const theme = q[1] || 'lightning';
+  const themeTag = theme === 'flame' ? 'PIXEL.FLAME' : theme === 'lightning' ? 'PIXEL.LIGHTNING' : 'PIXEL.MATRIX';
+  const dots = quotes.map((_, i) => '<button type="button" class="quote-dot ' + (i === idx ? 'active' : '') + '" data-quote="' + i + '" aria-label="切换到第 ' + (i + 1) + ' 句宣言"><i class="quote-dot-fill"></i></button>').join('');
+  return '<section class="quote ' + theme + '" id="quote" role="button" tabindex="0" aria-label="切换每日宣言卡片">'
+    + '<canvas class="pixel-matrix-canvas" data-pixel-theme="' + theme + '" aria-hidden="true"></canvas>'
+    + '<div class="quote-meta"><span>[ 今日宣言 · ' + themeTag + '_0' + pad(idx + 1) + ' ]</span><div class="quote-meta-right"><div class="quote-tex-switch"><button type="button" class="quote-tex-btn ' + (theme === 'flame' ? 'active' : '') + '" data-quote="0">🔥 火焰</button><button type="button" class="quote-tex-btn ' + (theme === 'lightning' ? 'active' : '') + '" data-quote="1">⚡ 闪电</button></div><span>' + pad(idx + 1) + ' / ' + pad(quotes.length) + '</span></div></div>'
     + '<h2 class="mask-reveal">' + q[0] + '</h2>'
     + '<div class="quote-foot"><span class="quote-sub">' + q[2] + '</span><div class="quote-dots">' + dots + '</div></div>'
     + '<div class="pixel-dither-edge" aria-hidden="true"></div>'
@@ -645,7 +760,7 @@ function homeBlueprintStudySvg() {
     + '<defs><pattern id="study-minor-grid" width="22" height="22" patternUnits="userSpaceOnUse"><path d="M22 0H0V22" fill="none" stroke="#9997" stroke-width=".25"/></pattern>'
     + '<linearGradient id="study-dial-grad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#203f91"/><stop offset="55%" stop-color="#4774eb"/><stop offset="100%" stop-color="#e5492b"/></linearGradient>'
     + '<pattern id="study-px-overlay" width="6" height="6" patternUnits="userSpaceOnUse"><rect x="0" y="0" width="3" height="3" fill="#f7f6ef" opacity=".24"/><rect x="3" y="3" width="3" height="3" fill="#e4a334" opacity=".24"/></pattern></defs>'
-    + '<rect x="8" y="3" width="424" height="210" fill="url(#study-minor-grid)" opacity=".32" style="pointer-events:none"/>'
+    + '<rect x="8" y="3" width="424" height="210" fill="url(#study-minor-grid)" opacity=".32" pointer-events="none" style="pointer-events:none"/>'
     + '<path class="cross" d="M12 7V19M6 13H18M428 7V19M422 13H434"/>'
     + dialPanel + rowsHtml + '</svg>';
 }
@@ -1589,24 +1704,39 @@ function progress() {
   const curveTab = solo ? '双轨线性表' : '多人竞速曲线';
   const activeProgTab = (progressTab === '双轨线性表' || progressTab === '多人竞速曲线') ? curveTab : progressTab;
 
+  const sportRem = Math.max(0, state.goal - mt), studyRem = Math.max(0, state.studyGoal - stH);
   return '<div class="editorial-page">'
     + '<div class="hero-split">'
-    + '<section class="poster-hero ' + ((doneSport && doneStudy) ? 'poster-orange' : 'poster-blue') + '" data-wm="' + Math.round((sportPct + studyPct) / 2) + '%">'
-    + '<div class="poster-meta"><span>[ 02 / ' + (solo ? '运动 · 学习 · 双轨精进' : '运动 · 学习 · 多人竞速') + ' ]</span><span>' + weekStart().slice(5).replace('-', '.') + ' 起</span></div>'
+    + '<section class="poster-hero poster-flame" data-wm="' + sportPct + '%">'
+    + '<div class="poster-meta"><span>[ 02-A / 运动目标 · FLAME PIXEL ]</span><span>每周 ' + state.days.length + ' 跑 · ' + (doneSport ? '今日已跑 ✓' : '今日待跑') + '</span></div>'
     + '<div class="plan-hero-row">'
-    + '<div class="poster-big-stat"><small>双轨总进度</small><strong>' + Math.round((sportPct + studyPct) / 2) + '<em>%</em></strong></div>'
+    + '<div class="poster-big-stat"><small>跑量达成</small><strong>' + sportPct + '<em>%</em></strong></div>'
     + '<div class="poster-body">'
-    + '<h2>' + ((doneSport && doneStudy) ? 'DOUBLE<br><em>DONE.</em>' : 'RUN &<br><em>STUDY.</em>') + '</h2>'
-    + '<p class="poster-cn">已跑 ' + mt.toFixed(1) + ' km (' + sportPct + '%) · 已学 ' + stH.toFixed(1) + ' h (' + studyPct + '%)</p>'
+    + '<h2>' + mt.toFixed(1) + ' <em>/ ' + state.goal + ' KM</em></h2>'
+    + '<p class="poster-cn">已跑 ' + mt.toFixed(1) + ' 公里 · ' + (sportRem ? '距目标还差 ' + sportRem.toFixed(1) + ' km 继续冲刺' : '本月跑量目标已达成 ✓') + '</p>'
     + '</div></div>'
     + '<div class="poster-kpis poster-kpis-4">'
-    + '<div><small>运动进度</small><strong>' + sportPct + '<em>%</em></strong></div>'
-    + '<div><small>本月跑量</small><strong>' + mt.toFixed(1) + '<em>KM</em></strong></div>'
-    + '<div><small>本月学习</small><strong>' + stH.toFixed(1) + '<em>H</em></strong></div>'
-    + '<div><small>学习进度</small><strong>' + studyPct + '<em>%</em></strong></div>'
+    + '<div><small>完成率</small><strong>' + sportPct + '<em>%</em></strong></div>'
+    + '<div><small>本月已跑</small><strong>' + mt.toFixed(1) + '<em>KM</em></strong></div>'
+    + '<div><small>月度目标</small><strong>' + state.goal + '<em>KM</em></strong></div>'
+    + '<div><small>剩余里程</small><strong>' + sportRem.toFixed(1) + '<em>KM</em></strong></div>'
     + '</div>'
     + '</section>'
-    + progressBlueprint(sportPct, studyPct, habitPct, mt, stH, pacePct)
+    + '<section class="poster-hero poster-lightning" data-wm="' + studyPct + '%">'
+    + '<div class="poster-meta"><span>[ 02-B / 学习目标 · LIGHTNING PIXEL ]</span><span>每周 ' + state.studyDays.length + ' 学 · ' + (doneStudy ? '今日已学 ✓' : '今日待学') + '</span></div>'
+    + '<div class="plan-hero-row">'
+    + '<div class="poster-big-stat"><small>学时达成</small><strong>' + studyPct + '<em>%</em></strong></div>'
+    + '<div class="poster-body">'
+    + '<h2>' + stH.toFixed(1) + ' <em>/ ' + state.studyGoal + ' H</em></h2>'
+    + '<p class="poster-cn">已学 ' + stH.toFixed(1) + ' 小时 · ' + (studyRem ? '距目标还差 ' + studyRem.toFixed(1) + ' h 保持专注' : '本月学习目标已达成 ✓') + '</p>'
+    + '</div></div>'
+    + '<div class="poster-kpis poster-kpis-4">'
+    + '<div><small>完成率</small><strong>' + studyPct + '<em>%</em></strong></div>'
+    + '<div><small>本月已学</small><strong>' + stH.toFixed(1) + '<em>H</em></strong></div>'
+    + '<div><small>月度目标</small><strong>' + state.studyGoal + '<em>H</em></strong></div>'
+    + '<div><small>剩余学时</small><strong>' + studyRem.toFixed(1) + '<em>H</em></strong></div>'
+    + '</div>'
+    + '</section>'
     + '</div>'
     + cta(true)
     + subtabs(['双轨总览', curveTab, '28天三合一热力', '7天双柱对比'], activeProgTab, 'progress-tab', 'equal', { '双轨总览': 'users', [curveTab]: 'chart', '28天三合一热力': 'calendar', '7天双柱对比': 'pulse' })
@@ -1710,7 +1840,7 @@ function plan() {
   const presets = [100, 150, 200, 245, 300];
 
   return '<div class="plan-layout"><div class="plan-left">'
-    + '<section class="poster-hero poster-gold poster-compact" data-wm="' + p + '%">'
+    + '<section class="poster-hero poster-flame poster-compact" data-wm="' + p + '%">'
     + '<div class="poster-meta"><span>[ 03 / 运动目标与多人竞速 ]</span><span>' + esc(state.name) + ' · 每周 ' + state.days.length + ' 跑</span></div>'
     + '<div class="plan-hero-row">'
     + '<div class="poster-big-stat"><small>本月运动进度</small><strong>' + p + '<em>%</em></strong></div>'
@@ -1743,11 +1873,16 @@ function study() {
   const remaining = Math.max(0, state.studyGoal - stH);
   const presets = [40, 80, 120, 160, 200];
 
-  const targetCards = state.studyTargets.map(t => {
+  const archivedTargetCount = state.studyTargets.filter(t => t.archived).length;
+  const visibleTargets = showArchivedTargets ? state.studyTargets : activeStudyTargets();
+  const targetCards = visibleTargets.map(t => {
     const pct = Math.min(100, Math.round(t.doneHours / Math.max(1, t.targetHours) * 100));
-    return '<article class="study-target-card" style="--accent:' + esc(t.color) + '">'
-      + '<div class="st-top"><span class="st-cat">' + esc(t.category) + ' · ' + esc(t.deadline) + '</span>'
-      + '<button class="st-del" data-action="del-study-target" data-value="' + esc(t.id) + '" aria-label="删除目标">×</button></div>'
+    return '<article class="study-target-card ' + (t.archived ? 'is-archived' : '') + '" style="--accent:' + esc(t.color) + '">'
+      + '<div class="st-top"><span class="st-cat">' + esc(t.category) + ' · ' + esc(t.deadline) + (t.archived ? ' · 已归档' : '') + '</span>'
+      + '<span class="st-top-actions">'
+      + '<button class="st-act" data-action="edit-study-target" data-value="' + esc(t.id) + '" title="编辑目标" aria-label="编辑目标">✎</button>'
+      + '<button class="st-act" data-action="archive-study-target" data-value="' + esc(t.id) + '" title="' + (t.archived ? '恢复在研' : '归档目标') + '">' + (t.archived ? '恢复' : '归档') + '</button>'
+      + '<button class="st-del" data-action="del-study-target" data-value="' + esc(t.id) + '" aria-label="删除目标">×</button></span></div>'
       + '<h4>' + esc(t.title) + '</h4>'
       + '<div class="st-progress-row">' + PixelProgressBar.renderHtml({ progress: pct, height: 12, width: '100%', bare: true, color: t.color, state: pct >= 100 ? 'success' : 'loading', className: 'st-ppb', ariaLabel: t.title + ' 学习进度' }) + '<span>' + t.doneHours.toFixed(1) + ' / ' + t.targetHours + 'h (' + pct + '%)</span></div>'
       + '<div class="st-actions">'
@@ -1755,10 +1890,11 @@ function study() {
       + '<button data-action="quick-study" data-value="' + esc(t.id) + ':1">+1.0h</button>'
       + '<button class="st-checkin-btn" data-action="checkin" data-mode="study" data-target="' + esc(t.id) + '">专注打卡 →</button>'
       + '</div></article>';
-  }).join('');
+  }).join('')
+  + (archivedTargetCount ? '<button type="button" class="archived-toggle" data-action="toggle-archived-targets">' + (showArchivedTargets ? '收起已归档目标 (' + archivedTargetCount + ')' : '查看已归档目标 (' + archivedTargetCount + ')') + '</button>' : '');
 
   return '<div class="plan-layout study-layout"><div class="plan-left">'
-    + '<section class="poster-hero poster-blue poster-compact" data-wm="' + p + '%">'
+    + '<section class="poster-hero poster-lightning poster-compact" data-wm="' + p + '%">'
     + '<div class="poster-meta"><span>[ 04 / 学习目标与多人竞学 ]</span><span>' + state.studyTargets.length + ' 个在研目标 · 每周 ' + state.studyDays.length + ' 天</span></div>'
     + '<div class="plan-hero-row">'
     + '<div class="poster-big-stat"><small>本月学习进度</small><strong>' + p + '<em>%</em></strong></div>'
@@ -1782,14 +1918,16 @@ function study() {
     + '</div><div class="plan-right">'
     + '<div class="pomodoro-panel">'
     + '<div class="pomo-head"><span>[ FOCUS ENGINE · 番茄专注计时 ]</span><div class="pomo-presets"><button class="' + (pomodoroTotal === 1500 ? 'active' : '') + '" data-action="pomo-set" data-value="25">25m</button><button class="' + (pomodoroTotal === 3000 ? 'active' : '') + '" data-action="pomo-set" data-value="50">50m</button></div></div>'
-    + '<div class="pomo-main"><strong id="pomo-clock">' + formatTimer(pomodoroLeft) + '</strong>'
+    + '<div class="pomo-main"><strong id="pomo-clock">' + formatTimer(getPomoLeftSec()) + '</strong>'
     + '<div class="pomo-ctrl">'
-    + '<button class="pomo-btn primary" data-action="pomo-toggle">' + (pomodoroRunning ? '暂停计时 Ⅱ' : '开始专注 ▶') + '</button>'
+    + '<button class="pomo-btn primary" data-action="pomo-toggle">' + (pomoSession.state === 'running' ? '暂停计时 Ⅱ' : pomoSession.state === 'paused' ? '继续专注 ▶' : '开始专注 ▶') + '</button>'
     + '<button class="pomo-btn" data-action="pomo-reset">重置 ↺</button>'
-    + '<button class="pomo-btn accent" data-action="pomo-finish">记入学习 ✓</button>'
+    + '<button class="pomo-btn accent" data-action="pomo-finish"' + (getPomoElapsedSec() < 60 || pomoSession.state === 'saving' ? ' disabled' : '') + '>' + (pomoSession.state === 'saving' ? '保存中…' : '记入学习 ✓') + '</button>'
     + '</div></div>'
+    + '<div class="pomo-hint" id="pomo-elapsed-hint">本轮已投入：' + Math.floor(getPomoElapsedSec() / 60) + '分' + (getPomoElapsedSec() % 60) + '秒 · 满 60 秒可精确记入</div>'
+    + (pomoSession.errorMsg ? '<div class="pomo-error">' + esc(pomoSession.errorMsg) + '</div>' : '')
     + '<div class="pomo-target-select"><label>当前关联目标：</label><select id="pomo-target-sel" data-action="pomo-target">'
-    + state.studyTargets.map(t => '<option value="' + esc(t.id) + '" ' + (t.id === pomodoroTargetId ? 'selected' : '') + '>' + esc(t.title) + '</option>').join('')
+    + (activeStudyTargets().length ? activeStudyTargets() : state.studyTargets).map(t => '<option value="' + esc(t.id) + '" ' + (t.id === pomodoroTargetId ? 'selected' : '') + '>' + esc(t.title) + '</option>').join('')
     + '</select></div></div>'
     + '<div class="blueprint-box">' + lineChart('study') + '</div>'
     + '<div class="next-run"><div class="next-run-left">' + icon('brain') + '<div><span>下一次深度专注</span><small>每周 ' + state.studyDays.length + ' 天 · 告别手机干扰</small></div></div><strong>' + nextStudy() + '</strong></div>'
@@ -1797,18 +1935,34 @@ function study() {
 }
 
 function nextRun() {
-  for (let i = runToday() ? 1 : 0; i < 15; i++) {
+  const now = chinaNow();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  for (let i = 0; i < 15; i++) {
     const d = chinaNow(); d.setDate(d.getDate() + i);
     const dk = dateKey(d);
-    if (isSportPlanned(dk)) return (i === 0 ? '今天' : i === 1 ? '明早' : i < 7 ? ('周' + '日一二三四五六'[d.getDay()]) : dk.slice(5)) + ' 06:10';
+    if (!isSportPlanned(dk)) continue;
+    if (i === 0) {
+      if (runToday()) continue;
+      if (nowMin > 6 * 60 + 10) return '今日已过计划点（可补跑）';
+      return '今天 06:10';
+    }
+    return (i === 1 ? '明早' : i < 7 ? ('周' + '日一二三四五六'[d.getDay()]) : dk.slice(5)) + ' 06:10';
   }
   return '自由跑 · 随时出发';
 }
 function nextStudy() {
-  for (let i = studyToday() ? 1 : 0; i < 15; i++) {
+  const now = chinaNow();
+  const nowMin = now.getHours() * 60 + now.getMinutes();
+  for (let i = 0; i < 15; i++) {
     const d = chinaNow(); d.setDate(d.getDate() + i);
     const dk = dateKey(d);
-    if (isStudyPlanned(dk)) return (i === 0 ? '今天' : i === 1 ? '明早' : i < 7 ? ('周' + '日一二三四五六'[d.getDay()]) : dk.slice(5)) + ' 08:30';
+    if (!isStudyPlanned(dk)) continue;
+    if (i === 0) {
+      if (studyToday()) continue;
+      if (nowMin > 8 * 60 + 30) return '今日已过计划点（可随时专注）';
+      return '今天 08:30';
+    }
+    return (i === 1 ? '明早' : i < 7 ? ('周' + '日一二三四五六'[d.getDay()]) : dk.slice(5)) + ' 08:30';
   }
   return '随时开卷';
 }
@@ -1858,7 +2012,7 @@ function medals() {
   const runs = mine(), km = total(runs);
   const stRuns = mineStudy(), hrs = totalStudy(stRuns);
   const totalLikes = runs.reduce((s, r) => s + (r.likes || 0), 0) + stRuns.reduce((s, r) => s + (r.likes || 0), 0);
-  const perfectHabitDays = Object.keys(state.habitLogs).filter(dk => (state.habitLogs[dk] || []).length >= state.habits.length).length;
+  const perfectHabitDays = Object.keys(state.habitLogs).filter(dk => (state.habitLogs[dk] || []).length >= Math.max(1, activeHabits().length)).length;
   const bothTodayCount = [...new Set(runs.map(r => r.date))].filter(dk => stRuns.some(l => l.date === dk)).length;
 
   return [
@@ -2045,7 +2199,7 @@ function recordsPage() {
       + '<div class="record-numbers"><div><strong>' + r.minutes + '</strong><small>MIN / 分钟</small></div><div><strong>' + Math.max(1, Math.round(r.minutes / 25)) + '</strong><small>POMO / 番茄</small></div><div><strong>#' + (list.length - curIdx) + '</strong><small>LOG / 序号</small></div></div>'
       + '<p class="record-note">“' + esc(r.note || '专注一小时，胜过焦虑一整天。') + '”</p>'
       + (r.photo ? '<img class="record-photo" src="' + r.photo + '" alt="学习笔记照片">' : '')
-      + '<div class="record-actions"><button class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button><button class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
+      + '<div class="record-actions"><button class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button><button class="edit-btn" data-action="edit-unified" data-value="' + r._key + '">编辑</button><button class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
       + '</article>'
     : '<article class="record-card">'
       + '<div class="record-stamp"><span>RUN RECEIPT //' + pad(list.length - curIdx).padStart(3, '0') + '</span><span>' + icon('clock') + ' ' + r.date + ' · ' + r.time + '</span></div>'
@@ -2054,7 +2208,7 @@ function recordsPage() {
       + '<div class="record-numbers"><div><strong>' + r.minutes + '</strong><small>MIN / 时长</small></div><div><strong>' + pace(r) + '</strong><small>PACE / 配速</small></div><div><strong>#' + (list.length - curIdx) + '</strong><small>RUN / 序号</small></div></div>'
       + '<p class="record-note">“' + esc(r.note || '今天，也跑完了。') + '”</p>'
       + (r.photo ? '<img class="record-photo" src="' + r.photo + '" alt="本次晨跑照片">' : '')
-      + '<div class="record-actions"><button class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button><button class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
+      + '<div class="record-actions"><button class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button><button class="edit-btn" data-action="edit-unified" data-value="' + r._key + '">编辑</button><button class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
       + '</article>')
     : '<div class="empty">当前筛选下还没有打卡记录。</div>';
 
@@ -2086,27 +2240,38 @@ function recordsPage() {
 function people() {
   const tmrw = chinaNow(); tmrw.setDate(tmrw.getDate() + 1);
   const tmrwDay = tmrw.getDay();
-  const tmrwRunPlanned = state.days.includes(tmrwDay), tmrwStudyPlanned = state.studyDays.includes(tmrwDay);
+  const tmrwDk = dateShift(1);
+  const tmrwRunPlanned = isSportPlanned(tmrwDk), tmrwStudyPlanned = isStudyPlanned(tmrwDk);
   const tmrwLabel = '周' + '日一二三四五六'[tmrwDay];
   const hb = habitRateForDate(today());
 
-  const habitRows = state.habits.map(h => {
+  const archivedHabitCount = state.habits.filter(h => h.archived).length;
+  const visibleHabits = showArchivedHabits ? state.habits : activeHabits();
+  const habitRows = visibleHabits.map(h => {
+    const idxAll = state.habits.findIndex(x => x.id === h.id);
     const done = (state.habitLogs[today()] || []).includes(h.id);
     const weekDots = Array.from({ length: 7 }, (_, i) => {
       const dk = dateShift(i - 6);
       const hit = (state.habitLogs[dk] || []).includes(h.id);
       return '<i class="' + (hit ? 'hit' : '') + '" title="' + dk + '"></i>';
     }).join('');
-    return '<div class="habit-row ' + (done ? 'is-done' : '') + '">'
+    return '<div class="habit-row ' + (done ? 'is-done ' : '') + (h.archived ? 'is-archived' : '') + '">'
       + '<button class="habit-check" data-action="toggle-habit" data-value="' + esc(h.id) + '" aria-pressed="' + done + '">'
       + '<span class="habit-box">' + (done ? '✓' : '') + '</span>'
       + '<span class="habit-tag">' + esc(h.tag) + '</span>'
-      + '<strong>' + esc(h.title) + '</strong>'
+      + '<strong>' + esc(h.title) + (h.archived ? ' · 已停用' : '') + '</strong>'
       + '</button>'
       + '<div class="habit-dots" aria-label="近7天完成情况">' + weekDots + '</div>'
+      + '<span class="habit-ctrls">'
+      + (idxAll > 0 ? '<button class="habit-ctrl" data-action="move-habit" data-value="' + esc(h.id) + ':-1" title="上移">↑</button>' : '')
+      + (idxAll < state.habits.length - 1 ? '<button class="habit-ctrl" data-action="move-habit" data-value="' + esc(h.id) + ':1" title="下移">↓</button>' : '')
+      + '<button class="habit-ctrl" data-action="edit-habit" data-value="' + esc(h.id) + '" title="编辑">✎</button>'
+      + '<button class="habit-ctrl" data-action="archive-habit" data-value="' + esc(h.id) + '" title="' + (h.archived ? '恢复启用' : '停用') + '">' + (h.archived ? '恢复' : '停用') + '</button>'
       + (state.habits.length > 1 ? '<button class="habit-del" data-action="del-habit" data-value="' + esc(h.id) + '" aria-label="删除自律项">×</button>' : '')
+      + '</span>'
       + '</div>';
-  }).join('');
+  }).join('')
+  + (archivedHabitCount ? '<button type="button" class="archived-toggle" data-action="toggle-archived-habits">' + (showArchivedHabits ? '收起已停用习惯 (' + archivedHabitCount + ')' : '查看已停用习惯 (' + archivedHabitCount + ')') + '</button>' : '');
 
   return '<div class="people-layout"><div class="people-left">'
     + '<section class="poster-hero poster-orange poster-compact" data-wm="' + hb.pct + '%">'
@@ -2160,14 +2325,27 @@ function render(preserveScroll = false) {
   const prevTop = preserveScroll && page ? page.scrollTop : 0;
   updateHeader();
   page.dataset.page = view;
-  page.innerHTML = '<div class="' + (preserveScroll ? 'page-stay' : 'page-enter') + '" style="display:contents">' + renderers[view]() + '</div>';
+  page.innerHTML = '<div class="' + (preserveScroll ? 'page-stay' : 'page-enter') + '" style="display:flex;flex-direction:column;flex:1;min-height:0">' + renderers[view]() + '</div>';
   if (preserveScroll) page.scrollTop = prevTop;
   $('.bottom-nav').innerHTML = nav.map(([id, label, ico], i) => '<button data-view="' + id + '" class="' + (id === view ? 'active' : '') + '" ' + (id === view ? 'aria-current="page"' : '') + '>' + icon(ico, 'nav-ico') + '<span class="nav-label"><small>' + pad(i + 1) + '</small>' + label + '</span></button>').join('');
   clearInterval(quoteTimer);
   if (view === 'home' && !matchMedia('(prefers-reduced-motion: reduce)').matches) quoteTimer = setInterval(nextQuote, 7000);
 }
-function nextQuote() { quoteIndex = (quoteIndex + 1) % quotes.length; const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); }
-function navigate(v) { view = v; render(false); $('#page').scrollTop = 0; $('#page').focus({ preventScroll: true }); }
+function nextQuote() { quoteIndex = (quoteIndex + 1) % quotes.length; const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); initPixelMatrices(); }
+function navigate(v) {
+  if (!VALID_VIEWS.includes(v)) v = 'home';
+  view = v;
+  if (typeof location !== 'undefined' && location.hash !== '#' + v) {
+    try { history.replaceState(null, '', '#' + v); } catch { location.hash = v; }
+  }
+  render(false);
+  $('#page').scrollTop = 0;
+  $('#page').focus({ preventScroll: true });
+}
+window.addEventListener('hashchange', () => {
+  const hv = location.hash.replace(/^#/, '').split('?')[0];
+  if (VALID_VIEWS.includes(hv) && hv !== view) navigate(hv);
+});
 
 function openEditor(title, body, onSave, button = '保存 →') {
   dialogSave = onSave;
@@ -2175,12 +2353,15 @@ function openEditor(title, body, onSave, button = '保存 →') {
   $('#editor-body').innerHTML = body;
   $('#editor-save').textContent = button;
   $('#editor-save').hidden = !onSave;
-  $('#editor').showModal();
+  if (!$('#editor').open) $('#editor').showModal();
 }
-$('#editor-form').addEventListener('submit', e => {
-  if (e.submitter?.value === 'save' && dialogSave) {
+$('#editor-close')?.addEventListener('click', () => { pendingImportBackup = null; $('#editor').close('cancel'); });
+$('#editor-cancel')?.addEventListener('click', () => { pendingImportBackup = null; $('#editor').close('cancel'); });
+$('#editor-form').addEventListener('submit', async e => {
+  if (dialogSave) {
     e.preventDefault();
-    if (dialogSave() !== false) $('#editor').close('save');
+    const res = await dialogSave();
+    if (res !== false) $('#editor').close('save');
   }
 });
 $('#rename').onclick = () => openEditor('你的个人昵称', '<label for="name-input">在运动跑道与学习档案中，怎么称呼你？</label><input id="name-input" value="' + esc(state.name) + '" maxlength="12" required autocomplete="nickname">', () => {
@@ -2264,24 +2445,53 @@ function downloadBlob(blob, name) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function exportData() {
-  downloadBlob(new Blob([JSON.stringify(state, null, 2)], { type: 'application/json' }), 'run-study-log-' + today() + '.json');
-  toast('完整备份已导出。');
+  const payload = {
+    ...state,
+    schemaVersion: 2,
+    exportedAt: new Date().toISOString(),
+    unitNote: 'sport: km/minutes; study: hours/minutes/seconds; timezone: Asia/Shanghai'
+  };
+  downloadBlob(new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' }), 'run-study-log-' + today() + '.json');
+  toast('完整备份已导出 (schemaVersion: 2)。');
 }
 function validateBackup(s) {
-  return s && s.version === 1 && typeof s.name === 'string' && s.name.length > 0 && s.name.length <= 12
+  return s && (s.version === 1 || s.schemaVersion === 2) && typeof s.name === 'string' && s.name.length > 0 && s.name.length <= 12
     && Number.isFinite(s.goal) && s.goal >= 5 && s.goal <= 10000
     && Array.isArray(s.days) && s.days.every(d => Number.isInteger(d) && d >= 0 && d <= 6)
     && Array.isArray(s.members) && s.members.every(n => typeof n === 'string' && n.length <= 12)
     && Array.isArray(s.records);
 }
+function applyConfirmedBackupImport(backup) {
+  state = hydrateState(backup);
+  persistLocalOnly();
+  if (isServerOnline) serverFetch('/import', 'POST', backup);
+  pendingImportBackup = null;
+  $('#editor').close();
+  render();
+  toast('数据已恢复。');
+}
 document.addEventListener('change', async e => {
-  if (e.target.id === 'pomo-target-sel') { pomodoroTargetId = e.target.value; return; }
+  if (e.target.id === 'pomo-target-sel') {
+    pomodoroTargetId = e.target.value;
+    pomoSession.targetId = pomodoroTargetId;
+    savePomoSession();
+    return;
+  }
   if (e.target.id !== 'import-data') return;
   try {
     const file = e.target.files[0]; if (!file || file.size > 8e6) throw Error();
     const backup = JSON.parse(await file.text()); if (!validateBackup(backup)) throw Error();
-    state = hydrateState(backup); persist(); $('#editor').close(); render(); toast('数据已恢复。');
-  } catch { toast('无法读取备份，请选择有效的 JSON 数据文件。'); }
+    pendingImportBackup = backup;
+    const host = $('#editor-body');
+    const oldPrev = host.querySelector('.import-preview-card');
+    if (oldPrev) oldPrev.remove();
+    const prev = document.createElement('div');
+    prev.className = 'import-preview-card';
+    prev.innerHTML = '<strong>导入前校验预览</strong>'
+      + '<div>将替换恢复：用户「' + esc(backup.name) + '」 · 运动 ' + backup.records.length + ' 条 · 学习 ' + (backup.studyRecords || []).length + ' 条 · 伙伴 ' + backup.members.length + ' 位</div>'
+      + '<div class="ip-actions"><button type="button" id="export-before-import">先导出当前备份</button><button type="button" class="ip-confirm" id="confirm-import-btn">确认替换恢复 →</button><button type="button" id="cancel-import-btn">取消</button></div>';
+    host.appendChild(prev);
+  } catch { pendingImportBackup = null; toast('无法读取备份，请选择有效的 JSON 数据文件。'); }
 });
 
 function poster() {
@@ -2307,29 +2517,139 @@ function poster() {
   c.toBlob(b => { if (b) downloadBlob(b, 'run-study-poster-' + today() + '.png'); }, 'image/png');
 }
 
-/* ---------- Pomodoro Engine ---------- */
+/* ---------- Pomodoro Engine (Wall-Clock Persistent) & Record Edit Modal ---------- */
 function syncPomoClock() {
+  const elapsed = getPomoElapsedSec();
+  const left = getPomoLeftSec();
+  pomodoroLeft = left;
   const el = $('#pomo-clock');
-  if (el) el.textContent = formatTimer(pomodoroLeft);
+  if (el) el.textContent = formatTimer(left);
+  const hint = $('#pomo-elapsed-hint');
+  if (hint) hint.textContent = '本轮已投入：' + Math.floor(elapsed / 60) + '分' + (elapsed % 60) + '秒 · 满 60 秒可精确记入';
+  const finBtn = $('[data-action="pomo-finish"]');
+  if (finBtn) finBtn.disabled = elapsed < 60 || pomoSession.state === 'saving';
 }
-function stopPomodoro() {
-  pomodoroRunning = false;
+function stopPomodoro(newState = 'paused') {
   clearInterval(pomodoroTick);
   pomodoroTick = null;
+  pomodoroRunning = false;
+  if (pomoSession.state === 'running' && newState === 'paused') {
+    pomoSession.state = 'paused';
+    pomoSession.pauseStartedAt = Date.now();
+  } else if (newState) {
+    pomoSession.state = newState;
+  }
+  savePomoSession();
+}
+function startPomodoroLoop() {
+  clearInterval(pomodoroTick);
+  pomodoroTick = setInterval(() => {
+    const left = getPomoLeftSec();
+    syncPomoClock();
+    if (left <= 0) {
+      stopPomodoro('completed');
+      pomoSession.completedAt = Date.now();
+      savePomoSession();
+      toast('计时结束！请点击「记入学习 ✓」保存本轮专注。');
+      render(true);
+    }
+  }, 500);
+}
+if (pomoSession.state === 'running') {
+  if (getPomoLeftSec() <= 0) {
+    pomoSession.state = 'completed';
+    pomoSession.completedAt = pomoSession.startedAt + pomoSession.pausedAccumMs + pomoSession.totalSec * 1000;
+    savePomoSession();
+  } else {
+    startPomodoroLoop();
+  }
+}
+
+function openRecordEditModal(key) {
+  const [kind, idStr] = key.split(':'), id = Number(idStr);
+  const arr = kind === 'study' ? state.studyRecords : state.records;
+  const rec = arr.find(x => x.id === id);
+  if (!rec) return;
+  const isStudy = kind === 'study';
+  const tagsPool = isStudy ? studyTags : tags;
+  const feelsPool = isStudy ? studyFocusLevels : feelings;
+  const body = '<div class="record-edit-form">'
+    + '<div class="form-grid-2">'
+    + '<div class="field-group"><label for="er-date">日期</label><input id="er-date" type="date" value="' + esc(rec.date) + '"></div>'
+    + '<div class="field-group"><label for="er-time">时间</label><input id="er-time" type="time" value="' + esc(rec.time || '06:10') + '"></div>'
+    + '</div>'
+    + '<div class="form-grid-2">'
+    + (isStudy
+      ? '<div class="field-group"><label for="er-target">所属学习目标</label><select id="er-target">' + state.studyTargets.map(t => '<option value="' + esc(t.id) + '" ' + (t.id === rec.targetId ? 'selected' : '') + '>' + esc(t.title) + '</option>').join('') + '</select></div>'
+        + '<div class="field-group"><label for="er-min">专注时长（分钟，1–960）</label><input id="er-min" type="number" min="1" max="960" value="' + esc(rec.minutes || Math.round((rec.hours || 1) * 60)) + '"></div>'
+      : '<div class="field-group"><label for="er-km">距离（km）</label><input id="er-km" type="number" min="0.05" max="300" step="0.01" value="' + esc(rec.km) + '"></div>'
+        + '<div class="field-group"><label for="er-min">时长（分钟）</label><input id="er-min" type="number" min="1" max="1440" value="' + esc(rec.minutes) + '"></div>')
+    + '</div>'
+    + '<div class="field-group"><label for="er-feel">' + (isStudy ? '专注度' : '体感') + '</label><select id="er-feel">' + feelsPool.map((f, idx) => '<option value="' + idx + '" ' + (idx === (rec.feel ?? rec.focus ?? 3) ? 'selected' : '') + '>' + f[0] + ' ' + f[1] + '</option>').join('') + '</select></div>'
+    + '<div class="field-group"><label for="er-tags">标签（逗号分隔，可用：' + tagsPool.slice(0, 4).join('、') + '）</label><input id="er-tags" value="' + esc((rec.tags || []).join(', ')) + '"></div>'
+    + '<div class="field-group"><label for="er-note">备注</label><textarea id="er-note" maxlength="240">' + esc(rec.note || '') + '</textarea></div>'
+    + '</div>';
+
+  openEditor(isStudy ? '编辑学习记录 #' + id : '编辑运动记录 #' + id, body, async () => {
+    const dateVal = $('#er-date').value;
+    const timeVal = $('#er-time').value || rec.time || '06:10';
+    const minVal = Math.round(Number($('#er-min').value));
+    const feelVal = Number($('#er-feel').value);
+    const noteVal = $('#er-note').value.trim();
+    const tagsVal = $('#er-tags').value.split(/[,，]/).map(s => s.trim()).filter(Boolean);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateVal)) { toast('请输入有效日期'); return false; }
+    if (!Number.isFinite(minVal) || minVal < 1 || minVal > 1440) { toast('时长需在有效范围内'); return false; }
+
+    let patchPayload = { date: dateVal, time: timeVal, minutes: minVal, note: noteVal, tags: tagsVal };
+    if (isStudy) {
+      if (minVal > 960) { toast('单条学习不超过 960 分钟'); return false; }
+      const newTid = $('#er-target').value;
+      const hoursVal = Math.round((minVal / 60) * 100) / 100;
+      const tObj = state.studyTargets.find(t => t.id === newTid);
+      patchPayload = { ...patchPayload, targetId: newTid, subject: tObj?.title || rec.subject, hours: hoursVal, seconds: minVal * 60, focus: feelVal };
+    } else {
+      const kmVal = Math.round(Number($('#er-km').value) * 100) / 100;
+      if (!Number.isFinite(kmVal) || kmVal < 0.05 || kmVal > 300) { toast('距离需在 0.05–300 km 之间'); return false; }
+      patchPayload = { ...patchPayload, km: kmVal, feel: feelVal };
+    }
+
+    if (isServerOnline) {
+      const res = await serverFetch('/records/' + kind + '/' + id, 'PATCH', patchPayload);
+      if (!res.ok) { toast(res.error || '编辑失败'); return false; }
+      Object.assign(rec, res.record || patchPayload);
+    } else {
+      Object.assign(rec, patchPayload);
+    }
+    recomputeStudyTargetDoneHours();
+    persistLocalOnly();
+    render(true);
+    toast('记录已更新，统计与目标已同步重算！');
+  }, '保存修改 →');
 }
 
 /* ---------- Global Event Delegation ---------- */
-document.addEventListener('click', e => {
+document.addEventListener('click', async e => {
   const navButton = e.target.closest('[data-view]'); if (navButton) { navigate(navButton.dataset.view); return; }
   if (e.target.closest('#btn-sync-to-cloud')) { syncLocalToCloud(); return; }
   if (e.target.closest('#open-ppb-demo')) { $('#editor').close(); openPixelProgressDemoModal(); return; }
-  if (e.target.closest('#export-data')) { exportData(); return; }
+  if (e.target.closest('#export-data') || e.target.closest('#export-before-import')) { exportData(); return; }
+  if (e.target.closest('#confirm-import-btn')) { if (pendingImportBackup) applyConfirmedBackupImport(pendingImportBackup); return; }
+  if (e.target.closest('#cancel-import-btn')) {
+    pendingImportBackup = null;
+    e.target.closest('.import-preview-card')?.remove();
+    const inp = $('#import-data'); if (inp) inp.value = '';
+    return;
+  }
   if (e.target.closest('#download-poster')) { poster(); return; }
   if (e.target.closest('#clear-records')) {
     openEditor('清空打卡记录', '<p>确认清空运动与学习记录？目标与习惯清单会保留。</p>', async () => {
+      if (isServerOnline) {
+        const res = await serverFetch('/records', 'DELETE');
+        if (!res.ok) { toast(res.error || '清空失败'); return false; }
+      }
       state.records = []; state.studyRecords = [];
-      persist();
-      if (isServerOnline) await serverFetch('/records', 'DELETE');
+      recomputeStudyTargetDoneHours();
+      persistLocalOnly();
       render();
       toast('记录已清空，新的旅程从这里开始。');
     }, '确认清空');
@@ -2412,8 +2732,12 @@ document.addEventListener('click', e => {
     return;
   }
 
-  const qdot = e.target.closest('[data-quote]'); if (qdot) { e.stopPropagation(); quoteIndex = Number(qdot.dataset.quote); const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); syncMotion(); return; }
-  if (e.target.closest('#quote')) { nextQuote(); syncMotion(); return; }
+  const qdot = e.target.closest('[data-quote]'); if (qdot) { e.stopPropagation(); quoteIndex = Number(qdot.dataset.quote); const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); initPixelMatrices(); syncMotion(); const qTheme = quotes[quoteIndex % quotes.length]?.[1]; if (qTheme === 'flame') triggerFlameSurge(950); else triggerLightningSurge(520); return; }
+  if (e.target.closest('#quote')) { nextQuote(); syncMotion(); const qTheme = quotes[quoteIndex % quotes.length]?.[1]; if (qTheme === 'flame') triggerFlameSurge(950); else triggerLightningSurge(520); return; }
+  if (!e.target.closest('button, a, input, [data-action]')) {
+    if (e.target.closest('.poster-flame')) { triggerFlameSurge(1150); }
+    else if (e.target.closest('.poster-lightning')) { triggerLightningSurge(950); }
+  }
 
   const b = e.target.closest('[data-action]'); if (!b) return;
   const a = b.dataset.action, v = b.dataset.value;
@@ -2449,101 +2773,190 @@ document.addEventListener('click', e => {
   if (a === 'record-kind') { recordKindFilter = v === '运动' ? 'sport' : v === '学习' ? 'study' : 'all'; selectedChartNote = ''; selectedBucket = null; render(true); return; }
   if (a === 'ach-filter') { achFilter = v; render(true); return; }
 
-  if (a === 'goal') { state.goal = Math.max(5, Math.min(10000, state.goal + Number(v))); persist(); render(true); return; }
-  if (a === 'goal-set') { state.goal = Number(v); persist(); render(true); toast('本月运动目标已设为 ' + v + ' km'); return; }
+  if (a === 'goal') { state.goal = Math.max(5, Math.min(10000, state.goal + Number(v))); persist(true); render(true); return; }
+  if (a === 'goal-set') { state.goal = Number(v); persist(true); render(true); toast('本月运动目标已设为 ' + v + ' km'); return; }
   if (a === 'day') {
     const d = Number(v);
     state.days = state.days.includes(d) ? state.days.filter(x => x !== d) : [...state.days, d];
     if (state.sportDatePlan) Object.keys(state.sportDatePlan).forEach(dk => { if (new Date(dk + 'T12:00:00').getDay() === d) delete state.sportDatePlan[dk]; });
-    persist(); render(true); return;
+    persist(true); render(true); return;
   }
   if (a === 'toggle-sport-date') {
     state.sportDatePlan = state.sportDatePlan || {};
     state.sportDatePlan[v] = !isSportPlanned(v);
-    persist(); render(true); return;
+    persist(true); render(true); return;
   }
 
-  if (a === 'study-goal') { state.studyGoal = Math.max(5, Math.min(1000, state.studyGoal + Number(v))); persist(); render(true); return; }
-  if (a === 'study-goal-set') { state.studyGoal = Number(v); persist(); render(true); toast('本月学习目标已设为 ' + v + ' 小时'); return; }
+  if (a === 'study-goal') { state.studyGoal = Math.max(5, Math.min(1000, state.studyGoal + Number(v))); persist(true); render(true); return; }
+  if (a === 'study-goal-set') { state.studyGoal = Number(v); persist(true); render(true); toast('本月学习目标已设为 ' + v + ' 小时'); return; }
   if (a === 'study-day') {
     const d = Number(v);
     state.studyDays = state.studyDays.includes(d) ? state.studyDays.filter(x => x !== d) : [...state.studyDays, d];
     if (state.studyDatePlan) Object.keys(state.studyDatePlan).forEach(dk => { if (new Date(dk + 'T12:00:00').getDay() === d) delete state.studyDatePlan[dk]; });
-    persist(); render(true); return;
+    persist(true); render(true); return;
   }
   if (a === 'toggle-study-date') {
     state.studyDatePlan = state.studyDatePlan || {};
     state.studyDatePlan[v] = !isStudyPlanned(v);
-    persist(); render(true); return;
+    persist(true); render(true); return;
   }
 
   if (a === 'quick-study') {
     const [tid, hStr] = v.split(':'); const hrs = Number(hStr);
     const tObj = state.studyTargets.find(x => x.id === tid);
     if (tObj) {
-      tObj.doneHours = Math.round((tObj.doneHours + hrs) * 10) / 10;
+      const minutes = Math.round(hrs * 60);
       const qRec = {
         id: Date.now(), person: state.name, date: today(),
         time: pad(chinaNow().getHours()) + ':' + pad(chinaNow().getMinutes()),
-        hours: hrs, minutes: Math.round(hrs * 60), focus: 3, targetId: tid, subject: tObj.title,
+        hours: hrs, minutes, seconds: minutes * 60, source: 'quick', operationId: nextOpId('quick'),
+        focus: 3, targetId: tid, subject: tObj.title,
         note: '快捷专注记录 +' + hrs + 'h', tags: ['深度工作'], likes: 0, liked: false
       };
+      if (isServerOnline) {
+        const res = await serverFetch('/records/study', 'POST', qRec);
+        if (!res.ok) { toast('保存失败：' + (res.error || '请稍后重试')); return; }
+        if (res.record) Object.assign(qRec, res.record);
+      }
       state.studyRecords.unshift(qRec);
-      persist(); render(true); celebrate(); toast('已为「' + tObj.title + '」记入 ' + hrs + ' 小时！');
-      if (isServerOnline) serverFetch('/records/study', 'POST', qRec);
+      const hbArr = state.habitLogs[today()] || [];
+      if (state.habits.some(h => h.id === 'hb-3') && !hbArr.includes('hb-3')) state.habitLogs[today()] = [...hbArr, 'hb-3'];
+      recomputeStudyTargetDoneHours();
+      persistLocalOnly(); render(true); triggerLightningSurge(2000); triggerFlameSurge(1800); celebrate(); toast('已为「' + tObj.title + '」记入 ' + hrs + ' 小时！');
     }
     return;
   }
 
+  if (a === 'toggle-archived-targets') { showArchivedTargets = !showArchivedTargets; render(true); return; }
+  if (a === 'toggle-archived-habits') { showArchivedHabits = !showArchivedHabits; render(true); return; }
+
   if (a === 'add-study-target') {
-    openEditor('新建学习目标', '<label for="st-title">目标名称</label><input id="st-title" maxlength="24" placeholder="例如：高等数学刷题 / 英语精听" required><label for="st-cat">分类标签</label><input id="st-cat" maxlength="10" value="深度学习"><label for="st-hrs">本月目标小时数</label><input id="st-hrs" type="number" min="1" max="300" value="30">', () => {
+    openEditor('新建学习目标', '<div class="field-group"><label for="st-title">目标名称</label><input id="st-title" maxlength="24" placeholder="例如：高等数学刷题 / 英语精听" required></div><div class="field-group"><label for="st-cat">分类标签</label><input id="st-cat" maxlength="10" value="深度学习"></div><div class="field-group"><label for="st-hrs">本月目标小时数</label><input id="st-hrs" type="number" min="1" max="300" value="30"></div>', () => {
       const title = $('#st-title').value.trim(), cat = $('#st-cat').value.trim() || '深度学习', targetHours = Number($('#st-hrs').value) || 30;
       if (!title) { toast('请输入学习目标名称'); return false; }
       const colors = ['#203f91', '#e5492b', '#e4a334', '#262624'];
-      const newT = { id: 'st-' + Date.now(), title, category: cat, targetHours: Math.max(1, targetHours), doneHours: 0, color: colors[state.studyTargets.length % colors.length], deadline: '本月' };
+      const newT = { id: 'st-' + Date.now(), title, category: cat, targetHours: Math.max(1, targetHours), doneHours: 0, baseHours: 0, archived: false, color: colors[state.studyTargets.length % colors.length], deadline: '本月' };
       state.studyTargets.push(newT);
-      persist(); render(true); toast('学习目标已创建！');
+      persistLocalOnly(); render(true); toast('学习目标已创建！');
       if (isServerOnline) serverFetch('/study-targets', 'POST', newT);
     });
+    return;
+  }
+  if (a === 'edit-study-target') {
+    const t = state.studyTargets.find(x => x.id === v); if (!t) return;
+    openEditor('编辑学习目标', '<div class="field-group"><label for="st-title">目标名称</label><input id="st-title" maxlength="24" value="' + esc(t.title) + '"></div><div class="field-group"><label for="st-cat">分类标签</label><input id="st-cat" maxlength="10" value="' + esc(t.category || '深度学习') + '"></div><div class="form-grid-2"><div class="field-group"><label for="st-hrs">目标小时</label><input id="st-hrs" type="number" min="1" max="500" value="' + t.targetHours + '"></div><div class="field-group"><label for="st-dead">周期</label><input id="st-dead" maxlength="12" value="' + esc(t.deadline || '本月') + '"></div></div>', () => {
+      const title = $('#st-title').value.trim(); if (!title) return false;
+      t.title = title; t.category = $('#st-cat').value.trim() || '深度学习'; t.targetHours = Math.max(1, Number($('#st-hrs').value) || t.targetHours); t.deadline = $('#st-dead').value.trim() || '本月';
+      persistLocalOnly(); render(true); toast('学习目标已更新');
+      if (isServerOnline) serverFetch('/study-targets/' + t.id, 'PATCH', { title: t.title, category: t.category, targetHours: t.targetHours, deadline: t.deadline });
+    });
+    return;
+  }
+  if (a === 'archive-study-target') {
+    const t = state.studyTargets.find(x => x.id === v); if (!t) return;
+    t.archived = !t.archived;
+    persistLocalOnly(); render(true);
+    toast(t.archived ? '目标已归档（关联历史记录保留）' : '目标已恢复在研');
+    if (isServerOnline) serverFetch('/study-targets/' + t.id, 'PATCH', { archived: t.archived });
     return;
   }
   if (a === 'del-study-target') {
     if (state.studyTargets.length <= 1) { toast('至少保留一个学习目标'); return; }
     state.studyTargets = state.studyTargets.filter(t => t.id !== v);
-    persist(); render(true); toast('已移除该学习目标');
+    persistLocalOnly(); render(true); toast('已移除该学习目标');
     if (isServerOnline) serverFetch('/study-targets/' + v, 'DELETE');
     return;
   }
 
-  if (a === 'pomo-set') { stopPomodoro(); pomodoroTotal = Number(v) * 60; pomodoroLeft = pomodoroTotal; render(true); return; }
+  if (a === 'pomo-set') {
+    if (pomoSession.state === 'running') { toast('请先暂停当前专注再切换时长'); return; }
+    const sec = Number(v) * 60;
+    pomodoroTotal = sec; pomodoroLeft = sec;
+    pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: sec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+    savePomoSession(); render(true); return;
+  }
   if (a === 'pomo-toggle') {
-    if (pomodoroRunning) { stopPomodoro(); render(true); }
-    else {
+    if (pomoSession.state === 'running') {
+      stopPomodoro('paused'); render(true);
+    } else {
+      if (pomoSession.state === 'idle' || pomoSession.state === 'saved' || pomoSession.state === 'completed') {
+        pomoSession.sessionId = nextOpId('pomo');
+        pomoSession.startedAt = Date.now();
+        pomoSession.pausedAccumMs = 0;
+        pomoSession.pauseStartedAt = 0;
+        pomoSession.completedAt = 0;
+      } else if (pomoSession.state === 'paused' && pomoSession.pauseStartedAt) {
+        pomoSession.pausedAccumMs += Math.max(0, Date.now() - pomoSession.pauseStartedAt);
+        pomoSession.pauseStartedAt = 0;
+      }
+      pomoSession.targetId = pomodoroTargetId;
+      pomoSession.state = 'running';
+      pomoSession.errorMsg = '';
       pomodoroRunning = true;
-      pomodoroTick = setInterval(() => {
-        if (pomodoroLeft > 0) { pomodoroLeft--; syncPomoClock(); }
-        else { stopPomodoro(); toast('番茄专注时间到！点击「记入学习」保存记录。'); render(true); }
-      }, 1000);
+      savePomoSession();
+      startPomodoroLoop();
       render(true);
     }
     return;
   }
-  if (a === 'pomo-reset') { stopPomodoro(); pomodoroLeft = pomodoroTotal; render(true); return; }
+  if (a === 'pomo-reset') {
+    const elapsed = getPomoElapsedSec();
+    if (elapsed >= 60) {
+      openEditor('重置当前专注计时？', '<p>当前已投入 <strong>' + Math.floor(elapsed / 60) + '分' + (elapsed % 60) + '秒</strong>。重置将放弃本轮未保存计时，不会删除历史已保存记录。</p>', () => {
+        stopPomodoro('idle');
+        pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+        pomodoroLeft = pomoSession.totalSec;
+        savePomoSession(); render(true); toast('计时器已重置');
+      }, '确认重置');
+      return;
+    }
+    stopPomodoro('idle');
+    pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+    pomodoroLeft = pomoSession.totalSec;
+    savePomoSession(); render(true); return;
+  }
   if (a === 'pomo-finish') {
-    stopPomodoro();
-    const spentMin = Math.max(15, Math.round((pomodoroTotal - pomodoroLeft) / 60) || Math.round(pomodoroTotal / 60));
-    const hrs = Math.round((spentMin / 60) * 10) / 10;
+    const elapsedSec = getPomoElapsedSec();
+    if (elapsedSec < 60) { toast('专注不足 60 秒（当前 ' + elapsedSec + ' 秒），满 60 秒后可记入'); return; }
+    if (pomoSession.state === 'saving') return;
+    stopPomodoro('saving');
+    pomoSession.errorMsg = '';
+    savePomoSession(); render(true);
+
     const tObj = state.studyTargets.find(x => x.id === pomodoroTargetId) || state.studyTargets[0];
-    if (tObj) tObj.doneHours = Math.round((tObj.doneHours + hrs) * 10) / 10;
-    state.studyRecords.unshift({
+    const minutes = Math.max(1, Math.round(elapsedSec / 60));
+    const hrs = Math.round((elapsedSec / 3600) * 100) / 100;
+    const pRec = {
       id: Date.now(), person: state.name, date: today(),
       time: pad(chinaNow().getHours()) + ':' + pad(chinaNow().getMinutes()),
-      hours: hrs, minutes: spentMin, focus: 4, targetId: tObj?.id || 'st-1', subject: tObj?.title || '番茄专注',
-      note: '完成 ' + spentMin + ' 分钟番茄专注计时。', tags: ['番茄钟', '无手机'], likes: 0, liked: false
-    });
-    const pRec = state.studyRecords[0];
-    pomodoroLeft = pomodoroTotal; persist(); render(true); celebrate(); toast('专注完成！已记入 ' + hrs + ' 小时。');
-    if (isServerOnline && pRec) serverFetch('/records/study', 'POST', pRec);
+      hours: hrs, minutes, seconds: elapsedSec, source: 'pomodoro',
+      sessionId: pomoSession.sessionId, operationId: pomoSession.sessionId,
+      focus: 4, targetId: tObj?.id || 'st-1', subject: tObj?.title || '番茄专注',
+      note: '实测番茄专注 ' + Math.floor(elapsedSec / 60) + ' 分 ' + (elapsedSec % 60) + ' 秒。',
+      tags: ['番茄钟', '无手机'], likes: 0, liked: false
+    };
+    if (isServerOnline) {
+      const res = await serverFetch('/records/study', 'POST', pRec);
+      if (!res.ok) {
+        pomoSession.state = 'paused';
+        pomoSession.errorMsg = '服务器保存失败：' + (res.error || '请稍后重试') + '（已保留计时）';
+        savePomoSession(); render(true);
+        toast('保存失败，当前专注已保留');
+        return;
+      }
+      if (res.record) Object.assign(pRec, res.record);
+    }
+    if (!state.studyRecords.some(r => r.sessionId === pRec.sessionId || r.id === pRec.id)) {
+      state.studyRecords.unshift(pRec);
+    }
+    const hbArr = state.habitLogs[today()] || [];
+    if (state.habits.some(h => h.id === 'hb-3') && !hbArr.includes('hb-3')) state.habitLogs[today()] = [...hbArr, 'hb-3'];
+    recomputeStudyTargetDoneHours();
+    persistLocalOnly();
+    pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+    pomodoroLeft = pomoSession.totalSec;
+    savePomoSession(); render(true); triggerLightningSurge(2000); triggerFlameSurge(1800); celebrate();
+    toast('专注保存成功！记入 ' + minutes + ' 分钟 (' + hrs.toFixed(2) + ' h)');
     return;
   }
 
@@ -2551,44 +2964,77 @@ document.addEventListener('click', e => {
     const [dk, hid] = v.split(':');
     const arr = state.habitLogs[dk] || [];
     state.habitLogs[dk] = arr.includes(hid) ? arr.filter(id => id !== hid) : [...arr, hid];
-    persist(); render(true);
+    persistLocalOnly(); render(true);
     if (isServerOnline) serverFetch('/habit-logs', 'PUT', { person: state.name, date: dk, habitIds: state.habitLogs[dk] });
     return;
   }
   if (a === 'toggle-habit') {
     const arr = state.habitLogs[today()] || [];
     state.habitLogs[today()] = arr.includes(v) ? arr.filter(id => id !== v) : [...arr, v];
-    persist(); render(true);
+    persistLocalOnly(); render(true);
     if (isServerOnline) serverFetch('/habit-logs', 'PUT', { person: state.name, date: today(), habitIds: state.habitLogs[today()] });
     return;
   }
   if (a === 'add-habit') {
-    openEditor('新增每日自律习惯', '<label for="hb-title">习惯内容</label><input id="hb-title" maxlength="24" placeholder="例如：睡前阅读 30 分钟 / 不喝含糖饮料" required><label for="hb-tag">标签（2-4字）</label><input id="hb-tag" maxlength="6" value="自律">', () => {
+    openEditor('新增每日自律习惯', '<div class="field-group"><label for="hb-title">习惯内容</label><input id="hb-title" maxlength="24" placeholder="例如：睡前阅读 30 分钟 / 不喝含糖饮料" required></div><div class="field-group"><label for="hb-tag">标签（2-4字）</label><input id="hb-tag" maxlength="6" value="自律"></div>', () => {
       const title = $('#hb-title').value.trim(), tag = $('#hb-tag').value.trim() || '自律';
       if (!title) { toast('请输入自律习惯内容'); return false; }
-      const newH = { id: 'hb-' + Date.now(), title, tag, icon: 'bolt' };
+      const newH = { id: 'hb-' + Date.now(), title, tag, icon: 'bolt', archived: false };
       state.habits.push(newH);
-      persist(); render(true); toast('新自律习惯已加入每日清单！');
+      persistLocalOnly(); render(true); toast('新自律习惯已加入每日清单！');
       if (isServerOnline) serverFetch('/habits', 'POST', newH);
     });
     return;
   }
+  if (a === 'edit-habit') {
+    const h = state.habits.find(x => x.id === v); if (!h) return;
+    openEditor('编辑自律习惯', '<div class="field-group"><label for="hb-title">习惯内容</label><input id="hb-title" maxlength="24" value="' + esc(h.title) + '"></div><div class="field-group"><label for="hb-tag">标签</label><input id="hb-tag" maxlength="6" value="' + esc(h.tag || '每日') + '"></div>', () => {
+      const title = $('#hb-title').value.trim(); if (!title) return false;
+      h.title = title; h.tag = $('#hb-tag').value.trim() || '每日';
+      persistLocalOnly(); render(true); toast('习惯已更新');
+      if (isServerOnline) serverFetch('/habits/' + h.id, 'PATCH', { title: h.title, tag: h.tag });
+    });
+    return;
+  }
+  if (a === 'move-habit') {
+    const [hid, dirStr] = v.split(':'), dir = Number(dirStr);
+    const idx = state.habits.findIndex(x => x.id === hid);
+    const targetIdx = idx + dir;
+    if (idx >= 0 && targetIdx >= 0 && targetIdx < state.habits.length) {
+      const tmp = state.habits[idx];
+      state.habits[idx] = state.habits[targetIdx];
+      state.habits[targetIdx] = tmp;
+      persistLocalOnly(); render(true);
+      if (isServerOnline) serverFetch('/habits/order', 'PUT', { ids: state.habits.map(x => x.id) });
+    }
+    return;
+  }
+  if (a === 'archive-habit') {
+    const h = state.habits.find(x => x.id === v); if (!h) return;
+    h.archived = !h.archived;
+    persistLocalOnly(); render(true);
+    toast(h.archived ? '习惯已停用（历史记录保留）' : '习惯已恢复启用');
+    if (isServerOnline) serverFetch('/habits/' + h.id, 'PATCH', { archived: h.archived });
+    return;
+  }
   if (a === 'del-habit') {
     state.habits = state.habits.filter(h => h.id !== v);
-    persist(); render(true); toast('已移除该自律项');
+    persistLocalOnly(); render(true); toast('已移除该自律项');
     if (isServerOnline) serverFetch('/habits/' + v, 'DELETE');
     return;
   }
 
   if (a === 'toggle-tomorrow') {
-    const tmrw = chinaNow(); tmrw.setDate(tmrw.getDate() + 1); const td = tmrw.getDay();
-    state.days = state.days.includes(td) ? state.days.filter(x => x !== td) : [...state.days, td];
-    persist(); render(true); toast(state.days.includes(td) ? '已将明早加入跑步计划！' : '已将明早跑步设为休息日。'); return;
+    const dk = dateShift(1);
+    state.sportDatePlan = state.sportDatePlan || {};
+    state.sportDatePlan[dk] = !isSportPlanned(dk);
+    persist(true); render(true); toast(state.sportDatePlan[dk] ? '已将明早加入跑步计划！' : '已将明早跑步设为休息日。'); return;
   }
   if (a === 'toggle-tomorrow-study') {
-    const tmrw = chinaNow(); tmrw.setDate(tmrw.getDate() + 1); const td = tmrw.getDay();
-    state.studyDays = state.studyDays.includes(td) ? state.studyDays.filter(x => x !== td) : [...state.studyDays, td];
-    persist(); render(true); toast(state.studyDays.includes(td) ? '已将明天加入学习计划！' : '已将明天学习设为休息日。'); return;
+    const dk = dateShift(1);
+    state.studyDatePlan = state.studyDatePlan || {};
+    state.studyDatePlan[dk] = !isStudyPlanned(dk);
+    persist(true); render(true); toast(state.studyDatePlan[dk] ? '已将明天加入学习计划！' : '已将明天学习设为休息日。'); return;
   }
 
   if (a === 'flip') { b.classList.toggle('flipped'); b.setAttribute('aria-pressed', b.classList.contains('flipped')); return; }
@@ -2611,13 +3057,18 @@ document.addEventListener('click', e => {
     }
     return;
   }
+  if (a === 'edit-unified') { openRecordEditModal(v); return; }
   if (a === 'delete-unified') {
     const [kind, idStr] = v.split(':'), id = Number(idStr);
-    openEditor('删除这条打卡记录？', '<p>确认删除选中的' + (kind === 'study' ? '学习' : '运动') + '记录？统计图表将同步更新。</p>', () => {
+    openEditor('删除这条打卡记录？', '<p>确认删除选中的' + (kind === 'study' ? '学习（将同步扣减关联目标小时）' : '运动') + '记录？统计图表将同步更新。</p>', async () => {
+      if (isServerOnline) {
+        const res = await serverFetch('/records/' + kind + '/' + id, 'DELETE');
+        if (!res.ok) { toast(res.error || '删除失败'); return false; }
+      }
       if (kind === 'study') state.studyRecords = state.studyRecords.filter(x => x.id !== id);
       else state.records = state.records.filter(x => x.id !== id);
-      recordSelectKey = ''; selectedNodeKey = ''; persist(); render(true); toast('这条记录已删除。');
-      if (isServerOnline) serverFetch('/records/' + kind + '/' + id, 'DELETE');
+      recomputeStudyTargetDoneHours();
+      recordSelectKey = ''; selectedNodeKey = ''; persistLocalOnly(); render(true); toast('这条记录已删除。');
     }, '删除记录');
     return;
   }
@@ -2655,6 +3106,8 @@ function openCheckin(mode = 'sport', targetId = null, personName = state.name) {
     tags: [],
     note: '',
     photo: '',
+    operationId: nextOpId('chk'),
+    saving: false,
     time: pad(chinaNow().getHours()) + ':' + pad(chinaNow().getMinutes())
   };
   $('#app').inert = true; drawModal();
@@ -2745,7 +3198,7 @@ function drawModal() {
   $('.close-modal').focus({ preventScroll: true });
 }
 
-$('#modal-root').addEventListener('click', e => {
+$('#modal-root').addEventListener('click', async e => {
   const b = e.target.closest('[data-modal]'); if (!b) return;
   const a = b.dataset.modal, v = b.dataset.value;
   if (a === 'close') closeCheckin();
@@ -2791,16 +3244,33 @@ $('#modal-root').addEventListener('click', e => {
   }
   if (a === 'tag') { draft.tags = draft.tags.includes(v) ? draft.tags.filter(t => t !== v) : [...draft.tags, v]; b.classList.toggle('selected', draft.tags.includes(v)); }
   if (a === 'save') {
+    if (draft.saving) return;
+    draft.saving = true;
+    b.disabled = true;
     const who = draft.person || state.name;
     let savedRec = null;
     if (draft.mode === 'study') {
       const tObj = state.studyTargets.find(t => t.id === draft.targetId);
-      if (who === state.name && tObj) tObj.doneHours = Math.round((tObj.doneHours + draft.hours) * 10) / 10;
-      savedRec = { id: Date.now(), person: who, date: today(), time: draft.time, hours: draft.hours, minutes: draft.minutes, focus: draft.feel, targetId: draft.targetId, subject: tObj?.title || '自主学习', note: draft.note, tags: draft.tags, photo: draft.photo, likes: 0, liked: false };
+      savedRec = { id: Date.now(), person: who, date: today(), time: draft.time, hours: draft.hours, minutes: draft.minutes, seconds: Math.round(draft.minutes * 60), source: 'manual', operationId: draft.operationId, focus: draft.feel, targetId: draft.targetId, subject: tObj?.title || '自主学习', note: draft.note, tags: draft.tags, photo: draft.photo, likes: 0, liked: false };
+    } else {
+      savedRec = { id: Date.now(), person: who, date: today(), time: draft.time, km: draft.km, minutes: draft.minutes, source: 'manual', operationId: draft.operationId, feel: draft.feel, note: draft.note, tags: draft.tags, photo: draft.photo, likes: 0, liked: false };
+    }
+    const savedMode = draft.mode;
+    if (isServerOnline) {
+      const endpoint = savedMode === 'study' ? '/records/study' : '/records/sport';
+      const res = await serverFetch(endpoint, 'POST', savedRec);
+      if (!res.ok) {
+        draft.saving = false;
+        b.disabled = false;
+        toast('保存失败：' + (res.error || '服务器未响应，草稿已保留'));
+        return;
+      }
+      if (res.record) Object.assign(savedRec, res.record);
+    }
+    if (savedMode === 'study') {
       state.studyRecords.unshift(savedRec);
       recordSelectKey = 'study:' + savedRec.id;
     } else {
-      savedRec = { id: Date.now(), person: who, date: today(), time: draft.time, km: draft.km, minutes: draft.minutes, feel: draft.feel, note: draft.note, tags: draft.tags, photo: draft.photo, likes: 0, liked: false };
       state.records.unshift(savedRec);
       recordSelectKey = 'sport:' + savedRec.id;
     }
@@ -2814,13 +3284,9 @@ $('#modal-root').addEventListener('click', e => {
       const mArr = state.memberHabitLogs[who][today()] || [];
       if (state.habits.some(h => h.id === 'hb-3') && !mArr.includes('hb-3')) state.memberHabitLogs[who][today()] = [...mArr, 'hb-3'];
     }
-    const savedMode = draft.mode;
-    persist();
-    if (isServerOnline) {
-      const endpoint = savedMode === 'study' ? '/records/study' : '/records/sport';
-      serverFetch(endpoint, 'POST', savedRec);
-    }
-    closeCheckin(); navigate(view); celebrate(); toast(who + ' ' + (savedMode === 'study' ? '学习' : '运动') + '打卡成功！');
+    recomputeStudyTargetDoneHours();
+    persistLocalOnly();
+    closeCheckin(); navigate(view); triggerFlameSurge(1900); triggerLightningSurge(1400); celebrate(); toast(who + ' ' + (savedMode === 'study' ? '学习' : '运动') + '打卡成功！');
   }
 });
 
@@ -2891,7 +3357,377 @@ const BAYER4 = [
   [15, 7, 13, 5]
 ];
 let pixelFrameId = 0;
-let pixelPhase = 0;
+let pixelPhase = 2.35;
+let lightningSurgeUntil = 0;
+let flameSurgeUntil = 0;
+
+const FLAME_STATIC_PHASE = 2.35;
+const FLAME_PALETTE = [
+  '#2d060a', // 0: 深紫褐余烬底 (Deep Crimson-Plum Charcoal)
+  '#5a0b12', // 1: 暗酒红热流层 (Dark Wine Ember)
+  '#961414', // 2: 炽深红底层火幕 (Deep Ruby Red)
+  '#d62818', // 3: 朱红主焰外廓 (Vermilion Outer Flame)
+  '#f6511d', // 4: 熔岩亮橙中焰 (Blazing Lava Orange)
+  '#ff8c1a', // 5: 琥珀金橙内焰 (Amber Gold Flame)
+  '#ffd026', // 6: 柠檬金高亮火舌 (Solar Yellow Core)
+  '#fffbe0'  // 7: 炽白金焰心与火星 (White-Hot Platinum Core)
+];
+const FLAME_LOBES = [
+  { x: 0.04, h: 0.50, w: 0.088, speed: 1.92, curl: 0.042, power: 1.06, seed: 0.4 },
+  { x: 0.14, h: 0.66, w: 0.104, speed: 1.54, curl: 0.052, power: 1.18, seed: 1.5 },
+  { x: 0.25, h: 0.54, w: 0.092, speed: 1.82, curl: 0.046, power: 1.08, seed: 2.7 },
+  { x: 0.36, h: 0.74, w: 0.112, speed: 1.42, curl: 0.058, power: 1.22, seed: 3.8 },
+  { x: 0.47, h: 0.58, w: 0.096, speed: 1.72, curl: 0.048, power: 1.12, seed: 4.9 },
+  { x: 0.58, h: 0.80, w: 0.118, speed: 1.36, curl: 0.062, power: 1.26, seed: 6.1 },
+  { x: 0.69, h: 0.90, w: 0.128, speed: 1.26, curl: 0.066, power: 1.32, seed: 7.3 },
+  { x: 0.80, h: 0.76, w: 0.114, speed: 1.58, curl: 0.054, power: 1.22, seed: 8.5 },
+  { x: 0.89, h: 0.68, w: 0.102, speed: 1.78, curl: 0.048, power: 1.16, seed: 9.6 },
+  { x: 0.96, h: 0.54, w: 0.086, speed: 2.05, curl: 0.038, power: 1.08, seed: 10.8 }
+];
+
+function createFlameEmber(isInitial = false) {
+  const x = 0.03 + Math.random() * 0.94;
+  const y = isInitial ? (0.05 + Math.random() * 0.84) : (0.58 + Math.random() * 0.32);
+  const shapeRoll = Math.random();
+  return {
+    x,
+    y,
+    vy: 0.22 + Math.random() * 0.28,
+    vxAmp: 0.018 + Math.random() * 0.026,
+    vxFreq: 3.2 + Math.random() * 4.2,
+    vxPhase: Math.random() * Math.PI * 2,
+    driftBias: (Math.random() - 0.48) * 0.036,
+    shape: shapeRoll < 0.28 ? 'cross' : shapeRoll < 0.64 ? 'block' : 'dot'
+  };
+}
+
+function ensureFlameState(canvas) {
+  if (!canvas._flameState) {
+    const embers = [];
+    for (let i = 0; i < 42; i++) embers.push(createFlameEmber(true));
+    canvas._flameState = {
+      embers,
+      surgeUntil: 0,
+      surgeDuration: 1150,
+      lastTickMs: performance.now(),
+      seed: 1.15
+    };
+  }
+  return canvas._flameState;
+}
+
+function triggerFlameSurge(durationMs = 1150) {
+  if (document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches)) return;
+  const now = performance.now();
+  const clamped = Math.min(2200, Math.max(600, durationMs));
+  flameSurgeUntil = Math.max(flameSurgeUntil, now + clamped);
+  const canvases = document.querySelectorAll('.pixel-matrix-canvas[data-pixel-theme="flame"]');
+  canvases.forEach(c => {
+    const st = ensureFlameState(c);
+    st.surgeUntil = Math.max(st.surgeUntil, now + clamped);
+    st.surgeDuration = clamped;
+    for (let i = 0; i < 10 && i < st.embers.length; i++) {
+      const idx = Math.floor(Math.random() * st.embers.length);
+      st.embers[idx] = createFlameEmber(false);
+    }
+    drawPixelMatrix(c, pixelPhase);
+  });
+}
+
+// ==========================================
+// 100% ????????? + ??????? (1~3 Bolts, 2~4 Forks Each)
+// ==========================================
+function ensureCanvasState(canvas) {
+  if (!canvas._lightningState) {
+    const now = performance.now();
+    canvas._lightningState = {
+      active: null,
+      nextStrike: now
+    };
+  }
+  return canvas._lightningState;
+}
+
+function subdividePerpPath(p1, p2, jitterRatio, depth, minX, maxX, minY, maxY) {
+  if (depth <= 0) return [p1, p2];
+  const dx = p2.x - p1.x;
+  const dy = p2.y - p1.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 2.2) return [p1, p2];
+  const nx = -dy / len;
+  const ny = dx / len;
+  const rawJitter = Math.max(len * jitterRatio, depth >= 2 ? 3.2 : 1.6);
+  const offset = (Math.random() - 0.5) * 2 * rawJitter;
+  const alongShift = (Math.random() - 0.5) * 0.16;
+  const mx = (p1.x + p2.x) * 0.5 + dx * alongShift + nx * offset;
+  const my = (p1.y + p2.y) * 0.5 + dy * alongShift + ny * offset;
+  const mid = {
+    x: Math.max(minX, Math.min(maxX, mx)),
+    y: Math.max(minY, Math.min(maxY, my))
+  };
+  const nextRatio = jitterRatio * 0.88;
+  const left = subdividePerpPath(p1, mid, nextRatio, depth - 1, minX, maxX, minY, maxY);
+  const right = subdividePerpPath(mid, p2, nextRatio, depth - 1, minX, maxX, minY, maxY);
+  return left.slice(0, -1).concat(right);
+}
+
+function buildFractalChain(anchors, jitterRatio, depth, minX, maxX, minY, maxY) {
+  let pts = [anchors[0]];
+  for (let i = 0; i < anchors.length - 1; i++) {
+    const seg = subdividePerpPath(anchors[i], anchors[i + 1], jitterRatio, depth, minX, maxX, minY, maxY);
+    pts = pts.concat(seg.slice(1));
+  }
+  return pts;
+}
+
+function buildCrookedBranch(origin, reachLen, baseAngle, segCount, jitterRatio, depth, minX, maxX, minY, maxY) {
+  const anchors = [origin];
+  let cur = origin;
+  let curAngle = baseAngle;
+  for (let s = 0; s < segCount; s++) {
+    const stepLen = (reachLen / segCount) * (0.72 + Math.random() * 0.56);
+    // 每个宏拐点明显偏转，避免分支退化为直线
+    const turnSign = (s === 0 ? (Math.random() < 0.5 ? -1 : 1) : (Math.random() < 0.72 ? -1 : 1) * Math.sign(curAngle - baseAngle || 1));
+    curAngle = baseAngle + turnSign * (0.34 + Math.random() * 0.52);
+    const nx = Math.max(minX, Math.min(maxX, cur.x + Math.sin(curAngle) * stepLen));
+    const ny = Math.max(minY, Math.min(maxY, cur.y + Math.max(0.18, Math.cos(curAngle)) * stepLen));
+    const wp = { x: nx, y: ny };
+    anchors.push(wp);
+    cur = wp;
+  }
+  return buildFractalChain(anchors, jitterRatio, depth, minX, maxX, minY, maxY);
+}
+
+function distToSegSq(px, py, ax, ay, bx, by) {
+  const vx = bx - ax, vy = by - ay;
+  const wx = px - ax, wy = py - ay;
+  const len2 = vx * vx + vy * vy;
+  if (len2 <= 1e-6) return wx * wx + wy * wy;
+  let t = (wx * vx + wy * vy) / len2;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  const dx = px - (ax + t * vx), dy = py - (ay + t * vy);
+  return dx * dx + dy * dy;
+}
+
+function appendPolylineSegs(pts, step, weight, outSegs) {
+  if (!pts || pts.length < 2) return;
+  let prev = pts[0];
+  for (let i = step; i < pts.length - 1; i += step) {
+    outSegs.push({ ax: prev.x, ay: prev.y, bx: pts[i].x, by: pts[i].y, w: weight });
+    prev = pts[i];
+  }
+  const last = pts[pts.length - 1];
+  outSegs.push({ ax: prev.x, ay: prev.y, bx: last.x, by: last.y, w: weight });
+}
+
+function generateRandomLightningBolt(w, h) {
+  const boltCount = 1 + Math.floor(Math.random() * 3);
+  const zoneAnchors = boltCount === 1
+    ? [[0.54, 0.84]]
+    : boltCount === 2
+      ? [[0.43, 0.60], [0.72, 0.91]]
+      : [[0.36, 0.50], [0.58, 0.72], [0.79, 0.94]];
+
+  const heroIdx = Math.floor(Math.random() * boltCount);
+  const bolts = [];
+  const minSafeX = w * 0.25;
+  const maxSafeX = Math.max(minSafeX + 24, w - 6);
+
+  // 为非主闪电随机分配差异化原型：短促半空闪（少分支）、大斜跨多分枝、细锐远景副闪电
+  const secondaryModes = ['short-sparse', 'slanted-forked', 'mid-crooked'];
+  for (let i = secondaryModes.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    const tmp = secondaryModes[i];
+    secondaryModes[i] = secondaryModes[j];
+    secondaryModes[j] = tmp;
+  }
+  let secCursor = 0;
+
+  for (let b = 0; b < boltCount; b++) {
+    const isHero = b === heroIdx;
+    const mode = isHero ? 'hero-full' : secondaryModes[secCursor++ % secondaryModes.length];
+    const [minF, maxF] = zoneAnchors[b];
+    const startX = w * (minF + Math.random() * (maxF - minF));
+
+    let startY = 0;
+    let endY = h;
+    let targetX = startX;
+    let macroSteps = 3;
+    let kinkScale = 0.08;
+    let jitterRatio = 0.36;
+    let forkCount = 2;
+    let forkLenScale = 1.0;
+    let weight = 1.0;
+    let delayMs = 0;
+
+    if (mode === 'hero-full') {
+      startY = 0;
+      endY = h;
+      const slantDir = startX > w * 0.70 ? -1 : 1;
+      targetX = Math.max(minSafeX + 14, Math.min(maxSafeX - 4, startX + slantDir * w * (0.08 + Math.random() * 0.14)));
+      macroSteps = 3 + Math.floor(Math.random() * 2);
+      kinkScale = 0.095;
+      jitterRatio = 0.36;
+      forkCount = 3 + Math.floor(Math.random() * 2); // 3~4 条主分支（多分枝）
+      forkLenScale = 1.08;
+      weight = 1.0;
+      delayMs = 0;
+    } else if (mode === 'short-sparse') {
+      // 明显更短：仅占高度 34% ~ 58%，半空凌空熄灭或起于中高层，少分支 (0~1条)
+      startY = Math.random() < 0.45 ? h * (0.08 + Math.random() * 0.14) : 0;
+      endY = Math.min(h * 0.88, startY + h * (0.34 + Math.random() * 0.24));
+      const dir = (Math.random() < 0.5 ? -1 : 1);
+      targetX = Math.max(minSafeX + 8, Math.min(maxSafeX - 4, startX + dir * w * (0.04 + Math.random() * 0.10)));
+      macroSteps = 2;
+      kinkScale = 0.075;
+      jitterRatio = 0.40;
+      forkCount = Math.random() < 0.45 ? 0 : 1; // 少分支 / 极简锐闪电
+      forkLenScale = 0.58;
+      weight = 0.62 + Math.random() * 0.10;
+      delayMs = 35 + Math.floor(Math.random() * 65);
+    } else if (mode === 'slanted-forked') {
+      // 大跨度斜劈 + 2~3 条曲折长分支
+      startY = 0;
+      endY = h * (0.76 + Math.random() * 0.24);
+      const slantDir = startX > w * 0.65 ? -1 : 1;
+      targetX = Math.max(minSafeX + 10, Math.min(maxSafeX - 4, startX + slantDir * w * (0.14 + Math.random() * 0.16)));
+      macroSteps = 4;
+      kinkScale = 0.115;
+      jitterRatio = 0.42;
+      forkCount = 2 + Math.floor(Math.random() * 2);
+      forkLenScale = 0.92;
+      weight = 0.78 + Math.random() * 0.10;
+      delayMs = 18 + Math.floor(Math.random() * 48);
+    } else {
+      // mid-crooked: 中高跨度大曲折伴随闪电（60%~88% 高度，1~2 条分支）
+      startY = Math.random() < 0.35 ? h * 0.06 : 0;
+      endY = Math.min(h, startY + h * (0.58 + Math.random() * 0.28));
+      targetX = Math.max(minSafeX + 10, Math.min(maxSafeX - 4, startX + (Math.random() - 0.5) * w * 0.18));
+      macroSteps = 3;
+      kinkScale = 0.125;
+      jitterRatio = 0.44;
+      forkCount = 1 + Math.floor(Math.random() * 2);
+      forkLenScale = 0.76;
+      weight = 0.68 + Math.random() * 0.12;
+      delayMs = 28 + Math.floor(Math.random() * 55);
+    }
+
+    const macroAnchors = [{ x: startX, y: startY }];
+    for (let s = 1; s < macroSteps; s++) {
+      const t = s / macroSteps;
+      // 交替方向折跃，让每道闪电有各自独特的骨架姿态
+      const zigSign = (s % 2 === 0 ? 1 : -1) * (b % 2 === 0 ? 1 : -1);
+      const kink = (zigSign * 0.55 + (Math.random() - 0.5) * 1.1) * w * kinkScale;
+      const wx = Math.max(minSafeX + 6, Math.min(maxSafeX - 4, startX + (targetX - startX) * t + kink));
+      const wy = startY + (endY - startY) * Math.max(0.08, Math.min(0.92, t + (Math.random() - 0.5) * 0.08));
+      macroAnchors.push({ x: wx, y: wy });
+    }
+    macroAnchors.push({ x: targetX, y: endY });
+
+    const mainPts = buildFractalChain(macroAnchors, jitterRatio, 3, minSafeX, maxSafeX, startY, endY);
+
+    const forks = [];
+    const twigs = [];
+    const sparks = [{ x: targetX, y: Math.max(2, endY - 2) }];
+    const glowSegs = [];
+    appendPolylineSegs(mainPts, 3, 1.0, glowSegs);
+
+    const minIdx = Math.max(3, Math.floor(mainPts.length * 0.12));
+    const maxIdx = Math.max(minIdx + 2, Math.floor(mainPts.length * 0.82));
+    for (let f = 0; f < forkCount; f++) {
+      const frac = (f + 0.18 + Math.random() * 0.64) / Math.max(1, forkCount);
+      const idx = Math.min(mainPts.length - 2, Math.floor(minIdx + frac * (maxIdx - minIdx)));
+      const origin = mainPts[idx];
+      const side = (f + b) % 2 === 0 ? -1 : 1;
+      const baseAngle = (0.48 + Math.random() * 0.56) * side;
+      const spanH = Math.max(80, endY - startY);
+      // 分支长度有长有短：短电弧须到长分叉
+      const sizeVariety = f === 0 ? (0.34 + Math.random() * 0.16) : (0.18 + Math.random() * 0.26);
+      const reachLen = Math.max(28, Math.min(h * 0.52, spanH * sizeVariety * forkLenScale));
+      const bendCount = reachLen > 72 ? 3 : 2;
+      const forkPts = buildCrookedBranch(
+        origin, reachLen, baseAngle, bendCount, 0.44, 3,
+        minSafeX * 0.82, maxSafeX, Math.max(2, origin.y - 8), Math.min(h - 2, origin.y + reachLen * 1.15)
+      );
+      forks.push(forkPts);
+      appendPolylineSegs(forkPts, 2, 0.72, glowSegs);
+      sparks.push(forkPts[forkPts.length - 1]);
+
+      // 65% 概率再分出曲折毛细二级小叉（同样 2 折+垂直分形抖动，非直线）
+      if (Math.random() < 0.65 && forkPts.length >= 6) {
+        const twOrigin = forkPts[Math.floor(forkPts.length * (0.32 + Math.random() * 0.32))];
+        const twSide = Math.random() < 0.5 ? side : -side;
+        const twAngle = baseAngle + twSide * (0.36 + Math.random() * 0.42);
+        const twLen = Math.max(18, reachLen * (0.36 + Math.random() * 0.24));
+        const twPts = buildCrookedBranch(
+          twOrigin, twLen, twAngle, 2, 0.46, 2,
+          minSafeX * 0.80, maxSafeX, Math.max(2, twOrigin.y - 6), h - 2
+        );
+        twigs.push(twPts);
+        appendPolylineSegs(twPts, 3, 0.45, glowSegs);
+      }
+    }
+
+    bolts.push({
+      isHero,
+      mode,
+      spanRatio: Number(((endY - startY) / Math.max(1, h)).toFixed(2)),
+      weight,
+      delayMs,
+      mainPts,
+      forks,
+      twigs,
+      sparks,
+      glowSegs
+    });
+  }
+
+  return {
+    startTime: performance.now(),
+    duration: 920 + Math.random() * 260, // 0.92s ~ 1.18s 充分展示电弧美感与分叉层次
+    bolts
+  };
+}
+
+function triggerLightningSurge(durationMs = 1120) {
+  if (document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches)) return;
+  const clamped = Math.min(1350, Math.max(900, durationMs));
+  lightningSurgeUntil = performance.now() + clamped;
+  const canvases = document.querySelectorAll('.pixel-matrix-canvas[data-pixel-theme="lightning"]');
+  canvases.forEach(c => {
+    const w = c.clientWidth || 360;
+    const h = c.clientHeight || 220;
+    const st = ensureCanvasState(c);
+    st.active = generateRandomLightningBolt(w, h);
+    st.active.duration = clamped;
+    st.nextStrike = performance.now() + st.active.duration + 1100;
+    drawPixelMatrix(c, pixelPhase);
+  });
+}
+
+function strokeTaperedPolyline(ctx, pts, wStart, wEnd, aStart, aEnd, colorAtAlpha) {
+  if (!pts || pts.length < 2) return;
+  const bands = 4;
+  const totalSegs = pts.length - 1;
+  for (let band = 0; band < bands; band++) {
+    const i0 = Math.floor((band * totalSegs) / bands);
+    const i1 = Math.max(i0 + 1, Math.floor(((band + 1) * totalSegs) / bands));
+    if (i0 >= totalSegs) break;
+    const t = (band + 0.5) / bands;
+    const lw = wStart + (wEnd - wStart) * t;
+    const al = aStart + (aEnd - aStart) * t;
+    if (al <= 0.01 || lw <= 0.05) continue;
+    ctx.lineWidth = lw;
+    ctx.strokeStyle = colorAtAlpha(al);
+    ctx.beginPath();
+    ctx.moveTo(pts[i0].x, pts[i0].y);
+    for (let i = i0 + 1; i <= Math.min(pts.length - 1, i1); i++) {
+      ctx.lineTo(pts[i].x, pts[i].y);
+    }
+    ctx.stroke();
+  }
+}
 
 function drawPixelMatrix(canvas, phase = 0) {
   const ctx = canvas.getContext('2d');
@@ -2899,15 +3735,444 @@ function drawPixelMatrix(canvas, phase = 0) {
   const w = canvas.clientWidth || 360;
   const h = canvas.clientHeight || 220;
   if (!w || !h) return;
-  const cell = 8;
+  const cell = 6;
   const cols = Math.ceil(w / cell);
   const rows = Math.ceil(h / cell);
+  const theme = canvas.dataset.pixelTheme || 'blue';
+
+  if (theme === 'lightning') {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const bw = Math.round(w * dpr);
+    const bh = Math.round(h * dpr);
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw;
+      canvas.height = bh;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const nowMs = performance.now();
+    const isMotionPaused = document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches);
+    const st = ensureCanvasState(canvas);
+
+    if (!isMotionPaused) {
+      if (!st.active && nowMs >= st.nextStrike) {
+        st.active = generateRandomLightningBolt(w, h);
+        st.nextStrike = nowMs + st.active.duration + 1150 + Math.random() * 850;
+      }
+    } else {
+      st.active = null;
+    }
+
+    // 可观测持久放电包络 (~1s)：极速击穿 -> 高亮微颤持续观测期 -> 短促呼吸回击 -> 柔和余晖熄灭
+    let strikeIntensity = 0;
+    const elapsedTotal = st.active ? (nowMs - st.active.startTime) : 0;
+    if (st.active) {
+      if (elapsedTotal >= st.active.duration) {
+        st.active = null;
+      } else {
+        const p = elapsedTotal / st.active.duration;
+        if (p < 0.08) {
+          strikeIntensity = 1.0;
+        } else if (p < 0.54) {
+          strikeIntensity = 0.91 + 0.09 * Math.sin(p * 42);
+        } else if (p < 0.64) {
+          strikeIntensity = 0.54;
+        } else if (p < 0.80) {
+          strikeIntensity = 0.94;
+        } else {
+          strikeIntensity = Math.max(0.02, Math.pow(1 - (p - 0.80) / 0.20, 1.4));
+        }
+      }
+    }
+
+    const liveBolts = [];
+    const allGlowSegs = [];
+    if (st.active && strikeIntensity > 0.03) {
+      for (const b of st.active.bolts) {
+        if (elapsedTotal >= b.delayMs) {
+          const bDur = Math.max(120, st.active.duration - b.delayMs);
+          const bp = Math.min(1, (elapsedTotal - b.delayMs) / bDur);
+          const bEnv = bp < 0.08
+            ? 1.0
+            : bp < 0.55
+              ? (0.91 + 0.09 * Math.sin(bp * 42))
+              : bp < 0.65
+                ? 0.54
+                : bp < 0.81
+                  ? 0.94
+                  : Math.max(0.02, Math.pow(1 - (bp - 0.81) / 0.19, 1.4));
+          const bInt = bEnv * b.weight;
+          liveBolts.push({ bolt: b, intensity: bInt });
+          for (let g = 0; g < b.glowSegs.length; g++) {
+            const sg = b.glowSegs[g];
+            allGlowSegs.push({ ax: sg.ax, ay: sg.ay, bx: sg.bx, by: sg.by, w: sg.w * bInt });
+          }
+        }
+      }
+    }
+
+    // A. 保留 6px 深海宝蓝 Bayer 像素渐变矩阵 + 沿连续闪电线段丝带式贴合提亮（无独立圆形光斑）
+    const baseBluePal = [
+      'rgba(8, 22, 78, 0.58)',
+      'rgba(16, 42, 126, 0.70)',
+      'rgba(27, 68, 180, 0.80)',
+      'rgba(37, 99, 235, 0.88)',
+      'rgba(56, 175, 255, 0.94)'
+    ];
+    const litBluePal = [
+      'rgba(59, 130, 246, 0.84)',
+      'rgba(56, 189, 248, 0.88)',
+      'rgba(125, 211, 252, 0.92)',
+      'rgba(186, 230, 253, 0.94)'
+    ];
+    const skyFlashBoost = strikeIntensity * 0.18;
+    const glowRadius = 68;
+    const glowRadiusSq = glowRadius * glowRadius;
+
+    for (let y = 0; y < rows; y++) {
+      const ny = y / Math.max(1, rows - 1);
+      const cy = y * cell + cell * 0.5;
+      for (let x = 0; x < cols; x++) {
+        const nx = x / Math.max(1, cols - 1);
+        const cx = x * cell + cell * 0.5;
+        const baseGrad = 0.28 * nx + 0.34 * (1 - ny) + 0.15 + skyFlashBoost * nx;
+        const waveDither = 0.07 * Math.sin(nx * 7.5 + ny * 4.2 + (isMotionPaused ? 0 : phase * 0.45));
+        let bgVal = Math.max(0, Math.min(1, baseGrad + waveDither));
+
+        let litProx = 0;
+        if (allGlowSegs.length > 0 && cx > w * 0.18) {
+          let minD2 = glowRadiusSq;
+          let bestW = 1;
+          for (let g = 0; g < allGlowSegs.length; g++) {
+            const sg = allGlowSegs[g];
+            const d2 = distToSegSq(cx, cy, sg.ax, sg.ay, sg.bx, sg.by);
+            if (d2 < minD2) { minD2 = d2; bestW = sg.w; }
+          }
+          if (minD2 < glowRadiusSq) {
+            const normDist = 1 - Math.sqrt(minD2) / glowRadius;
+            litProx = Math.pow(normDist, 1.45) * bestW;
+            bgVal = Math.min(1, bgVal + litProx * 0.52);
+          }
+        }
+
+        if (litProx > 0.28) {
+          const lIdx = Math.min(litBluePal.length - 1, Math.floor(((litProx - 0.28) / 0.72) * litBluePal.length));
+          ctx.fillStyle = litBluePal[lIdx];
+        } else {
+          const bgBand = Math.min(baseBluePal.length - 1, Math.floor(bgVal * baseBluePal.length));
+          ctx.fillStyle = baseBluePal[bgBand];
+        }
+        ctx.fillRect(x * cell, y * cell, cell - 1, cell - 1);
+      }
+    }
+
+    // B. 方案A+：一体贴合闪电氛围柔光 + 高精分形锐利冰白冰青电弧
+    if (liveBolts.length > 0) {
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      ctx.lineCap = 'round';
+      ctx.lineJoin = 'round';
+
+      // B1. 全局线性斜向片状天幕闪光（替代圆形径向光斑，与全卡电离一体呼应）
+      const sheetGrad = ctx.createLinearGradient(w * 0.18, 0, w, h * 0.85);
+      sheetGrad.addColorStop(0, 'rgba(37, 99, 235, 0)');
+      sheetGrad.addColorStop(0.55, 'rgba(56, 189, 248, ' + (0.09 * strikeIntensity).toFixed(3) + ')');
+      sheetGrad.addColorStop(1, 'rgba(224, 242, 254, ' + (0.15 * strikeIntensity).toFixed(3) + ')');
+      ctx.fillStyle = sheetGrad;
+      ctx.fillRect(0, 0, w, h);
+
+      // B2. 逐道绘制：沿闪电本体的连续宽幅冰白氛围薄纱 -> 电光蓝柔光 -> 冰青等离子层 -> 极细纯冰白内芯
+      for (let i = 0; i < liveBolts.length; i++) {
+        const { bolt, intensity } = liveBolts[i];
+        const isHero = bolt.isHero;
+        const a = Math.min(1, intensity);
+
+        // Pass 0: 贴合闪电路径的一体冰白/冰青氛围底光（取代圆形白斑）
+        ctx.shadowColor = 'rgba(186, 230, 253, ' + (0.36 * a).toFixed(2) + ')';
+        ctx.shadowBlur = isHero ? 20 : 12;
+        strokeTaperedPolyline(
+          ctx, bolt.mainPts, isHero ? 22 : 14, isHero ? 11 : 7, 0.12 * a, 0.05 * a,
+          al => 'rgba(224, 242, 254, ' + al.toFixed(3) + ')'
+        );
+        for (let f = 0; f < bolt.forks.length; f++) {
+          strokeTaperedPolyline(
+            ctx, bolt.forks[f], isHero ? 9.5 : 6.5, 2.8, 0.08 * a, 0.02 * a,
+            al => 'rgba(224, 242, 254, ' + al.toFixed(3) + ')'
+          );
+        }
+
+        // Pass 1: 外层电光蓝柔光
+        ctx.shadowColor = 'rgba(96, 165, 250, ' + (0.78 * a).toFixed(2) + ')';
+        ctx.shadowBlur = isHero ? 14 : 9;
+        strokeTaperedPolyline(
+          ctx, bolt.mainPts, isHero ? 10.5 : 7.0, isHero ? 5.0 : 3.4, 0.34 * a, 0.16 * a,
+          al => 'rgba(56, 189, 248, ' + al.toFixed(3) + ')'
+        );
+        for (let f = 0; f < bolt.forks.length; f++) {
+          strokeTaperedPolyline(
+            ctx, bolt.forks[f], isHero ? 4.6 : 3.2, 1.4, 0.24 * a, 0.05 * a,
+            al => 'rgba(56, 189, 248, ' + al.toFixed(3) + ')'
+          );
+        }
+
+        // Pass 2: 中层冰青辉光
+        ctx.shadowColor = 'rgba(125, 211, 252, ' + (0.94 * a).toFixed(2) + ')';
+        ctx.shadowBlur = isHero ? 7 : 5;
+        strokeTaperedPolyline(
+          ctx, bolt.mainPts, isHero ? 4.5 : 3.0, isHero ? 2.1 : 1.4, 0.78 * a, 0.48 * a,
+          al => 'rgba(165, 243, 252, ' + al.toFixed(3) + ')'
+        );
+        for (let f = 0; f < bolt.forks.length; f++) {
+          strokeTaperedPolyline(
+            ctx, bolt.forks[f], isHero ? 2.2 : 1.5, 0.75, 0.60 * a, 0.16 * a,
+            al => 'rgba(165, 243, 252, ' + al.toFixed(3) + ')'
+          );
+        }
+
+        // Pass 3: 锐利极细纯冰白内芯 (无 shadowBlur 保持矢量级锐度)
+        ctx.shadowBlur = 0;
+        strokeTaperedPolyline(
+          ctx, bolt.mainPts, isHero ? 2.45 : 1.65, isHero ? 1.05 : 0.75, 1.00 * a, 0.86 * a,
+          al => 'rgba(255, 255, 255, ' + al.toFixed(3) + ')'
+        );
+        for (let f = 0; f < bolt.forks.length; f++) {
+          strokeTaperedPolyline(
+            ctx, bolt.forks[f], isHero ? 1.25 : 0.92, 0.40, 0.94 * a, 0.28 * a,
+            al => 'rgba(255, 255, 255, ' + al.toFixed(3) + ')'
+          );
+        }
+        for (let tw = 0; tw < bolt.twigs.length; tw++) {
+          strokeTaperedPolyline(
+            ctx, bolt.twigs[tw], 0.75, 0.28, 0.72 * a, 0.16 * a,
+            al => 'rgba(224, 242, 254, ' + al.toFixed(3) + ')'
+          );
+        }
+
+        // Pass 4: 尖端微弱电离星火
+        for (let sp = 0; sp < bolt.sparks.length; sp++) {
+          const pt = bolt.sparks[sp];
+          ctx.fillStyle = 'rgba(224, 242, 254, ' + (0.78 * a).toFixed(2) + ')';
+          ctx.fillRect(pt.x - 1, pt.y - 1, 2, 2);
+        }
+      }
+      ctx.restore();
+    }
+    return;
+  }
+
+  if (theme === 'flame') {
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const bw = Math.round(w * dpr);
+    const bh = Math.round(h * dpr);
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw;
+      canvas.height = bh;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, w, h);
+
+    // 5px crisp pixel grid with 1px pixel mortar gap -> unmistakable retro pixel-art fire
+    const fCell = 5;
+    const fDraw = fCell - 1;
+    const fCols = Math.ceil(w / fCell);
+    const fRows = Math.ceil(h / fCell);
+    const nowMs = performance.now();
+    const isMotionPaused = document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches);
+    const fst = ensureFlameState(canvas);
+    const t = isMotionPaused ? FLAME_STATIC_PHASE : phase;
+
+    let surgeNorm = 0;
+    if (!isMotionPaused && fst.surgeUntil > nowMs) {
+      const sp = Math.max(0, Math.min(1, (fst.surgeUntil - nowMs) / Math.max(1, fst.surgeDuration)));
+      surgeNorm = Math.sin(sp * Math.PI);
+    }
+
+    const breath = 1.0 + 0.08 * Math.sin(t * 0.92 + fst.seed) + 0.04 * Math.sin(t * 2.05 + 1.1);
+    const ampBoost = breath + surgeNorm * 0.28;
+    const lobeState = FLAME_LOBES.map(L => ({
+      x: L.x,
+      h: L.h * ampBoost * (0.88 + 0.14 * Math.sin(t * L.speed + L.seed * 2.1)),
+      w: L.w * (1 + surgeNorm * 0.14),
+      speed: L.speed,
+      curl: L.curl,
+      power: L.power,
+      seed: L.seed
+    }));
+
+    // Step-quantized vertical advection for authentic pixel fire tongues
+    const yQuant = Math.floor(t * 5.6);
+    const bandGrid = new Uint8Array(fCols * fRows);
+
+    for (let y = 0; y < fRows; y++) {
+      // Quantize ny in 2-row micro-terraces so flame contours form crisp pixel steps
+      const nyRaw = y / Math.max(1, fRows - 1);
+      const nyStep = (Math.floor(y / 2) * 2) / Math.max(1, fRows - 1);
+      const ny = nyRaw * 0.65 + nyStep * 0.35;
+      const rise = 1 - ny;
+      const bedDepth = ny > 0.64 ? (ny - 0.64) / 0.36 : 0;
+      const tipMask = ny <= 0.26 ? (1 - ny / 0.26) : 0;
+
+      for (let x = 0; x < fCols; x++) {
+        const nxRaw = x / Math.max(1, fCols - 1);
+        const nxStep = (Math.floor(x / 2) * 2) / Math.max(1, fCols - 1);
+        const nx = nxRaw * 0.68 + nxStep * 0.32;
+        const bayer = (BAYER4[y & 3][x & 3] + 0.5) / 16;
+
+        // 1. Deep layered ember-to-ruby pixel sky (indices 0 -> 1 -> 2 -> 3) so upper flames have strong contrast
+        const skyWave = 0.05 * Math.sin(nx * 8.5 - t * 0.85) + 0.04 * Math.cos(ny * 7.2 + t * 0.65);
+        const bgWarmth = Math.max(0.02, 0.04 + 0.38 * Math.pow(ny, 1.32) + skyWave + surgeNorm * 0.06);
+
+        // 2. Full-width bottom terraced white-gold & orange firebed (nx = 0..1)
+        const bedWave = 0.90 + 0.10 * Math.sin(nx * 18.0 - t * 2.8) + 0.06 * Math.cos(nx * 29.0 + t * 3.3);
+        const firebed = bedDepth > 0 ? Math.pow(bedDepth, 1.02) * 0.96 * bedWave : 0;
+
+        // 3. 10 full-width rising, S-swaying, bifurcated pixel flame lobes with distinct inner/mid/outer cores
+        let lobeMax = 0;
+        let lobeSecond = 0;
+        let coreBoost = 0;
+        for (let li = 0; li < lobeState.length; li++) {
+          const L = lobeState[li];
+          const u = rise / Math.max(0.16, L.h);
+          if (u > 1.24) continue;
+          const sway = L.curl * (0.26 + 0.94 * rise) * (
+            Math.sin(nyStep * 9.2 + t * (L.speed * 1.38) + L.seed) +
+            0.46 * Math.sin(nyStep * 16.4 + t * 3.0 - L.seed)
+          );
+          const cx = L.x + sway;
+          const pinch = 1.0 + 0.18 * Math.sin(nyStep * 12.0 + t * 2.5 + L.seed);
+          const halfW = L.w * Math.max(0.20, 1.0 - 0.60 * Math.min(1, u)) * pinch;
+          const splitOff = 0.38 * halfW * Math.sin(nyStep * 11.2 + t * 2.7 + L.seed * 3.1);
+          const dx = Math.abs(nx - cx);
+          const dxFork = Math.abs(nx - (cx + splitOff));
+          const dist = Math.min(dx, dxFork * 1.10);
+          // Stepped radial profile for unmistakable multi-ring pixel flame tongues
+          const normD = dist / Math.max(0.014, halfW);
+          if (normD < 1.15) {
+            const radial = normD < 0.28 ? 1.0
+              : normD < 0.56 ? 0.80
+              : normD < 0.84 ? 0.54
+              : Math.max(0, 1 - normD / 1.15) * 0.32;
+            const vFall = Math.max(0, 1 - Math.pow(Math.max(0, u), 1.32));
+            const lh = radial * vFall * L.power;
+            if (lh > lobeMax) {
+              lobeSecond = lobeMax;
+              lobeMax = lh;
+            } else if (lh > lobeSecond) {
+              lobeSecond = lh;
+            }
+            if (normD < 0.32 && u < 0.68) {
+              coreBoost = Math.max(coreBoost, (1 - u / 0.68) * 0.24);
+            }
+          }
+        }
+
+        // 4. Crisp cellular pixel turbulence & detached pixel flame islands near tongue tips
+        const hSeed = Math.sin(x * 12.9898 + (y + yQuant) * 78.233) * 43758.5453;
+        const cellHash = hSeed - Math.floor(hSeed);
+        const turb = 0.055 * Math.sin(nxStep * 24.0 + nyStep * 16.0 + t * 3.5) * Math.cos(nxStep * 18.0 - nyStep * 22.0 + t * 2.6);
+        const topBreak = tipMask * (0.16 + 0.22 * cellHash);
+        const detachedWisp = (ny > 0.06 && ny <= 0.36 && lobeMax > 0.08 && lobeMax < 0.36 && cellHash > 0.62) ? 0.26 : 0;
+
+        // 5. Full-width bottom white-hot platinum & solar-yellow core (nx = 0..1)
+        const fullWidthBaseCore = ny > 0.78
+          ? 0.26 * Math.pow((ny - 0.78) / 0.22, 0.78) * (0.86 + 0.14 * Math.sin(nx * 20.0 + t * 3.0))
+          : 0;
+
+        // Keep upper-left headline area slightly deeper ruby/crimson so white/gold text pops with high contrast
+        const textZoneMod = (nx < 0.48 && ny < 0.54) ? 0.72 : 1.0;
+        const rawFlame = (Math.max(firebed, lobeMax * 0.86 + lobeSecond * 0.24) + coreBoost + fullWidthBaseCore + turb + detachedWisp - topBreak) * textZoneMod;
+        const heat = Math.max(bgWarmth, Math.min(0.999, rawFlame));
+
+        // Ordered Bayer dither strictly at narrow band boundaries (0.24..0.76) so solid pixel terraces & 4x4 checker borders both stand out
+        const scaled = heat * (FLAME_PALETTE.length - 1);
+        const band = Math.floor(scaled);
+        const frac = scaled - band;
+        let idx = Math.min(FLAME_PALETTE.length - 1, band);
+        const ditherThreshold = 0.24 + bayer * 0.52;
+        if (frac > ditherThreshold && idx + 1 < FLAME_PALETTE.length) idx += 1;
+        bandGrid[y * fCols + x] = idx;
+      }
+    }
+
+    // Pass 1: Render 8-tier pixel matrix with a 1-step crimson rim highlight around hot flame tongues
+    for (let y = 0; y < fRows; y++) {
+      const rowOff = y * fCols;
+      for (let x = 0; x < fCols; x++) {
+        let idx = bandGrid[rowOff + x];
+        // Pixel contour accent: if a cool background pixel (0..1) touches a hot flame pixel (>=4), step it up to deep ruby (2) for crisp pixel silhouette
+        if (idx <= 1) {
+          const up = y > 0 ? bandGrid[(y - 1) * fCols + x] : idx;
+          const dn = y + 1 < fRows ? bandGrid[(y + 1) * fCols + x] : idx;
+          const lf = x > 0 ? bandGrid[rowOff + x - 1] : idx;
+          const rt = x + 1 < fCols ? bandGrid[rowOff + x + 1] : idx;
+          if (up >= 4 || dn >= 4 || lf >= 4 || rt >= 4) {
+            idx = 2;
+          }
+        }
+        ctx.fillStyle = FLAME_PALETTE[idx];
+        ctx.fillRect(x * fCell, y * fCell, fDraw, fDraw);
+      }
+    }
+
+    // Pass 2: Multi-shape pixel embers (plus-cross sparks, 2x2 pixel blocks, 1x1 crisp sparks)
+    const dt = isMotionPaused ? 0 : Math.min(0.05, Math.max(0.001, (nowMs - fst.lastTickMs) / 1000));
+    fst.lastTickMs = nowMs;
+    const embers = fst.embers;
+    for (let i = 0; i < embers.length; i++) {
+      const em = embers[i];
+      if (!isMotionPaused) {
+        em.x += (Math.sin(t * em.vxFreq + em.vxPhase) * em.vxAmp + em.driftBias) * dt;
+        em.y -= em.vy * (1 + surgeNorm * 0.52) * dt;
+        if (em.y < 0.03 || em.x < 0.02 || em.x > 0.98) {
+          embers[i] = createFlameEmber(false);
+          continue;
+        }
+      }
+      const alt = Math.max(0, Math.min(1, (0.88 - em.y) / 0.80));
+      const gx = Math.max(1, Math.min(fCols - 3, Math.floor(em.x * fCols)));
+      const gy = Math.max(1, Math.min(fRows - 3, Math.floor(em.y * fRows)));
+      const coreColor = alt < 0.36 ? FLAME_PALETTE[7] : alt < 0.68 ? FLAME_PALETTE[6] : FLAME_PALETTE[5];
+      const haloColor = alt < 0.45 ? FLAME_PALETTE[5] : FLAME_PALETTE[3];
+
+      if (em.shape === 'cross' && alt < 0.62) {
+        // Retro 5-cell pixel plus-star spark
+        ctx.fillStyle = haloColor;
+        ctx.fillRect((gx - 1) * fCell, gy * fCell, fDraw, fDraw);
+        ctx.fillRect((gx + 1) * fCell, gy * fCell, fDraw, fDraw);
+        ctx.fillRect(gx * fCell, (gy - 1) * fCell, fDraw, fDraw);
+        ctx.fillRect(gx * fCell, (gy + 1) * fCell, fDraw, fDraw);
+        ctx.fillStyle = coreColor;
+        ctx.fillRect(gx * fCell, gy * fCell, fDraw, fDraw);
+      } else if (em.shape === 'block' && alt < 0.52) {
+        // 2x2 stepped pixel cluster with hotter bottom-inner cell
+        ctx.fillStyle = haloColor;
+        ctx.fillRect(gx * fCell, gy * fCell, fDraw, fDraw);
+        ctx.fillRect((gx + 1) * fCell, gy * fCell, fDraw, fDraw);
+        ctx.fillStyle = coreColor;
+        ctx.fillRect(gx * fCell, (gy + 1) * fCell, fDraw, fDraw);
+        ctx.fillRect((gx + 1) * fCell, (gy + 1) * fCell, fDraw, fDraw);
+      } else {
+        // 1x1 pixel spark with trailing vertical ember pixel
+        ctx.fillStyle = coreColor;
+        ctx.fillRect(gx * fCell, gy * fCell, fDraw, fDraw);
+        if (gy + 1 < fRows) {
+          ctx.fillStyle = FLAME_PALETTE[3];
+          ctx.fillRect(gx * fCell, (gy + 1) * fCell, fDraw, fDraw);
+        }
+      }
+    }
+    return;
+  }
+
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
   }
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, w, h);
-  const theme = canvas.dataset.pixelTheme || 'blue';
+
   const palettes = {
     orange: [
       'rgba(255, 246, 214, 0.36)',
@@ -2952,7 +4217,11 @@ function initPixelMatrices() {
     if (!hero.querySelector('.pixel-matrix-canvas')) {
       const c = document.createElement('canvas');
       c.className = 'pixel-matrix-canvas';
-      c.dataset.pixelTheme = hero.classList.contains('poster-orange') ? 'orange' : hero.classList.contains('poster-black') ? 'black' : 'blue';
+      c.dataset.pixelTheme = hero.classList.contains('poster-flame') ? 'flame'
+        : hero.classList.contains('poster-lightning') ? 'lightning'
+        : hero.classList.contains('poster-orange') ? 'orange'
+        : hero.classList.contains('poster-black') ? 'black'
+        : 'blue';
       c.setAttribute('aria-hidden', 'true');
       hero.prepend(c);
     }
@@ -2971,9 +4240,15 @@ function startPixelLoop() {
     if (document.body.classList.contains('motion-paused') || reducedMotion.matches) {
       pixelFrameId = 0; return;
     }
-    if (ts - lastDraw >= 90) {
-      pixelPhase += 0.14;
-      [...document.querySelectorAll('.pixel-matrix-canvas')].forEach(c => drawPixelMatrix(c, pixelPhase));
+    const canvases = [...document.querySelectorAll('.pixel-matrix-canvas')];
+    const nowLoop = performance.now();
+    const hasActiveLightning = nowLoop < lightningSurgeUntil || canvases.some(c => c._lightningState && c._lightningState.active);
+    const hasActiveFlameSurge = nowLoop < flameSurgeUntil;
+    const hasFlame = canvases.some(c => c.dataset.pixelTheme === 'flame');
+    const minInterval = hasActiveLightning ? 16 : hasActiveFlameSurge ? 24 : hasFlame ? 33 : 55;
+    if (ts - lastDraw >= minInterval) {
+      pixelPhase += hasActiveLightning ? 0.035 : hasFlame ? 0.075 : 0.11;
+      canvases.forEach(c => drawPixelMatrix(c, pixelPhase));
       lastDraw = ts;
     }
     pixelFrameId = requestAnimationFrame(stepFrame);
@@ -2993,7 +4268,7 @@ function syncMotion() {
   motionButton.disabled = reducedMotion.matches;
   clearInterval(quoteTimer);
   if (!stopped && view === 'home') quoteTimer = setInterval(nextQuote, 7000);
-  if (stopped) stopPixelLoop(); else startPixelLoop();
+  if (stopped) { stopPixelLoop(); [...document.querySelectorAll('.pixel-matrix-canvas')].forEach(c => drawPixelMatrix(c, pixelPhase)); } else startPixelLoop();
 }
 motionButton.addEventListener('click', () => { motionPaused = !motionPaused; syncMotion(); });
 reducedMotion.addEventListener('change', syncMotion);
@@ -3022,16 +4297,17 @@ if (checkinParam === 'snap' || checkinParam === 'sport') {
   openCheckin('study');
 }
 
-// Startup server health check & state sync
+// Startup server health check & state sync (guarded against embedded/demo iframe)
 if (!embedded && !demo && typeof checkServerHealth === 'function') {
   checkServerHealth().then(async online => {
     if (online) {
       isServerOnline = true;
       console.log('[RUN LOG] 在线后端已连接，正在同步云端 SQLite 状态...');
+      await flushPendingOps();
       const remoteState = await serverFetch('/state');
-      if (remoteState) {
+      if (remoteState && remoteState.ok) {
         state = hydrateState(remoteState);
-        try { localStorage.setItem(STORE, JSON.stringify(state)); } catch {}
+        persistLocalOnly();
         render(true);
       }
       initSSE();
