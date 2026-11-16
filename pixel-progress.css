@@ -1,1 +1,628 @@
-.ppb-root{--ppb-w: 560px;--ppb-h: 24px;--ppb-px: 4px;--ppb-u: calc(var(--ppb-h) / 6);--ppb-pct: 0%;--ppb-trail-scale: 1;--ppb-track-bg: #FFFFFF;--ppb-track-border: #D6D0C6;--ppb-c1: #D97757;--ppb-c2: #E89D82;--ppb-c3: #F4D0C3;width:var(--ppb-w);max-width:100%;display:flex;flex-direction:column;gap:7px;font-family:var(--body, "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif);color:inherit;box-sizing:border-box}.ppb-root *,.ppb-root *:before,.ppb-root *:after{box-sizing:border-box}.ppb-root.is-bare{gap:0}.ppb-head{display:flex;align-items:baseline;justify-content:space-between;gap:10px;min-width:0;font-size:13px;line-height:1.35}.ppb-label{font-weight:600;color:var(--ppb-label-color, #EFECE6);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.ppb-meta{display:inline-flex;align-items:center;gap:8px;flex-shrink:0;font-family:var(--mono, "Cascadia Mono", Consolas, monospace);font-variant-numeric:tabular-nums}.ppb-status-tag{font-size:10.5px;font-weight:700;letter-spacing:.4px;padding:1px 6px;border:1px solid #4A453E;background:#272522;color:#d7cfc5;border-radius:0}.ppb-pct-text{font-size:12.5px;font-weight:700;color:var(--ppb-pct-color, #F4D0C3);min-width:36px;text-align:right}.ppb-track{position:relative;width:100%;height:calc(var(--ppb-h) + 2px);background-color:var(--ppb-track-bg);background-image:repeating-linear-gradient(90deg,rgba(26,25,23,.04) 0 1px,transparent 1px var(--ppb-px)),repeating-linear-gradient(0deg,rgba(26,25,23,.035) 0 1px,transparent 1px var(--ppb-px));border:1px solid var(--ppb-track-border);border-radius:0;overflow:hidden}.ppb-fill{position:relative;height:100%;width:var(--ppb-pct);overflow:hidden;border-radius:0;transition:width .25s cubic-bezier(.22,1,.36,1);will-change:width}.ppb-root.is-zero .ppb-fill{opacity:0;visibility:hidden}.ppb-root.is-zero .ppb-rear-glow,.ppb-root.is-zero .ppb-body,.ppb-root.is-zero .ppb-trail{display:none}.ppb-rear-glow{position:absolute;inset:1px 0;pointer-events:none;z-index:1;background:linear-gradient(90deg,var(--ppb-c1) 0%,var(--ppb-c2) 72%,var(--ppb-c3) 100%);filter:blur(6px);opacity:.15;animation:ppbBreathe 4s ease-in-out infinite}.ppb-body{position:relative;width:100%;height:100%;z-index:2;--i1: calc(4 * var(--ppb-u) * var(--ppb-trail-scale));--i2: calc(2 * var(--ppb-u) * var(--ppb-trail-scale));--i3: 0px;--i4: calc(1 * var(--ppb-u) * var(--ppb-trail-scale));--i5: calc(3 * var(--ppb-u) * var(--ppb-trail-scale));--i6: calc(5 * var(--ppb-u) * var(--ppb-trail-scale));clip-path:polygon(0% 0%,max(0px,calc(100% - var(--i1))) 0%,max(0px,calc(100% - var(--i1))) 16.6667%,max(0px,calc(100% - var(--i2))) 16.6667%,max(0px,calc(100% - var(--i2))) 33.3333%,calc(100% - var(--i3)) 33.3333%,calc(100% - var(--i3)) 50%,max(0px,calc(100% - var(--i4))) 50%,max(0px,calc(100% - var(--i4))) 66.6667%,max(0px,calc(100% - var(--i5))) 66.6667%,max(0px,calc(100% - var(--i5))) 83.3333%,max(0px,calc(100% - var(--i6))) 83.3333%,max(0px,calc(100% - var(--i6))) 100%,0% 100%)}.ppb-grad{position:absolute;inset:0;background-color:var(--ppb-c1);background-image:linear-gradient(108deg,transparent 0%,transparent 35%,color-mix(in srgb,var(--ppb-c2) 55%,transparent) 43%,color-mix(in srgb,var(--ppb-c3) 92%,transparent) 49.5%,color-mix(in srgb,var(--ppb-c2) 55%,transparent) 56%,transparent 64%,transparent 100%),linear-gradient(90deg,var(--ppb-c1) 0%,var(--ppb-c1) 26%,var(--ppb-c2) 52%,var(--ppb-c1) 76%,var(--ppb-c2) 100%);background-size:230% 100%,200% 100%;background-position:115% 50%,0% 50%;animation:ppbGradientFlow 6s ease-in-out infinite}.ppb-grid{position:absolute;inset:0;pointer-events:none;z-index:1;background-image:repeating-linear-gradient(90deg,transparent 0 calc(var(--ppb-px) - 1px),rgba(22,16,13,.16) calc(var(--ppb-px) - 1px) var(--ppb-px)),repeating-linear-gradient(0deg,transparent 0 calc(var(--ppb-px) - 1px),rgba(22,16,13,.14) calc(var(--ppb-px) - 1px) var(--ppb-px));background-size:var(--ppb-px) var(--ppb-px)}.ppb-trail{position:absolute;top:0;bottom:0;right:0;width:min(calc(10 * var(--ppb-u)),100%);pointer-events:none;z-index:3}.ppb-dot{position:absolute;width:var(--ppb-u);height:var(--ppb-u);border-radius:0}.ppb-d1{top:0;right:calc(2 * var(--ppb-u));background:var(--ppb-c2);opacity:.78;animation:ppbPixelShimmerStrong 2.3s ease-in-out -.4s infinite}.ppb-d2{top:var(--ppb-u);right:0;background:var(--ppb-c3);opacity:.56;animation:ppbPixelShimmerSoft 3.1s ease-in-out -1.6s infinite}.ppb-d3{top:calc(4 * var(--ppb-u));right:calc(1 * var(--ppb-u));background:var(--ppb-c1);opacity:.82;animation:ppbPixelShimmerStrong 1.9s ease-in-out -.9s infinite}.ppb-d4{top:calc(5 * var(--ppb-u));right:calc(3 * var(--ppb-u));background:var(--ppb-c2);opacity:.72;animation:ppbPixelShimmerStrong 2.7s ease-in-out -2.1s infinite}.ppb-d5{top:calc(5 * var(--ppb-u));right:0;background:var(--ppb-c3);opacity:.38;animation:ppbPixelShimmerSoft 3.5s ease-in-out -1.2s infinite}.ppb-d6{top:calc(3 * var(--ppb-u));right:0;background:var(--ppb-c3);opacity:.3;animation:ppbPixelShimmerSoft 3.3s ease-in-out -2.6s infinite}.ppb-root.is-tiny{--ppb-trail-scale: .5}.ppb-root.is-tiny .ppb-d4,.ppb-root.is-tiny .ppb-d5,.ppb-root.is-tiny .ppb-d6{display:none}.ppb-root.is-micro{--ppb-trail-scale: 0}.ppb-root.is-micro .ppb-trail{display:none}.ppb-root.is-complete .ppb-body{clip-path:none}.ppb-root.is-complete .ppb-trail{display:none}.ppb-root.is-complete .ppb-grad,.ppb-root.is-complete .ppb-rear-glow,.ppb-root.is-complete .ppb-dot{animation:none!important}.ppb-root.is-complete .ppb-rear-glow{opacity:.18}.ppb-root.ppb-state-paused .ppb-grad,.ppb-root.ppb-state-paused .ppb-rear-glow,.ppb-root.ppb-state-paused .ppb-dot{animation:none!important}.ppb-root.ppb-state-paused .ppb-fill{filter:saturate(.45) brightness(.92)}.ppb-root.ppb-state-paused .ppb-status-tag{background:#2c2a27;border-color:#6b655b;color:#cfc8bc}.ppb-root.ppb-state-success .ppb-status-tag{background:#203124;border-color:#5c8e64;color:#bee4c2}.ppb-root.ppb-state-error{--ppb-c1: #B83527;--ppb-c2: #DC5442;--ppb-c3: #F4A296}.ppb-root.ppb-state-error .ppb-grad,.ppb-root.ppb-state-error .ppb-rear-glow,.ppb-root.ppb-state-error .ppb-dot{animation:none!important}.ppb-root.ppb-state-error .ppb-status-tag{background:#381d1a;border-color:#dc5442;color:#f7bcb4}.ppb-note{font-size:11.5px;line-height:1.35;color:#f28f82;font-weight:500}.ppb-note[hidden]{display:none}.ppb-indet{display:none;position:absolute;inset:0;overflow:hidden}.ppb-root.ppb-state-indeterminate .ppb-fill{display:none}.ppb-root.ppb-state-indeterminate .ppb-indet{display:block}.ppb-root.ppb-state-indeterminate .ppb-status-tag{background:#33251f;border-color:#d97757;color:#f4d0c3}.ppb-indet-runner{position:absolute;top:0;bottom:0;left:0;width:34%;background-image:repeating-linear-gradient(90deg,transparent 0 calc(var(--ppb-px) - 1px),rgba(22,16,13,.16) calc(var(--ppb-px) - 1px) var(--ppb-px)),repeating-linear-gradient(0deg,transparent 0 calc(var(--ppb-px) - 1px),rgba(22,16,13,.14) calc(var(--ppb-px) - 1px) var(--ppb-px)),linear-gradient(90deg,rgba(217,119,87,.2) 0%,var(--ppb-c1) 28%,var(--ppb-c2) 60%,var(--ppb-c3) 84%,rgba(244,208,195,.25) 100%);background-size:var(--ppb-px) var(--ppb-px),var(--ppb-px) var(--ppb-px),100% 100%;box-shadow:0 0 12px #d9775752;animation:ppbIndetSlide 1.9s cubic-bezier(.4,0,.2,1) infinite}.ppb-pace{position:absolute;top:0;bottom:0;width:2px;background:#f4d0c3e6;box-shadow:0 0 0 1px #1e1d1bb3;z-index:4;pointer-events:none}@keyframes ppbGradientFlow{0%{background-position:115% 50%,0% 50%}50%{background-position:-15% 50%,100% 50%}to{background-position:115% 50%,0% 50%}}@keyframes ppbBreathe{0%,to{opacity:.15}50%{opacity:.3}}@keyframes ppbPixelShimmerStrong{0%,to{opacity:.85}50%{opacity:.28}}@keyframes ppbPixelShimmerSoft{0%,to{opacity:.2}50%{opacity:.78}}@keyframes ppbIndetSlide{0%{transform:translate(-105%)}to{transform:translate(310%)}}@media(max-width:540px){.ppb-root{--ppb-trail-scale: .65}.ppb-d5,.ppb-d6{display:none}.ppb-head{gap:6px}}@media(prefers-reduced-motion:reduce){.ppb-fill{transition:none!important}.ppb-grad,.ppb-rear-glow,.ppb-dot,.ppb-indet-runner{animation:none!important}.ppb-root.ppb-state-indeterminate .ppb-indet-runner{left:28%;width:44%;transform:none!important}}.motion-paused .ppb-fill{transition:none!important}.motion-paused .ppb-grad,.motion-paused .ppb-rear-glow,.ppb-root .motion-paused .ppb-dot,.motion-paused .ppb-dot,.motion-paused .ppb-indet-runner{animation:none!important}.ppr-root{display:inline-flex;flex-direction:column;align-items:center;gap:8px;font-family:var(--body, "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif);color:#f2eee8;box-sizing:border-box}.ppr-root *,.ppr-root *:before,.ppr-root *:after{box-sizing:border-box}.ppr-stage{position:relative;width:var(--ppr-size, 128px);height:var(--ppr-size, 128px);display:grid;place-items:center;background:var(--ppr-stage-bg, transparent);border:0;padding:0}.ppr-root.is-bare .ppr-stage{background:transparent;border:0;padding:0}.ppr-svg{width:100%;height:100%;display:block;overflow:visible}.ppr-center{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;pointer-events:none;text-align:center;line-height:1.05}.ppr-center-val{font:900 21px/1 var(--sans, "Segoe UI", sans-serif);letter-spacing:-.7px;font-variant-numeric:tabular-nums;color:#d97757}.ppr-center-lbl{margin-top:3px;font:700 9.5px/1.1 var(--mono, "Cascadia Mono", Consolas, monospace);color:#5e5951;letter-spacing:.4px}.ppr-caption{font:600 12px/1.35 var(--body, "Segoe UI Variable Text", sans-serif);color:#efece6;text-align:center;display:flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center}.ppr-caption .ppb-status-tag{font-family:var(--mono, monospace)}.ppr-note{font-size:11px;color:#f28f82;text-align:center}.ppr-note[hidden]{display:none}.ppr-rear-glow{animation:ppbBreathe 4s ease-in-out infinite}.ppr-flow-rot{animation:pprFlowSpin 6s linear infinite}.ppr-dot.ppr-d1{opacity:.78;animation:ppbPixelShimmerStrong 2.3s ease-in-out -.4s infinite}.ppr-dot.ppr-d2{opacity:.56;animation:ppbPixelShimmerSoft 3.1s ease-in-out -1.6s infinite}.ppr-dot.ppr-d3{opacity:.82;animation:ppbPixelShimmerStrong 1.9s ease-in-out -.9s infinite}.ppr-dot.ppr-d4{opacity:.72;animation:ppbPixelShimmerStrong 2.7s ease-in-out -2.1s infinite}.ppr-dot.ppr-d5{opacity:.38;animation:ppbPixelShimmerSoft 3.5s ease-in-out -1.2s infinite}.ppr-dot.ppr-d6{opacity:.3;animation:ppbPixelShimmerSoft 3.3s ease-in-out -2.6s infinite}.ppr-indet-rot{animation:pprIndetSpin 1.8s linear infinite}.ppr-root.is-complete .ppr-flow-rot,.ppr-root.is-complete .ppr-rear-glow,.ppr-root.is-complete .ppr-dot,.ppr-root.ppb-state-paused .ppr-flow-rot,.ppr-root.ppb-state-paused .ppr-rear-glow,.ppr-root.ppb-state-paused .ppr-dot,.ppr-root.ppb-state-error .ppr-flow-rot,.ppr-root.ppb-state-error .ppr-rear-glow,.ppr-root.ppb-state-error .ppr-dot{animation:none!important}.ppr-root.is-complete .ppr-rear-glow{opacity:.2}.ppr-root.ppb-state-paused .ppr-svg{filter:saturate(.45) brightness(.92)}@keyframes pprFlowSpin{0%{transform:rotate(0)}to{transform:rotate(360deg)}}@keyframes pprIndetSpin{0%{transform:rotate(-90deg)}to{transform:rotate(270deg)}}@media(prefers-reduced-motion:reduce){.ppr-flow-rot,.ppr-rear-glow,.ppr-dot,.ppr-indet-rot{animation:none!important}}.motion-paused .ppr-flow-rot,.motion-paused .ppr-rear-glow,.motion-paused .ppr-dot,.motion-paused .ppr-indet-rot{animation:none!important}
+/* ==========================================================================
+   PixelProgressBar — Claude Palette Glowing Stepped Pixel Energy Bar
+   - Default size: 560px × 24px (100% responsive), 4px base pixel -> 6 rows
+   - Track: #2B2926 (rectangular corners, no pill radius)
+   - Fill palette: Terracotta #D97757 (body) + Warm Sand #E89D82 + Soft Apricot #F4D0C3
+   - Three layers:
+     1) Continuous flowing gradient body + narrow apricot highlight (gradientFlow 6s)
+     2) 4px-pitch, 1px dark (10%-18%) pixel texture grid
+     3) True irregular 6-row stepped frontier (16/8/0/4/12/20px indents) + fixed 4x4px detached shimmer pixels
+     + Soft 6px rear glow (breathe 4s, 0.15-0.30) strictly behind foreground pixels
+   ========================================================================== */
+
+.ppb-root {
+  --ppb-w: 560px;
+  --ppb-h: 24px;
+  --ppb-px: 4px;
+  --ppb-u: calc(var(--ppb-h) / 6);
+  --ppb-pct: 0%;
+  --ppb-trail-scale: 1;
+  --ppb-track-bg: #FFFFFF;
+  --ppb-track-border: #D6D0C6;
+  --ppb-c1: #D97757; /* 赤陶棕主色 */
+  --ppb-c2: #E89D82; /* 暖沙色流光带 */
+  --ppb-c3: #F4D0C3; /* 浅杏色高光 */
+  width: var(--ppb-w);
+  max-width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  font-family: var(--body, "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif);
+  color: inherit;
+  box-sizing: border-box;
+}
+.ppb-root *, .ppb-root *::before, .ppb-root *::after {
+  box-sizing: border-box;
+}
+
+.ppb-root.is-bare {
+  gap: 0;
+}
+
+/* Outer Labels (placed outside track) */
+.ppb-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.ppb-label {
+  font-weight: 600;
+  color: var(--ppb-label-color, #EFECE6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ppb-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  font-family: var(--mono, "Cascadia Mono", Consolas, monospace);
+  font-variant-numeric: tabular-nums;
+}
+.ppb-status-tag {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.4px;
+  padding: 1px 6px;
+  border: 1px solid #4A453E;
+  background: #272522;
+  color: #D7CFC5;
+  border-radius: 0;
+}
+.ppb-pct-text {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--ppb-pct-color, #F4D0C3);
+  min-width: 36px;
+  text-align: right;
+}
+
+/* Fixed Track (#2B2926, rectangular) */
+.ppb-track {
+  position: relative;
+  width: 100%;
+  height: calc(var(--ppb-h) + 2px);
+  background-color: var(--ppb-track-bg);
+  background-image:
+    repeating-linear-gradient(90deg, rgba(26, 25, 23, 0.04) 0 1px, transparent 1px var(--ppb-px)),
+    repeating-linear-gradient(0deg, rgba(26, 25, 23, 0.035) 0 1px, transparent 1px var(--ppb-px));
+  border: 1px solid var(--ppb-track-border);
+  border-radius: 0;
+  overflow: hidden;
+}
+
+/* Strict True-Progress Clipped Container (width === progress%) */
+.ppb-fill {
+  position: relative;
+  height: 100%;
+  width: var(--ppb-pct);
+  overflow: hidden;
+  border-radius: 0;
+  transition: width 250ms cubic-bezier(0.22, 1, 0.36, 1);
+  will-change: width;
+}
+
+/* 0%: Hide fill, rear glow, and all trail pixels completely */
+.ppb-root.is-zero .ppb-fill {
+  opacity: 0;
+  visibility: hidden;
+}
+.ppb-root.is-zero .ppb-rear-glow,
+.ppb-root.is-zero .ppb-body,
+.ppb-root.is-zero .ppb-trail {
+  display: none;
+}
+
+/* Rear Soft Glow (6px blur, ONLY behind foreground crisp pixels, 4s breathe 0.15-0.30) */
+.ppb-rear-glow {
+  position: absolute;
+  top: 1px;
+  bottom: 1px;
+  left: 0;
+  right: 0;
+  pointer-events: none;
+  z-index: 1;
+  background: linear-gradient(
+    90deg,
+    var(--ppb-c1) 0%,
+    var(--ppb-c2) 72%,
+    var(--ppb-c3) 100%
+  );
+  filter: blur(6px);
+  opacity: 0.15;
+  animation: ppbBreathe 4s ease-in-out infinite;
+}
+
+/* Foreground Body = Layer 1 (Continuous Warm Gradient) + Layer 2 (4px Pixel Grid)
+   Carved on the right edge via 6-row irregular stepped polygon clip-path! */
+.ppb-body {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  --i1: calc(4 * var(--ppb-u) * var(--ppb-trail-scale)); /* 16px at 24px */
+  --i2: calc(2 * var(--ppb-u) * var(--ppb-trail-scale)); /*  8px at 24px */
+  --i3: 0px;                                              /*  0px (true progress boundary) */
+  --i4: calc(1 * var(--ppb-u) * var(--ppb-trail-scale)); /*  4px at 24px */
+  --i5: calc(3 * var(--ppb-u) * var(--ppb-trail-scale)); /* 12px at 24px */
+  --i6: calc(5 * var(--ppb-u) * var(--ppb-trail-scale)); /* 20px at 24px */
+  clip-path: polygon(
+    0% 0%,
+    max(0px, calc(100% - var(--i1))) 0%,
+    max(0px, calc(100% - var(--i1))) 16.6667%,
+    max(0px, calc(100% - var(--i2))) 16.6667%,
+    max(0px, calc(100% - var(--i2))) 33.3333%,
+    calc(100% - var(--i3)) 33.3333%,
+    calc(100% - var(--i3)) 50%,
+    max(0px, calc(100% - var(--i4))) 50%,
+    max(0px, calc(100% - var(--i4))) 66.6667%,
+    max(0px, calc(100% - var(--i5))) 66.6667%,
+    max(0px, calc(100% - var(--i5))) 83.3333%,
+    max(0px, calc(100% - var(--i6))) 83.3333%,
+    max(0px, calc(100% - var(--i6))) 100%,
+    0% 100%
+  );
+}
+
+/* Layer 1: Rich Terracotta Body + Warm Sand Flow Band + Narrow Apricot Highlight (6s gradientFlow) */
+.ppb-grad {
+  position: absolute;
+  inset: 0;
+  background-color: var(--ppb-c1);
+  background-image:
+    linear-gradient(
+      108deg,
+      transparent 0%,
+      transparent 35%,
+      color-mix(in srgb, var(--ppb-c2) 55%, transparent) 43%,
+      color-mix(in srgb, var(--ppb-c3) 92%, transparent) 49.5%,
+      color-mix(in srgb, var(--ppb-c2) 55%, transparent) 56%,
+      transparent 64%,
+      transparent 100%
+    ),
+    linear-gradient(
+      90deg,
+      var(--ppb-c1) 0%,
+      var(--ppb-c1) 26%,
+      var(--ppb-c2) 52%,
+      var(--ppb-c1) 76%,
+      var(--ppb-c2) 100%
+    );
+  background-size: 230% 100%, 200% 100%;
+  background-position: 115% 50%, 0% 50%;
+  animation: ppbGradientFlow 6s ease-in-out infinite;
+}
+
+/* Layer 2: 4px-pitch, 1px-line, 14%-16% Dark Pixel Texture Grid */
+.ppb-grid {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 1;
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 calc(var(--ppb-px) - 1px),
+      rgba(22, 16, 13, 0.16) calc(var(--ppb-px) - 1px) var(--ppb-px)
+    ),
+    repeating-linear-gradient(
+      0deg,
+      transparent 0 calc(var(--ppb-px) - 1px),
+      rgba(22, 16, 13, 0.14) calc(var(--ppb-px) - 1px) var(--ppb-px)
+    );
+  background-size: var(--ppb-px) var(--ppb-px);
+}
+
+/* Layer 3: Detached Fixed 4x4px Trail Pixels (all strictly inside true progress right=0!) */
+.ppb-trail {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: min(calc(10 * var(--ppb-u)), 100%);
+  pointer-events: none;
+  z-index: 3;
+}
+.ppb-dot {
+  position: absolute;
+  width: var(--ppb-u);
+  height: var(--ppb-u);
+  border-radius: 0;
+}
+
+/* Fixed staggered positions relative to right=0 boundary, 4-8px away from stepped solid body:
+   Row 1 solid ends at 16px (4u) -> dot at right: 8px (2u), warm sand
+   Row 2 solid ends at  8px (2u) -> dot at right: 0px (0u), soft apricot (sparser frontier tip)
+   Row 3 solid ends at  0px (0u) -> hits exact boundary (crisp apricot cap pixel)
+   Row 4 solid ends at  4px (1u) -> clean 4px notch
+   Row 5 solid ends at 12px (3u) -> dot at right: 4px (1u), terracotta
+   Row 6 solid ends at 20px (5u) -> dot1 at right: 12px (3u) warm sand, dot2 at right: 0px (0u) soft apricot */
+.ppb-d1 {
+  top: 0;
+  right: calc(2 * var(--ppb-u));
+  background: var(--ppb-c2);
+  opacity: 0.78;
+  animation: ppbPixelShimmerStrong 2.3s ease-in-out -0.4s infinite;
+}
+.ppb-d2 {
+  top: var(--ppb-u);
+  right: 0;
+  background: var(--ppb-c3);
+  opacity: 0.56;
+  animation: ppbPixelShimmerSoft 3.1s ease-in-out -1.6s infinite;
+}
+.ppb-d3 {
+  top: calc(4 * var(--ppb-u));
+  right: calc(1 * var(--ppb-u));
+  background: var(--ppb-c1);
+  opacity: 0.82;
+  animation: ppbPixelShimmerStrong 1.9s ease-in-out -0.9s infinite;
+}
+.ppb-d4 {
+  top: calc(5 * var(--ppb-u));
+  right: calc(3 * var(--ppb-u));
+  background: var(--ppb-c2);
+  opacity: 0.72;
+  animation: ppbPixelShimmerStrong 2.7s ease-in-out -2.1s infinite;
+}
+.ppb-d5 {
+  top: calc(5 * var(--ppb-u));
+  right: 0;
+  background: var(--ppb-c3);
+  opacity: 0.38;
+  animation: ppbPixelShimmerSoft 3.5s ease-in-out -1.2s infinite;
+}
+/* Additional subtle staggered 4x4 pixel on Row 1 near solid body (only on wider bars) */
+.ppb-d6 {
+  top: calc(3 * var(--ppb-u));
+  right: 0;
+  background: var(--ppb-c3);
+  opacity: 0.30;
+  animation: ppbPixelShimmerSoft 3.3s ease-in-out -2.6s infinite;
+}
+
+/* Tiny progress (< 12%): scale trail down proportionally to available width */
+.ppb-root.is-tiny {
+  --ppb-trail-scale: 0.5;
+}
+.ppb-root.is-tiny .ppb-d4,
+.ppb-root.is-tiny .ppb-d5,
+.ppb-root.is-tiny .ppb-d6 {
+  display: none;
+}
+
+/* Micro progress (<= 4%): no detached pixels or big cutouts, keep solid accurate sliver */
+.ppb-root.is-micro {
+  --ppb-trail-scale: 0;
+}
+.ppb-root.is-micro .ppb-trail {
+  display: none;
+}
+
+/* 100% Complete or Success State: full track, clean right edge, stop shimmer/flicker */
+.ppb-root.is-complete .ppb-body {
+  clip-path: none;
+}
+.ppb-root.is-complete .ppb-trail {
+  display: none;
+}
+.ppb-root.is-complete .ppb-grad,
+.ppb-root.is-complete .ppb-rear-glow,
+.ppb-root.is-complete .ppb-dot {
+  animation: none !important;
+}
+.ppb-root.is-complete .ppb-rear-glow {
+  opacity: 0.18;
+}
+
+/* Semantic States */
+.ppb-root.ppb-state-paused .ppb-grad,
+.ppb-root.ppb-state-paused .ppb-rear-glow,
+.ppb-root.ppb-state-paused .ppb-dot {
+  animation: none !important;
+}
+.ppb-root.ppb-state-paused .ppb-fill {
+  filter: saturate(0.45) brightness(0.92);
+}
+.ppb-root.ppb-state-paused .ppb-status-tag {
+  background: #2C2A27;
+  border-color: #6B655B;
+  color: #CFC8BC;
+}
+
+.ppb-root.ppb-state-success .ppb-status-tag {
+  background: #203124;
+  border-color: #5C8E64;
+  color: #BEE4C2;
+}
+
+.ppb-root.ppb-state-error {
+  --ppb-c1: #B83527;
+  --ppb-c2: #DC5442;
+  --ppb-c3: #F4A296;
+}
+.ppb-root.ppb-state-error .ppb-grad,
+.ppb-root.ppb-state-error .ppb-rear-glow,
+.ppb-root.ppb-state-error .ppb-dot {
+  animation: none !important;
+}
+.ppb-root.ppb-state-error .ppb-status-tag {
+  background: #381D1A;
+  border-color: #DC5442;
+  color: #F7BCB4;
+}
+
+.ppb-note {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: #F28F82;
+  font-weight: 500;
+}
+.ppb-note[hidden] {
+  display: none;
+}
+
+/* Indeterminate State (only when true progress is unavailable) */
+.ppb-indet {
+  display: none;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+}
+.ppb-root.ppb-state-indeterminate .ppb-fill {
+  display: none;
+}
+.ppb-root.ppb-state-indeterminate .ppb-indet {
+  display: block;
+}
+.ppb-root.ppb-state-indeterminate .ppb-status-tag {
+  background: #33251F;
+  border-color: #D97757;
+  color: #F4D0C3;
+}
+.ppb-indet-runner {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 34%;
+  background-image:
+    repeating-linear-gradient(
+      90deg,
+      transparent 0 calc(var(--ppb-px) - 1px),
+      rgba(22, 16, 13, 0.16) calc(var(--ppb-px) - 1px) var(--ppb-px)
+    ),
+    repeating-linear-gradient(
+      0deg,
+      transparent 0 calc(var(--ppb-px) - 1px),
+      rgba(22, 16, 13, 0.14) calc(var(--ppb-px) - 1px) var(--ppb-px)
+    ),
+    linear-gradient(90deg, rgba(217, 119, 87, 0.2) 0%, var(--ppb-c1) 28%, var(--ppb-c2) 60%, var(--ppb-c3) 84%, rgba(244, 208, 195, 0.25) 100%);
+  background-size: var(--ppb-px) var(--ppb-px), var(--ppb-px) var(--ppb-px), 100% 100%;
+  box-shadow: 0 0 12px rgba(217, 119, 87, 0.32);
+  animation: ppbIndetSlide 1.9s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+/* Optional Pace Marker (app monthly timeline indicator) */
+.ppb-pace {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: rgba(244, 208, 195, 0.9);
+  box-shadow: 0 0 0 1px rgba(30, 29, 27, 0.7);
+  z-index: 4;
+  pointer-events: none;
+}
+
+/* Keyframes */
+@keyframes ppbGradientFlow {
+  0%   { background-position: 115% 50%, 0% 50%; }
+  50%  { background-position: -15% 50%, 100% 50%; }
+  100% { background-position: 115% 50%, 0% 50%; }
+}
+@keyframes ppbBreathe {
+  0%, 100% { opacity: 0.15; }
+  50%      { opacity: 0.30; }
+}
+@keyframes ppbPixelShimmerStrong {
+  0%, 100% { opacity: 0.85; }
+  50%      { opacity: 0.28; }
+}
+@keyframes ppbPixelShimmerSoft {
+  0%, 100% { opacity: 0.20; }
+  50%      { opacity: 0.78; }
+}
+@keyframes ppbIndetSlide {
+  0%   { transform: translateX(-105%); }
+  100% { transform: translateX(310%); }
+}
+
+/* Narrow Screens: scale trail gently while preserving layout */
+@media (max-width: 540px) {
+  .ppb-root {
+    --ppb-trail-scale: 0.65;
+  }
+  .ppb-d5, .ppb-d6 {
+    display: none;
+  }
+  .ppb-head {
+    gap: 6px;
+  }
+}
+
+/* Accessibility: Reduced Motion & App Motion-Paused Toggle */
+@media (prefers-reduced-motion: reduce) {
+  .ppb-fill {
+    transition: none !important;
+  }
+  .ppb-grad,
+  .ppb-rear-glow,
+  .ppb-dot,
+  .ppb-indet-runner {
+    animation: none !important;
+  }
+  .ppb-root.ppb-state-indeterminate .ppb-indet-runner {
+    left: 28%;
+    width: 44%;
+    transform: none !important;
+  }
+}
+.motion-paused .ppb-fill {
+  transition: none !important;
+}
+.motion-paused .ppb-grad,
+.motion-paused .ppb-rear-glow,
+.ppb-root .motion-paused .ppb-dot,
+.motion-paused .ppb-dot,
+.motion-paused .ppb-indet-runner {
+  animation: none !important;
+}
+
+/* ==========================================================================
+   PixelProgressRing — Claude Palette Circular Stepped Pixel Energy Ring
+   - Track: #2B2926 on #1E1D1B dark stage
+   - 3 Layers + Rear Glow:
+     0) Rear soft blur glow strictly behind foreground crisp pixels (4s breathe)
+     1) Continuous flowing warm gradient arc (6s pprFlowSpin inside stepped mask)
+     2) Crisp radial & concentric 1px dark pixel grid
+     3) True 6-row irregular stepped staircase edge + fixed detached pixels (1.9-3.5s shimmer)
+   ========================================================================== */
+.ppr-root {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--body, "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif);
+  color: #F2EEE8;
+  box-sizing: border-box;
+}
+.ppr-root *, .ppr-root *::before, .ppr-root *::after {
+  box-sizing: border-box;
+}
+.ppr-stage {
+  position: relative;
+  width: var(--ppr-size, 128px);
+  height: var(--ppr-size, 128px);
+  display: grid;
+  place-items: center;
+  background: var(--ppr-stage-bg, transparent);
+  border: 0;
+  padding: 0;
+}
+.ppr-root.is-bare .ppr-stage {
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.ppr-svg {
+  width: 100%;
+  height: 100%;
+  display: block;
+  overflow: visible;
+}
+.ppr-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  text-align: center;
+  line-height: 1.05;
+}
+.ppr-center-val {
+  font: 900 21px/1 var(--sans, "Segoe UI", sans-serif);
+  letter-spacing: -0.7px;
+  font-variant-numeric: tabular-nums;
+  color: #D97757;
+}
+.ppr-center-lbl {
+  margin-top: 3px;
+  font: 700 9.5px/1.1 var(--mono, "Cascadia Mono", Consolas, monospace);
+  color: #5E5951;
+  letter-spacing: 0.4px;
+}
+.ppr-caption {
+  font: 600 12px/1.35 var(--body, "Segoe UI Variable Text", "Microsoft YaHei UI", sans-serif);
+  color: #EFECE6;
+  text-align: center;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.ppr-caption .ppb-status-tag {
+  font-family: var(--mono, monospace);
+}
+.ppr-note {
+  font-size: 11px;
+  color: #F28F82;
+  text-align: center;
+}
+.ppr-note[hidden] { display: none; }
+
+.ppr-rear-glow {
+  animation: ppbBreathe 4s ease-in-out infinite;
+}
+.ppr-flow-rot {
+  animation: pprFlowSpin 6s linear infinite;
+}
+.ppr-dot.ppr-d1 { opacity: 0.78; animation: ppbPixelShimmerStrong 2.3s ease-in-out -0.4s infinite; }
+.ppr-dot.ppr-d2 { opacity: 0.56; animation: ppbPixelShimmerSoft 3.1s ease-in-out -1.6s infinite; }
+.ppr-dot.ppr-d3 { opacity: 0.82; animation: ppbPixelShimmerStrong 1.9s ease-in-out -0.9s infinite; }
+.ppr-dot.ppr-d4 { opacity: 0.72; animation: ppbPixelShimmerStrong 2.7s ease-in-out -2.1s infinite; }
+.ppr-dot.ppr-d5 { opacity: 0.38; animation: ppbPixelShimmerSoft 3.5s ease-in-out -1.2s infinite; }
+.ppr-dot.ppr-d6 { opacity: 0.30; animation: ppbPixelShimmerSoft 3.3s ease-in-out -2.6s infinite; }
+.ppr-indet-rot {
+  animation: pprIndetSpin 1.8s linear infinite;
+}
+
+.ppr-root.is-complete .ppr-flow-rot,
+.ppr-root.is-complete .ppr-rear-glow,
+.ppr-root.is-complete .ppr-dot,
+.ppr-root.ppb-state-paused .ppr-flow-rot,
+.ppr-root.ppb-state-paused .ppr-rear-glow,
+.ppr-root.ppb-state-paused .ppr-dot,
+.ppr-root.ppb-state-error .ppr-flow-rot,
+.ppr-root.ppb-state-error .ppr-rear-glow,
+.ppr-root.ppb-state-error .ppr-dot {
+  animation: none !important;
+}
+.ppr-root.is-complete .ppr-rear-glow {
+  opacity: 0.20;
+}
+.ppr-root.ppb-state-paused .ppr-svg {
+  filter: saturate(0.45) brightness(0.92);
+}
+
+@keyframes pprFlowSpin {
+  0%   { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+@keyframes pprIndetSpin {
+  0%   { transform: rotate(-90deg); }
+  100% { transform: rotate(270deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ppr-flow-rot,
+  .ppr-rear-glow,
+  .ppr-dot,
+  .ppr-indet-rot {
+    animation: none !important;
+  }
+}
+.motion-paused .ppr-flow-rot,
+.motion-paused .ppr-rear-glow,
+.motion-paused .ppr-dot,
+.motion-paused .ppr-indet-rot {
+  animation: none !important;
+}

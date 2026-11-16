@@ -3,30 +3,35 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="format-detection" content="telephone=no">
 <meta name="theme-color" content="#f2f1e8">
 <meta name="description" content="RUN & STUDY LOG · 多人竞技、学习、自律与运动综合性打卡网页。每天早起奔跑、专注学习、结伴自律。">
-<meta property="og:type" content="website">
-<meta property="og:site_name" content="next_sigmaman">
-<meta property="og:title" content="next_sigmaman · RUN & STUDY LOG · 运动 · 学习 · 自律竞技打卡">
-<meta property="og:description" content="RUN & STUDY LOG · 多人竞技、学习、自律与运动综合性打卡网页。每天早起奔跑、专注学习、结伴自律。">
-<meta property="og:url" content="https://jared11-cpu.github.io/sigmaMan/">
-<meta property="og:image" content="https://jared11-cpu.github.io/sigmaMan/preview.jpg">
-<meta name="twitter:card" content="summary_large_image">
-<meta name="twitter:title" content="next_sigmaman · RUN & STUDY LOG · 运动 · 学习 · 自律竞技打卡">
-<meta name="twitter:description" content="RUN & STUDY LOG · 多人竞技、学习、自律与运动综合性打卡网页。每天早起奔跑、专注学习、结伴自律。">
-<meta name="twitter:image" content="https://jared11-cpu.github.io/sigmaMan/preview.jpg">
 <title>next_sigmaman · RUN & STUDY LOG · 运动 · 学习 · 自律竞技打卡</title>
 <link rel="icon" href="logo.svg" type="image/svg+xml">
-<link rel="stylesheet" href="style.css?v=20261116e">
-<link rel="stylesheet" href="pixel-progress.css?v=20261116e">
-<link rel="stylesheet" href="desktop.css?v=20261116e">
-<script src="pixel-progress.js?v=20261116e" defer></script>
-<script src="app.js?v=20261116e" defer></script>
-</head>
+<link rel="stylesheet" href="style.css?v=20261116-1755">
+<link rel="stylesheet" href="pixel-progress.css?v=20261116-1755">
+<link rel="stylesheet" href="desktop.css?v=20261116-1755">
+<script src="pixel-progress.js?v=20261116-1755" defer></script>
+<script src="app.js?v=20261116-1755" defer></script>
+<meta property="og:type" content="website"><meta property="og:title" content="RUN &amp; STUDY LOG"><meta property="og:description" content="运动、学习与自律像素打卡"><meta property="og:url" content="https://jared11-cpu.github.io/sigmaMan/"><meta property="og:image" content="https://jared11-cpu.github.io/sigmaMan/preview.jpg"><meta name="twitter:card" content="summary_large_image"></head>
 <body>
+<a class="skip-link" href="#page">跳至主内容</a>
 <aside class="studio-left">
-  <a href="index.html" class="studio-logo">Become<br><em>Sigma</em>Man</a>
-  <a class="rail-film" href="film.html"><span class="rail-play">▶</span><span>品牌动效 30s</span><small>FILM</small></a>
+  <a href="index.html" class="studio-logo" aria-label="Become SigmaMan 首页">
+    <svg class="studio-logo-svg" viewBox="0 0 64 64" width="52" height="52" aria-hidden="true">
+      <rect x="2" y="2" width="60" height="60" rx="13" fill="#232320" stroke="rgba(242,241,232,0.22)" stroke-width="1.5"/>
+      <path d="M11 11 H18 M11 11 V18" fill="none" stroke="rgba(242,241,232,0.22)" stroke-width="1.5" stroke-linecap="square"/>
+      <path d="M53 53 H46 M53 53 V46" fill="none" stroke="rgba(229,73,43,0.45)" stroke-width="1.5" stroke-linecap="square"/>
+      <path d="M15 16 H46 L43 22 H27 L34.5 32 L27 42 H43 L46 48 H15 L27 32 Z" fill="#f2f1e8"/>
+      <path d="M39 26 L46 32 L39 38" fill="none" stroke="#e5492b" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+      <circle cx="49" cy="15" r="3.2" fill="#e4a334"/>
+    </svg>
+    <span class="studio-logo-text">Become<br><em>Sigma</em>Man</span>
+  </a>
+  <a class="rail-film" href="film.html"><span class="rail-play" aria-hidden="true">▶</span><span>品牌动效 30s</span><small>FILM</small></a>
   <div class="studio-caption">MOVE. STUDY.<br>COMPETE &amp; GROW.</div>
   <span class="edition">运动 · 学习 · 自律 / VOL. 003</span>
 </aside>
@@ -41,12 +46,12 @@
     <div class="live-marquee" id="live-marquee" aria-hidden="true"></div>
   </div>
   <div class="masthead">
-    <button id="rename" class="masthead-rename">改名字</button>
+    <button type="button" id="rename" class="masthead-rename">改名字</button>
     <a class="brand" href="index.html"><img src="logo.svg" alt=""> next_sigmaman</a>
     <span id="today-date"></span>
     <div class="masthead-tools">
-      <button class="motion-toggle" id="motion-toggle" aria-pressed="false">暂停动效 Ⅱ</button>
-      <button class="icon-button" id="open-settings" aria-label="设置与数据备份">☷</button>
+      <button type="button" class="motion-toggle" id="motion-toggle" aria-pressed="false">暂停动效 Ⅱ</button>
+      <button type="button" class="icon-button" id="open-settings" aria-label="设置与数据备份"><span aria-hidden="true">☷</span></button>
     </div>
   </div>
   <main id="page" tabindex="-1"></main>
@@ -56,7 +61,7 @@
   <span class="kicker">RUN · STUDY · DISCIPLINE</span>
   <h1>自律。<br><em>即自由。</em></h1>
   <p>运动强健体魄，学习拓展边界。<br>把每一次出发与专注，都刻进自己的节律里。</p>
-  <a class="film-link" href="film.html"><span>▶</span> 播放品牌动效 <small>30 SEC</small></a>
+  <a class="film-link" href="film.html"><span aria-hidden="true">▶</span> 播放品牌动效 <small>30 SEC</small></a>
   <span class="right-bottom">SMALL STEPS.<br>EVERY DAY.</span>
 </aside>
 <div class="desktop-footer" aria-hidden="true">
@@ -66,6 +71,7 @@
 <div id="modal-root"></div>
 <div id="toast" role="status" aria-live="polite"></div>
 <div id="confetti" aria-hidden="true"></div>
+<div id="feedback-root" aria-live="polite"></div>
 <dialog id="editor">
   <form method="dialog" id="editor-form">
     <div class="dialog-heading">

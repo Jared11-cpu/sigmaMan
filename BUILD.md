@@ -1,18 +1,9 @@
-# 构建说明（压缩版）
+# Release 20261116-1755
 
-仓库根目录的 `app.js`、`pixel-progress.js`、`film.js` 和四个 `.css` 文件是**压缩后**的发布文件，请不要直接改它们。
+This release synchronizes the project source from D:\running, captured on 2026-11-16 (China time).
 
-- 未压缩源码在 `source/` 文件夹（已写入 `.gitignore`，不会被提交、也不会随 GitHub Pages 发布），改代码请改那里。
-- 改完后在仓库根目录执行下面命令重新压缩（需要 Node.js）：
+HTML, CSS and JavaScript are served directly; no build step is required. This release publishes readable source rather than the minified assets from the previous release. HTML asset version parameters use 20261116-1755. Social sharing metadata and the index-based 404 fallback are retained.
 
-```bash
-npx esbuild source/app.js --minify --outfile=app.js
-npx esbuild source/pixel-progress.js --minify --outfile=pixel-progress.js
-npx esbuild source/film.js --minify --outfile=film.js
-npx esbuild source/style.css --minify --outfile=style.css
-npx esbuild source/desktop.css --minify --outfile=desktop.css
-npx esbuild source/pixel-progress.css --minify --outfile=pixel-progress.css
-npx esbuild source/film.css --minify --outfile=film.css
-```
+GitHub Pages hosts the static frontend only. Node/SQLite server source is included for separate deployment; databases, uploads, .env, node_modules, backups and local verification artifacts are excluded. Browser records are stored locally when no compatible server is available.
 
-- 重新压缩后，记得把 `index.html` 里资源链接的 `?v=` 版本号改一位（例如 `20261116e` → `20261116f`），再同步复制一份为 `404.html`，避免用户浏览器还用旧缓存。
+JavaScript syntax checks passed for all published JavaScript files before upload. Server integration tests were not run for this publishing task.

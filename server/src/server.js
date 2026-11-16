@@ -1,4 +1,4 @@
-﻿const path = require('node:path');
+const path = require('node:path');
 const fs = require('node:fs');
 const express = require('express');
 const cors = require('cors');
@@ -42,6 +42,11 @@ function broadcast(roomCode, eventData) {
   for (const client of clients) {
     try { client.write(payload); } catch {}
   }
+}
+
+function handleApiError(res, err) {
+  const status = err.statusCode || 500;
+  res.status(status).json({ success: false, error: err.message || '服务器处理失败' });
 }
 
 // Multer storage
@@ -103,129 +108,199 @@ app.get('/api/events', (req, res) => {
 
 // 3. Full State
 app.get('/api/state', (req, res) => {
-  const room = req.query.room || DEFAULT_ROOM_CODE;
-  const person = req.query.person || null;
-  res.json(repo.getState(room, person));
+  try {
+    const room = req.query.room || DEFAULT_ROOM_CODE;
+    const person = req.query.person || null;
+    res.json(repo.getState(room, person));
+  } catch (err) { handleApiError(res, err); }
 });
 
 // 4. Sport Records
 app.post('/api/records/sport', (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const rec = repo.addSportRecord(room, req.body);
-  broadcast(room, { type: 'sport-record-added', record: rec });
-  res.json({ success: true, record: rec });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.addSportRecord(room, req.body);
+    if (!out.deduplicated) broadcast(room, { type: 'sport-record-added', record: out.record, version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
+});
+app.patch('/api/records/sport/:id', (req, res) => {
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.updateSportRecord(room, req.params.id, req.body);
+    broadcast(room, { type: 'sport-record-updated', record: out.record, version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 app.delete('/api/records/sport/:id', (req, res) => {
-  const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
-  repo.deleteSportRecord(room, req.params.id);
-  broadcast(room, { type: 'sport-record-deleted', id: Number(req.params.id) });
-  res.json({ success: true, id: Number(req.params.id) });
+  try {
+    const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.deleteSportRecord(room, req.params.id);
+    broadcast(room, { type: 'sport-record-deleted', id: Number(req.params.id), version: out.version });
+    res.json({ success: true, id: Number(req.params.id), ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 
 // 5. Study Records
 app.post('/api/records/study', (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const rec = repo.addStudyRecord(room, req.body);
-  broadcast(room, { type: 'study-record-added', record: rec });
-  res.json({ success: true, record: rec });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.addStudyRecord(room, req.body);
+    if (!out.deduplicated) broadcast(room, { type: 'study-record-added', record: out.record, version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
+});
+app.patch('/api/records/study/:id', (req, res) => {
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.updateStudyRecord(room, req.params.id, req.body);
+    broadcast(room, { type: 'study-record-updated', record: out.record, version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 app.delete('/api/records/study/:id', (req, res) => {
-  const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
-  repo.deleteStudyRecord(room, req.params.id);
-  broadcast(room, { type: 'study-record-deleted', id: Number(req.params.id) });
-  res.json({ success: true, id: Number(req.params.id) });
+  try {
+    const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.deleteStudyRecord(room, req.params.id);
+    broadcast(room, { type: 'study-record-deleted', id: Number(req.params.id), version: out.version });
+    res.json({ success: true, id: Number(req.params.id), ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 
 // 6. Like
 app.post('/api/records/:kind/:id/like', (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const kind = req.params.kind;
-  if (!['sport', 'study'].includes(kind)) return res.status(400).json({ error: '无效记录类型' });
-  const result = repo.toggleLike(room, kind, req.params.id, req.body.person || '帅哥');
-  broadcast(room, { type: 'record-liked', kind, id: Number(req.params.id), ...result });
-  res.json({ success: true, ...result });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const kind = req.params.kind;
+    if (!['sport', 'study'].includes(kind)) return res.status(400).json({ success: false, error: '无效记录类型' });
+    const result = repo.toggleLike(room, kind, req.params.id, req.body.person || '帅哥');
+    broadcast(room, { type: 'record-liked', kind, id: Number(req.params.id), ...result });
+    res.json({ success: true, ...result });
+  } catch (err) { handleApiError(res, err); }
 });
 
 // 7. Study Targets
 app.post('/api/study-targets', (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const t = repo.addStudyTarget(room, req.body);
-  broadcast(room, { type: 'study-target-added', target: t });
-  res.json({ success: true, target: t });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const t = repo.addStudyTarget(room, req.body);
+    broadcast(room, { type: 'study-target-added', target: t, version: t.version });
+    res.json({ success: true, target: t, version: t.version });
+  } catch (err) { handleApiError(res, err); }
+});
+app.patch('/api/study-targets/:id', (req, res) => {
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.updateStudyTarget(room, req.params.id, req.body);
+    broadcast(room, { type: 'study-target-updated', target: out.target, version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 app.delete('/api/study-targets/:id', (req, res) => {
-  const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
-  repo.deleteStudyTarget(room, req.params.id);
-  broadcast(room, { type: 'study-target-deleted', id: req.params.id });
-  res.json({ success: true });
+  try {
+    const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.deleteStudyTarget(room, req.params.id);
+    broadcast(room, { type: 'study-target-deleted', id: req.params.id, version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 
 // 8. Habits & Habit Logs
 app.post('/api/habits', (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const h = repo.addHabit(room, req.body);
-  broadcast(room, { type: 'habit-added', habit: h });
-  res.json({ success: true, habit: h });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const h = repo.addHabit(room, req.body);
+    broadcast(room, { type: 'habit-added', habit: h, version: h.version });
+    res.json({ success: true, habit: h, version: h.version });
+  } catch (err) { handleApiError(res, err); }
+});
+app.patch('/api/habits/:id', (req, res) => {
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.updateHabit(room, req.params.id, req.body);
+    broadcast(room, { type: 'habit-updated', habit: out.habit, version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
+});
+app.put('/api/habits/order', (req, res) => {
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.reorderHabits(room, req.body.ids);
+    broadcast(room, { type: 'habits-reordered', version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 app.delete('/api/habits/:id', (req, res) => {
-  const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
-  repo.deleteHabit(room, req.params.id);
-  broadcast(room, { type: 'habit-deleted', id: req.params.id });
-  res.json({ success: true });
+  try {
+    const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.deleteHabit(room, req.params.id);
+    broadcast(room, { type: 'habit-deleted', id: req.params.id, version: out.version });
+    res.json({ success: true, ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 const handleHabitLogs = (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const person = req.body.person;
-  const date = req.body.date;
-  let habitIds = req.body.habitIds;
-  if (!Array.isArray(habitIds)) {
-    if (req.body.habitId) {
-      const current = repo.getHabitLogsForPerson(room, person, date);
-      if (req.body.completed === false) {
-        habitIds = current.filter(id => id !== req.body.habitId);
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const person = req.body.person;
+    const date = req.body.date;
+    let habitIds = req.body.habitIds;
+    if (!Array.isArray(habitIds)) {
+      if (req.body.habitId) {
+        const current = repo.getHabitLogsForPerson(room, person, date);
+        if (req.body.completed === false) {
+          habitIds = current.filter(id => id !== req.body.habitId);
+        } else {
+          habitIds = current.includes(req.body.habitId) ? current : [...current, req.body.habitId];
+        }
       } else {
-        habitIds = current.includes(req.body.habitId) ? current : [...current, req.body.habitId];
+        habitIds = [];
       }
-    } else {
-      habitIds = [];
     }
-  }
-  const saved = repo.updateHabitLogs(room, person, date, habitIds);
-  broadcast(room, { type: 'habit-logs-updated', person, date, habitIds: saved });
-  res.json({ success: true, habitIds: saved });
+    const saved = repo.updateHabitLogs(room, person, date, habitIds);
+    broadcast(room, { type: 'habit-logs-updated', person, date, habitIds: saved });
+    res.json({ success: true, habitIds: saved });
+  } catch (err) { handleApiError(res, err); }
 };
 app.put('/api/habit-logs', handleHabitLogs);
 app.post('/api/habit-logs', handleHabitLogs);
 
 // 9. Plans
 app.patch('/api/plans', (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const plans = repo.updatePlans(room, req.body);
-  broadcast(room, { type: 'plans-updated', plans });
-  res.json({ success: true, plans });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const plans = repo.updatePlans(room, req.body);
+    broadcast(room, { type: 'plans-updated', plans });
+    res.json({ success: true, plans });
+  } catch (err) { handleApiError(res, err); }
 });
 
 // 10. Members & Identity
 app.post('/api/members', (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const members = repo.addMember(room, req.body.name);
-  broadcast(room, { type: 'members-updated', members });
-  res.json({ success: true, members });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const members = repo.addMember(room, req.body.name);
+    broadcast(room, { type: 'members-updated', members });
+    res.json({ success: true, members });
+  } catch (err) { handleApiError(res, err); }
 });
 app.delete('/api/members/:name', (req, res) => {
-  const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
-  const members = repo.removeMember(room, decodeURIComponent(req.params.name));
-  broadcast(room, { type: 'members-updated', members });
-  res.json({ success: true, members });
+  try {
+    const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
+    const members = repo.removeMember(room, decodeURIComponent(req.params.name));
+    broadcast(room, { type: 'members-updated', members });
+    res.json({ success: true, members });
+  } catch (err) { handleApiError(res, err); }
 });
 const handleRename = (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const oldName = req.body.oldName;
-  const newName = req.body.newName || req.body.name;
-  if (!newName) return res.status(400).json({ error: '新名称不能为空' });
-  const result = repo.renamePerson(room, oldName, newName);
-  broadcast(room, { type: 'person-renamed', ...result });
-  res.json({ success: true, ...result });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const oldName = req.body.oldName;
+    const newName = req.body.newName || req.body.name;
+    if (!newName) return res.status(400).json({ success: false, error: '新名称不能为空' });
+    const result = repo.renamePerson(room, oldName, newName);
+    broadcast(room, { type: 'person-renamed', ...result });
+    res.json({ success: true, ...result });
+  } catch (err) { handleApiError(res, err); }
 };
 app.post('/api/rename', handleRename);
 app.post('/api/user/rename', handleRename);
@@ -233,43 +308,54 @@ app.post('/api/user/rename', handleRename);
 // 11. Uploads (Multipart or Base64)
 app.post('/api/uploads', (req, res) => {
   upload.single('file')(req, res, err => {
-    if (err) return res.status(400).json({ error: err.message });
+    if (err) return res.status(400).json({ success: false, error: err.message });
     if (req.file) {
       return res.json({ success: true, url: `/uploads/${req.file.filename}` });
     }
-    // Check base64 fallback in json body
     const base64Data = req.body?.data || req.body?.image;
     if (base64Data && typeof base64Data === 'string' && base64Data.startsWith('data:image/')) {
       const match = base64Data.match(/^data:image\/([a-zA-Z0-9+]+);base64,(.+)$/);
-      if (!match) return res.status(400).json({ error: '无效 Base64 图片' });
+      if (!match) return res.status(400).json({ success: false, error: '无效 Base64 图片' });
       const ext = match[1] === 'jpeg' ? 'jpg' : match[1].toLowerCase();
       const filename = `photo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
       const buf = Buffer.from(match[2], 'base64');
       fs.writeFileSync(path.join(UPLOAD_DIR, filename), buf);
       return res.json({ success: true, url: `/uploads/${filename}` });
     }
-    res.status(400).json({ error: '请上传图片文件或提供图片 Base64 编码' });
+    res.status(400).json({ success: false, error: '请上传图片文件或提供图片 Base64 编码' });
   });
 });
 
 // 12. Backup Export & Import & Clear
 app.get('/api/export', (req, res) => {
-  const room = req.query.room || DEFAULT_ROOM_CODE;
-  res.setHeader('Content-Disposition', `attachment; filename="run-log-backup-${room}-${Date.now()}.json"`);
-  res.json(repo.getState(room));
+  try {
+    const room = req.query.room || DEFAULT_ROOM_CODE;
+    res.setHeader('Content-Disposition', `attachment; filename="run-log-backup-${room}-${Date.now()}.json"`);
+    const st = repo.getState(room);
+    res.json({
+      ...st,
+      schemaVersion: 2,
+      exportedAt: new Date().toISOString(),
+      unitNote: 'sport: km/minutes; study: hours/minutes/seconds; timezone: Asia/Shanghai'
+    });
+  } catch (err) { handleApiError(res, err); }
 });
 app.post('/api/import', (req, res) => {
-  const room = req.body.room || DEFAULT_ROOM_CODE;
-  const payload = req.body.data || req.body;
-  repo.importState(room, payload);
-  broadcast(room, { type: 'state-imported' });
-  res.json({ success: true, message: '数据已成功恢复至数据库' });
+  try {
+    const room = req.body.room || DEFAULT_ROOM_CODE;
+    const payload = req.body.data || req.body;
+    const out = repo.importState(room, payload);
+    broadcast(room, { type: 'state-imported', version: out.version });
+    res.json({ success: true, message: '数据已成功恢复至数据库', ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 app.delete('/api/records', (req, res) => {
-  const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
-  repo.clearRecords(room);
-  broadcast(room, { type: 'records-cleared' });
-  res.json({ success: true, message: '打卡记录已清空' });
+  try {
+    const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
+    const out = repo.clearRecords(room);
+    broadcast(room, { type: 'records-cleared', version: out.version });
+    res.json({ success: true, message: '打卡记录已清空', ...out });
+  } catch (err) { handleApiError(res, err); }
 });
 
 // Static files

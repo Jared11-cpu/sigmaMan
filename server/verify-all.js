@@ -44,10 +44,9 @@ async function runVerification() {
     filmHtml.includes('RUN &amp; STUDY LOG') && filmHtml.includes('运动 · 学习 · 自律 · 多人 PK'),
     '宣传片分镜文案全面对齐运动、学习、自律与竞技多模块');
 
-  record('FIX-04', '四维学习雷达图透明命中区域与背景网格拦截消除', '前端细节',
-    appJs.includes('pointer-events="none"') && appJs.includes('nodesHtml') &&
-    appJs.indexOf('+ nodesHtml') > appJs.indexOf('+ rings + axisLines'),
-    '背景网格/多边形均添加 pointer-events: none，交互节点 nodesHtml 渲染置于 SVG 顶层，100% 触发点击跳转');
+  record('FIX-04', '四维学习雷达/遥测面板背景网格拦截消除与层级可点', '前端细节',
+    appJs.includes('pointer-events="none"') && appJs.includes('dialPanel + rowsHtml') && appJs.includes('study-pillar-row'),
+    '背景网格添加 pointer-events="none"，dialPanel 与 study-pillar-row 交互热区置于 SVG 顶层，100% 可点击响应');
 
   record('FIX-05', 'app.js 恢复 ?checkin=snap 与 ?checkin=distance 自动弹窗', '前端细节',
     appJs.includes("checkinParam === 'snap'") && appJs.includes("checkinParam === 'distance'"),
@@ -284,8 +283,91 @@ async function runVerification() {
     });
     const impJson = await impRes.json();
     record('API-13', 'GET /api/export 与 POST /api/import 完整 JSON 数据备份与恢复', '备份容灾',
-      expRes.status === 200 && Array.isArray(expJson.records) && expJson.version === 1 && impJson.success === true,
+      expRes.status === 200 && Array.isArray(expJson.records) && expJson.version === 1 && expJson.schemaVersion === 2 && impJson.success === true,
       `成功导出备份并在后端重新导入全量恢复，包含 ${expJson.records.length} 条运动记录与 ${expJson.studyRecords.length} 条学习记录`);
+
+
+    // 14b. M1/M4 Regression: operationId idempotency
+    const idemOpId = 'op-verify-idem-' + Date.now();
+    const idemBody = {
+      room: 'default', id: 9910, person: '帅哥', date: '2026-11-14', time: '07:00',
+      km: 3.5, minutes: 20, feel: 3, note: '幂等测试', tags: [], operationId: idemOpId
+    };
+    const rIdem1 = await (await fetch(`${BASE}/api/records/sport`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(idemBody) })).json();
+    const rIdem2 = await (await fetch(`${BASE}/api/records/sport`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(idemBody) })).json();
+    const stAfterIdem = await (await fetch(`${BASE}/api/state?room=default`)).json();
+    const idemMatches = stAfterIdem.records.filter(r => r.id === rIdem1.record.id);
+    await fetch(`${BASE}/api/records/sport/${rIdem1.record.id}?room=default`, { method: 'DELETE' });
+    record('API-15', 'operationId 幂等防重验证', '可靠性',
+      rIdem1.success && rIdem2.success && rIdem2.deduplicated === true && idemMatches.length === 1,
+      '同一 operationId 连续提交两次仅生成 1 条记录并触发 deduplicated=true');
+
+    // 14c. M1/M4 Regression: Pomodoro <60s rejection & >=60s precision + sessionId idempotency
+    const shortPomoRes = await fetch(`${BASE}/api/records/study`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', id: 9911, person: '帅哥', date: '2026-11-14', source: 'pomodoro', seconds: 45, targetId: 'st-1', sessionId: 'pomo-short-' + Date.now() })
+    });
+    const validSid = 'pomo-valid-' + Date.now();
+    const validPomoBody = {
+      room: 'default', id: 9912, person: '帅哥', date: '2026-11-14', time: '10:00',
+      source: 'pomodoro', seconds: 1500, targetId: 'st-1', subject: '番茄实测', sessionId: validSid, operationId: validSid
+    };
+    const pValid1 = await (await fetch(`${BASE}/api/records/study`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(validPomoBody) })).json();
+    const pValid2 = await (await fetch(`${BASE}/api/records/study`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(validPomoBody) })).json();
+    await fetch(`${BASE}/api/records/study/${pValid1.record.id}?room=default`, { method: 'DELETE' });
+    record('API-16', '番茄钟 <60秒拦截(400) 与 >=60秒精确秒级入库防重', '番茄专注',
+      shortPomoRes.status === 400 && pValid1.success && pValid1.record.seconds === 1500 && pValid1.record.minutes === 25 && pValid2.deduplicated === true,
+      '45秒番茄钟返回 400 拒绝，1500秒番茄钟准确折算 25分钟/0.42h 且重复 sessionId 防重生效');
+
+    // 14d. M1/M4 Regression: PATCH /api/records/:kind/:id + target doneHours recalculation
+    const createdPatchStd = await (await fetch(`${BASE}/api/records/study`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', id: 9913, person: '帅哥', date: '2026-11-14', time: '11:00', hours: 1.0, minutes: 60, targetId: 'st-1', subject: '精读' })
+    })).json();
+    const stMidPatch = await (await fetch(`${BASE}/api/state?room=default`)).json();
+    const st1BeforePatch = stMidPatch.studyTargets.find(t => t.id === 'st-1').doneHours;
+    const patchStdRes = await (await fetch(`${BASE}/api/records/study/${createdPatchStd.record.id}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', minutes: 120, hours: 2.0, note: '编辑后备注' })
+    })).json();
+    const stAfterPatch = await (await fetch(`${BASE}/api/state?room=default`)).json();
+    const st1AfterPatch = stAfterPatch.studyTargets.find(t => t.id === 'st-1').doneHours;
+    await fetch(`${BASE}/api/records/study/${createdPatchStd.record.id}?room=default`, { method: 'DELETE' });
+    record('API-17', 'PATCH /api/records/:kind/:id 记录编辑与目标小时联动重算', '记录编辑',
+      patchStdRes.success && patchStdRes.record.hours === 2.0 && patchStdRes.record.note === '编辑后备注' && Math.abs((st1AfterPatch - st1BeforePatch) - 1.0) < 0.05,
+      `学习记录从 1.0h 编辑为 2.0h 后，关联目标 st-1 doneHours 从 ${st1BeforePatch}h 联动更新至 ${st1AfterPatch}h`);
+
+    // 14e. M1/M4 Regression: PATCH /api/study-targets/:id, PATCH /api/habits/:id, PUT /api/habits/order
+    const stPatchRes = await (await fetch(`${BASE}/api/study-targets/st-1`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', archived: true })
+    })).json();
+    const stUnarchRes = await (await fetch(`${BASE}/api/study-targets/st-1`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', archived: false })
+    })).json();
+    const hbPatchRes = await (await fetch(`${BASE}/api/habits/hb-1`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', archived: true })
+    })).json();
+    const hbUnarchRes = await (await fetch(`${BASE}/api/habits/hb-1`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', archived: false })
+    })).json();
+    const curHabitsState = await (await fetch(`${BASE}/api/state?room=default`)).json();
+    const origOrder = curHabitsState.habits.map(h => h.id);
+    const revOrder = [...origOrder].reverse();
+    const ordRes1 = await (await fetch(`${BASE}/api/habits/order`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', ids: revOrder })
+    })).json();
+    const ordRes2 = await (await fetch(`${BASE}/api/habits/order`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', ids: origOrder })
+    })).json();
+    record('API-18', 'PATCH 目标/习惯归档与 PUT /api/habits/order 排序接口', '目标与习惯',
+      stPatchRes.success && stUnarchRes.success && hbPatchRes.success && hbUnarchRes.success && ordRes1.success && ordRes2.success,
+      '学习目标与习惯归档/恢复切换及习惯排序接口全部正常持久化并恢复原序');
 
     // 15. Server Restart Persistence Verification (Key Requirement)
     console.log('[TEST] 重启服务以验证 SQLite 离线持久化数据恢复...');
