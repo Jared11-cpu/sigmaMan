@@ -85,13 +85,48 @@ function seed() {
   };
 }
 
-function hydrateState(raw) {
+function studySecondsOf(r) {
+  if (!r || typeof r !== 'object') return 0;
+  if (Number.isFinite(Number(r.seconds)) && Number(r.seconds) > 0) return Math.round(Number(r.seconds));
+  if (Number.isFinite(Number(r.minutes)) && Number(r.minutes) > 0) return Math.round(Number(r.minutes) * 60);
+  if (Number.isFinite(Number(r.hours)) && Number(r.hours) > 0) return Math.round(Number(r.hours) * 3600);
+  return 0;
+}
+function studyMinutesOf(r) {
+  const sec = studySecondsOf(r);
+  return sec > 0 ? Math.max(1, Math.round(sec / 60)) : 0;
+}
+function studyHoursOf(r) {
+  return roundedStudyHours(studySecondsOf(r) / 3600);
+}
+function roundedStudyHours(hours) { return Math.round(hours * 100) / 100; }
+function normalizeStudyRecord(r) {
+  const seconds = studySecondsOf(r);
+  const minutes = seconds > 0 ? Math.max(1, Math.round(seconds / 60)) : 0;
+  const hours = roundedStudyHours(seconds / 3600);
+  return { ...r, seconds, minutes, hours };
+}
+
+function hydrateState(raw, opts = {}) {
+  const fromServer = Boolean(opts && opts.fromServer);
   const base = seed();
-  if (!raw || (raw.version !== 1 && raw.schemaVersion !== 2) || !Array.isArray(raw.records)) return base;
+  if (!raw || (raw.version !== 1 && raw.schemaVersion !== 2) || !Array.isArray(raw.records)) {
+    raw = base;
+  }
   const userName = raw.name || base.name;
   let members = Array.isArray(raw.members) ? raw.members.filter(Boolean) : [];
-  let records = raw.records;
-  let studyRecords = Array.isArray(raw.studyRecords) ? raw.studyRecords : defaultStudyRecords(userName);
+  let records = raw.records.map(r => ({
+    ...r,
+    syncStatus: fromServer ? 'synced' : (r.syncStatus || 'local'),
+    syncError: fromServer ? '' : (r.syncError || '')
+  }));
+  let studyRecords = (Array.isArray(raw.studyRecords) ? raw.studyRecords : defaultStudyRecords(userName)).map(r =>
+    normalizeStudyRecord({
+      ...r,
+      syncStatus: fromServer ? 'synced' : (r.syncStatus || 'local'),
+      syncError: fromServer ? '' : (r.syncError || '')
+    })
+  );
   let memberHabitLogs = raw.memberHabitLogs && typeof raw.memberHabitLogs === 'object' ? { ...raw.memberHabitLogs } : {};
   const soloPurged = Boolean(raw.soloPurged);
 
@@ -117,9 +152,10 @@ function hydrateState(raw) {
     sportDatePlan: raw.sportDatePlan && typeof raw.sportDatePlan === 'object' ? { ...raw.sportDatePlan } : {},
     studyDatePlan: raw.studyDatePlan && typeof raw.studyDatePlan === 'object' ? { ...raw.studyDatePlan } : {},
     studyTargets: (Array.isArray(raw.studyTargets) && raw.studyTargets.length ? raw.studyTargets : base.studyTargets).map(t => {
-      const linkedH = studyRecords.filter(r => r.person === userName && r.targetId === t.id).reduce((s, r) => s + (Number(r.hours) || 0), 0);
-      const baseH = Number.isFinite(t.baseHours) ? t.baseHours : Math.max(0, Math.round(((Number(t.doneHours) || 0) - linkedH) * 100) / 100);
-      return { ...t, archived: Boolean(t.archived), baseHours: baseH };
+      const linkedSec = studyRecords.filter(r => r.person === userName && r.targetId === t.id).reduce((s, r) => s + studySecondsOf(r), 0);
+      const linkedHours = linkedSec / 3600;
+      const baseHours = Number.isFinite(t.baseHours) ? t.baseHours : Math.max(0, roundedStudyHours((Number(t.doneHours) || 0) - linkedHours));
+      return { ...t, archived: Boolean(t.archived), baseHours, doneHours: Math.max(0, roundedStudyHours(baseHours + linkedHours)) };
     }),
     habits: (Array.isArray(raw.habits) && raw.habits.length ? raw.habits : base.habits).map(h => ({ ...h, archived: Boolean(h.archived) })),
     habitLogs: raw.habitLogs && typeof raw.habitLogs === 'object' ? raw.habitLogs : base.habitLogs,
@@ -149,6 +185,16 @@ let view = params.get('view') || (VALID_VIEWS.includes(hashView) ? hashView : 'h
 let showArchivedTargets = false, showArchivedHabits = false, pendingImportBackup = null;
 let rankPeriod = '本月', rankMetric = '综合积分', progressTab = '双轨总览', chartType = '7天趋势', achFilter = '全部';
 let recordKindFilter = 'all'; // 'all' | 'sport' | 'study'
+let recordPersonFilter = 'mine'; // 'mine' | 'all'
+let recordRangeFilter = '7d'; // '7d' | '30d' | 'all'
+let recordTrendMode = 'daily'; // 'daily' | 'cum'
+let recordSelectedDate = ''; // '' (full interval) | 'YYYY-MM-DD'
+let recordsMoreOpen = false;
+let recordsMoreChartType = '28天热力'; // '28天热力' | '黄金时段' | '强度分布' | '状态感觉'
+let externalFilterNotice = '';
+let lastReceiptFocusSelector = '';
+let lastEditorOpener = null;
+let lastEditorFocusSelector = '';
 let recordSelectKey = ''; // 'sport:id' or 'study:id'
 let homeBpMode = 'track'; // 'track' | 'study'
 let bpFocus = 'sport'; // 'sport' | 'study' | 'habit'
@@ -174,7 +220,10 @@ let feedbackAnimId = 0;
 function loadPomoSession() {
   try {
     const raw = JSON.parse(localStorage.getItem(POMO_KEY) || 'null');
-    if (raw && typeof raw === 'object' && Number.isFinite(raw.totalSec)) return raw;
+    if (raw && typeof raw === 'object' && Number.isFinite(raw.totalSec)) {
+      if (raw.state === 'saving') return { ...raw, state: 'paused', errorMsg: '保存中断，请重试同步' };
+      return raw;
+    }
   } catch {}
   return {
     sessionId: 'pomo-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
@@ -192,25 +241,41 @@ let pomoSession = loadPomoSession();
 function savePomoSession() { try { localStorage.setItem(POMO_KEY, JSON.stringify(pomoSession)); } catch {} }
 function getPomoElapsedSec() {
   if (pomoSession.state === 'idle') return 0;
-  if (pomoSession.state === 'completed' || pomoSession.state === 'saving' || pomoSession.state === 'saved') {
+  if (pomoSession.state === 'completed' || pomoSession.state === 'saved') {
     if (pomoSession.completedAt && pomoSession.startedAt) {
-      return Math.max(0, Math.round((pomoSession.completedAt - pomoSession.startedAt - (pomoSession.pausedAccumMs || 0)) / 1000));
+      return Math.min(pomoSession.totalSec, Math.max(0, Math.round((pomoSession.completedAt - pomoSession.startedAt - (pomoSession.pausedAccumMs || 0)) / 1000)));
     }
     return pomoSession.totalSec;
   }
-  const refNow = pomoSession.state === 'paused' ? (pomoSession.pauseStartedAt || Date.now()) : Date.now();
+  const refNow = (pomoSession.state === 'paused' || pomoSession.state === 'saving')
+    ? (pomoSession.completedAt || pomoSession.pauseStartedAt || Date.now())
+    : Date.now();
   const ms = Math.max(0, refNow - (pomoSession.startedAt || refNow) - (pomoSession.pausedAccumMs || 0));
   return Math.min(pomoSession.totalSec, Math.floor(ms / 1000));
+}
+function getStudyFocusEntryMeta() {
+  const leftText = formatTimer(getPomoLeftSec());
+  const targetTitle = findTargetTitle(pomodoroTargetId);
+  if (pomoSession.state === 'running') {
+    return { label: '查看专注', stateText: '进行中 · 剩余 ' + leftText, aria: '查看专注，' + targetTitle + '，剩余 ' + leftText };
+  }
+  if (pomoSession.state === 'paused') {
+    return { label: '继续专注', stateText: '已暂停 · 剩余 ' + leftText, aria: '继续专注，' + targetTitle + '，剩余 ' + leftText };
+  }
+  if (pomoSession.state === 'completed') {
+    return { label: '查看专注', stateText: '待记入 · ' + Math.floor(getPomoElapsedSec() / 60) + ' 分钟', aria: '查看专注，本轮已完成待记入' };
+  }
+  return { label: '开始专注', stateText: '', aria: '开始专注，当前目标 ' + targetTitle };
 }
 function getPomoLeftSec() { return Math.max(0, pomoSession.totalSec - getPomoElapsedSec()); }
 let pomodoroTotal = pomoSession.totalSec, pomodoroLeft = getPomoLeftSec(), pomodoroRunning = pomoSession.state === 'running', pomodoroTick = null;
 let pomodoroTargetId = pomoSession.targetId || state.studyTargets[0]?.id || 'st-1';
 
-let quoteIndex = params.has('quote') ? Number(params.get('quote')) : 1, quoteTimer, step = 0, draft = null, modalPreviousFocus = null, toastTimer, dialogSave = null;
+let quoteIndex = params.has('quote') ? Number(params.get('quote')) : 0, quoteTimer, step = 0, draft = null, modalPreviousFocus = null, modalPreviousFocusSelector = '', toastTimer, dialogSave = null;
 if (!['home', 'progress', 'plan', 'study', 'ranking', 'achievements', 'records', 'people'].includes(view)) view = 'home';
 
 const nav = [
-  ['home', '首页', 'track'],
+  ['home', '今天', 'track'],
   ['progress', '进度', 'pulse'],
   ['plan', '运动', 'shoe'],
   ['study', '学习', 'book'],
@@ -265,28 +330,344 @@ let lastSyncError = '';
 let pendingOps = (() => {
   try { const a = JSON.parse(localStorage.getItem(PENDING_OPS_KEY) || '[]'); return Array.isArray(a) ? a : []; } catch { return []; }
 })();
+const inFlightOpIds = new Set();
+let syncRetrying = false;
 function savePendingOps() { try { localStorage.setItem(PENDING_OPS_KEY, JSON.stringify(pendingOps)); } catch {} }
 function nextOpId(prefix = 'op') { return prefix + '-' + Date.now() + '-' + Math.random().toString(36).slice(2, 8); }
+function roomPendingOps(room = currentRoomCode) {
+  return pendingOps.filter(x => (x.roomCode || 'default') === room);
+}
+function enqueuePendingOp(op) {
+  if (!op || !op.operationId) return;
+  const normalized = {
+    roomCode: currentRoomCode,
+    status: 'pending',
+    lastError: '',
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    ...op
+  };
+  const idx = pendingOps.findIndex(x => x.operationId === normalized.operationId);
+  if (idx >= 0) pendingOps[idx] = { ...pendingOps[idx], ...normalized, updatedAt: Date.now() };
+  else pendingOps.push(normalized);
+  savePendingOps();
+}
 function removePendingOp(opId) { pendingOps = pendingOps.filter(x => x.operationId !== opId); savePendingOps(); }
-async function flushPendingOps() {
-  if (!isServerOnline || !pendingOps.length) return;
-  const copy = [...pendingOps];
-  for (const op of copy) {
-    const res = await serverFetch(op.endpoint, op.method || 'POST', op.payload);
-    if (res && res.ok) {
-      removePendingOp(op.operationId);
-      lastSyncError = '';
-    } else if (res && res.status >= 400 && res.status < 500) {
-      removePendingOp(op.operationId);
-      lastSyncError = res.error || '数据校验未通过';
-    } else {
-      lastSyncError = (res && res.error) || '网络连接失败';
-      break;
+function syncStatusMeta(status) {
+  if (status === 'synced') return { key: 'synced', label: '已同步', detail: '已同步至服务器' };
+  if (status === 'pending') return { key: 'pending', label: '等待同步', detail: '已存本机，等待同步' };
+  if (status === 'failed') return { key: 'failed', label: '同步失败', detail: '同步失败，可点击重试' };
+  return { key: 'local', label: '本机已保存', detail: '离线已保存在本机浏览器' };
+}
+function syncPillMarkup(rec) {
+  const op = rec && rec.operationId ? pendingOps.find(x => x.operationId === rec.operationId) : null;
+  const st = op ? (op.status === 'failed' ? 'failed' : (isServerOnline ? 'pending' : (rec.syncStatus === 'local' ? 'local' : 'pending'))) : (rec?.syncStatus || (isServerOnline ? 'synced' : 'local'));
+  const meta = syncStatusMeta(st);
+  return '<span class="ck-sync-pill is-' + meta.key + '" title="' + esc(rec?.syncError || op?.lastError || meta.detail) + '">' + meta.label + '</span>';
+}
+function recordSyncStateKey(rec) {
+  const op = rec && rec.operationId ? pendingOps.find(x => x.operationId === rec.operationId) : null;
+  if (rec && rec.syncError) return 'failed';
+  if (op) return op.status === 'failed' ? 'failed' : (isServerOnline ? 'pending' : (rec.syncStatus === 'local' ? 'local' : 'pending'));
+  return rec?.syncStatus || (isServerOnline ? 'synced' : 'local');
+}
+function beijingDateOf(rec) {
+  const raw = rec && (rec.date || rec.createdAt);
+  if (typeof raw === 'string') {
+    if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return raw;
+    const dt = new Date(raw);
+    if (!Number.isNaN(dt.getTime())) {
+      try {
+        const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' }).formatToParts(dt);
+        const y = parts.find(p => p.type === 'year')?.value;
+        const m = parts.find(p => p.type === 'month')?.value;
+        const d = parts.find(p => p.type === 'day')?.value;
+        if (y && m && d) return y + '-' + m + '-' + d;
+      } catch {}
+      return dateKey(new Date(dt.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' })));
     }
   }
+  return today();
+}
+function updateLocalRecordSyncStatus(kind, opId, recId, status, errMsg = '', serverRec = null) {
+  const arr = kind === 'study' ? state.studyRecords : state.records;
+  const target = arr.find(r => (opId && r.operationId === opId) || (recId !== undefined && recId !== null && r.id === recId));
+  if (!target) return;
+  if (serverRec && typeof serverRec === 'object') {
+    const oldKey = kind + ':' + target.id;
+    Object.assign(target, kind === 'study' ? normalizeStudyRecord(serverRec) : serverRec);
+    if (recordSelectKey === oldKey) recordSelectKey = kind + ':' + target.id;
+    if (newlyArchivedRecordKey === oldKey) newlyArchivedRecordKey = kind + ':' + target.id;
+  }
+  target.syncStatus = status;
+  target.syncError = errMsg || '';
+  if (opId && !target.operationId) target.operationId = opId;
+}
+function insertLocalRecordDedup(kind, rec) {
+  const arr = kind === 'study' ? state.studyRecords : state.records;
+  const normalized = kind === 'study' ? normalizeStudyRecord(rec) : rec;
+  const existingIdx = arr.findIndex(r => (normalized.operationId && r.operationId === normalized.operationId) || r.id === normalized.id);
+  if (existingIdx >= 0) {
+    arr[existingIdx] = { ...arr[existingIdx], ...normalized };
+    return arr[existingIdx];
+  }
+  arr.unshift(normalized);
+  return normalized;
+}
+async function flushPendingOps(onlyOpId = null) {
+  if (!isServerOnline) return { synced: 0, failed: roomPendingOps().length };
+  const list = roomPendingOps().filter(op => !onlyOpId || op.operationId === onlyOpId);
+  if (!list.length) return { synced: 0, failed: 0 };
+  let synced = 0, failed = 0;
+  for (const op of list) {
+    if (inFlightOpIds.has(op.operationId)) continue;
+    inFlightOpIds.add(op.operationId);
+    op.status = 'pending';
+    op.updatedAt = Date.now();
+    savePendingOps();
+    updateLocalRecordSyncStatus(op.kind, op.operationId, op.recordId, 'pending', '');
+    try {
+      const payload = { ...op.payload, room: op.roomCode || currentRoomCode, operationId: op.operationId };
+      const res = await serverFetch(op.endpoint, op.method || 'POST', payload);
+      if (res && res.ok) {
+        updateLocalRecordSyncStatus(op.kind, op.operationId, op.recordId, 'synced', '', res.record || null);
+        removePendingOp(op.operationId);
+        lastSyncError = '';
+        synced++;
+      } else {
+        const errText = (res && res.error) || '网络连接失败';
+        op.status = 'failed';
+        op.lastError = errText;
+        op.updatedAt = Date.now();
+        savePendingOps();
+        updateLocalRecordSyncStatus(op.kind, op.operationId, op.recordId, 'failed', errText);
+        lastSyncError = errText;
+        failed++;
+        if (!res || res.status === 0) break;
+      }
+    } finally {
+      inFlightOpIds.delete(op.operationId);
+    }
+  }
+  recomputeStudyTargetDoneHours();
+  persistLocalOnly();
+  return { synced, failed };
+}
+async function retryPendingOps(onlyOpId = null) {
+  if (syncRetrying) return;
+  syncRetrying = true;
+  try {
+    if (!isServerOnline) {
+      const online = await checkServerHealth();
+      if (online) {
+        isServerOnline = true;
+        initSSE();
+      } else {
+        const targets = roomPendingOps().filter(op => !onlyOpId || op.operationId === onlyOpId);
+        targets.forEach(op => {
+          op.status = 'failed';
+          op.lastError = '当前仍处于离线状态，无法连接服务器';
+          updateLocalRecordSyncStatus(op.kind, op.operationId, op.recordId, 'failed', op.lastError);
+        });
+        savePendingOps();
+        persistLocalOnly();
+        render(true);
+        toast('服务器暂未连通，记录仍保留在本机，可稍后重试。');
+        return;
+      }
+    }
+    const out = await flushPendingOps(onlyOpId);
+    if (out.synced > 0 && roomPendingOps().length === 0) {
+      const remoteState = await serverFetch('/state');
+      if (remoteState && remoteState.ok) {
+        state = mergeRemoteState(remoteState);
+        persistLocalOnly();
+      }
+    }
+    render(true);
+    if (out.failed === 0 && out.synced > 0) toast('已成功同步 ' + out.synced + ' 条记录至服务器！');
+    else if (out.failed > 0) toast('同步失败：' + (lastSyncError || '请稍后重试') + '（记录已保留）');
+    else toast('当前没有待同步记录。');
+  } finally {
+    syncRetrying = false;
+  }
+}
+function mergeRemoteState(remoteRaw) {
+  const prevSport = state ? [...state.records] : [];
+  const prevStudy = state ? [...state.studyRecords] : [];
+  const next = hydrateState(remoteRaw, { fromServer: true });
+  const pendingIds = new Set(roomPendingOps().map(x => x.operationId));
+  if (pendingIds.size) {
+    prevSport.forEach(r => {
+      if (r.operationId && pendingIds.has(r.operationId) && !next.records.some(x => x.id === r.id || (x.operationId && x.operationId === r.operationId))) {
+        next.records.unshift(r);
+      }
+    });
+    prevStudy.forEach(r => {
+      if (r.operationId && pendingIds.has(r.operationId) && !next.studyRecords.some(x => x.id === r.id || (x.operationId && x.operationId === r.operationId))) {
+        next.studyRecords.unshift(normalizeStudyRecord(r));
+      }
+    });
+    recomputeStudyTargetDoneHours(next);
+  }
+  return next;
+}
+
+/* ---------- Scoped Check-in Draft Persistence (Room + User + Mode Isolated, IDB Photo Store) ---------- */
+const DRAFT_IDB_NAME = 'run_log_ck_draft_media';
+const DRAFT_IDB_STORE = 'photos';
+function openDraftPhotoDb() {
+  return new Promise((resolve, reject) => {
+    if (typeof indexedDB === 'undefined') { reject(new Error('no-idb')); return; }
+    const req = indexedDB.open(DRAFT_IDB_NAME, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(DRAFT_IDB_STORE)) db.createObjectStore(DRAFT_IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('idb-open-failed'));
+  });
+}
+async function draftPhotoIdbPut(key, dataUrl) {
+  try {
+    const db = await openDraftPhotoDb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(DRAFT_IDB_STORE, 'readwrite');
+      tx.objectStore(DRAFT_IDB_STORE).put(dataUrl, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    db.close();
+    return true;
+  } catch { return false; }
+}
+async function draftPhotoIdbGet(key) {
+  try {
+    const db = await openDraftPhotoDb();
+    const val = await new Promise((resolve, reject) => {
+      const tx = db.transaction(DRAFT_IDB_STORE, 'readonly');
+      const r = tx.objectStore(DRAFT_IDB_STORE).get(key);
+      r.onsuccess = () => resolve(r.result || '');
+      r.onerror = () => reject(r.error);
+    });
+    db.close();
+    return val;
+  } catch { return ''; }
+}
+async function draftPhotoIdbDel(key) {
+  try {
+    const db = await openDraftPhotoDb();
+    await new Promise(resolve => {
+      const tx = db.transaction(DRAFT_IDB_STORE, 'readwrite');
+      tx.objectStore(DRAFT_IDB_STORE).delete(key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+    db.close();
+  } catch {}
+}
+function draftStorageKey(mode = 'sport', room = currentRoomCode, owner = state?.name || '') {
+  return STORE + '_ck_draft::' + encodeURIComponent(String(room || 'default')) + '::' + encodeURIComponent(String(owner || 'default')) + '::' + encodeURIComponent(String(mode || 'sport'));
+}
+function getSavedDraft(mode = 'sport') {
+  if (demo || !hasLocalStorage) return null;
+  try {
+    const raw = localStorage.getItem(draftStorageKey(mode));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return null;
+    if (parsed.roomCode !== currentRoomCode || parsed.owner !== state.name || parsed.mode !== mode) return null;
+    if (mode === 'study') {
+      const { minutes, hours, ...savedDraft } = parsed;
+      const seconds = Math.max(60, Math.min(16 * 3600, studySecondsOf(parsed) || 90 * 60));
+      return { ...savedDraft, seconds };
+    }
+    const minutes = Math.max(1, Math.round(Number(parsed.minutes) || 30));
+    return { ...parsed, seconds: minutes * 60, minutes, hours: roundedStudyHours(minutes / 60) };
+  } catch { return null; }
+}
+function clearSavedDraft(mode = 'sport') {
+  if (!hasLocalStorage) return;
+  const key = draftStorageKey(mode);
+  try { localStorage.removeItem(key); } catch {}
+  draftPhotoIdbDel(key);
+}
+function persistCheckinDraft(d = draft, s = step) {
+  if (!d || demo || !hasLocalStorage) return;
+  const key = draftStorageKey(d.mode);
+  const isDataPhoto = typeof d.photo === 'string' && d.photo.startsWith('data:image/');
+  const payload = {
+    version: 1,
+    roomCode: currentRoomCode,
+    owner: state.name,
+    mode: d.mode,
+    step: Math.max(0, Math.min(4, Number(s) || 0)),
+    person: d.person,
+    km: d.km,
+    seconds: d.mode === 'study' ? studySecondsOf(d) : Math.max(60, Math.round((d.minutes || 30) * 60)),
+    minutes: d.mode === 'study' ? studyMinutesOf(d) : d.minutes,
+    hours: d.mode === 'study' ? studyHoursOf(d) : d.hours,
+    targetId: d.targetId,
+    feel: d.feel,
+    tags: Array.isArray(d.tags) ? d.tags : [],
+    note: d.note || '',
+    photo: isDataPhoto ? '' : (d.photo || ''),
+    photoInIdb: isDataPhoto,
+    photoStorage: d.photoStorage || '',
+    operationId: d.operationId,
+    time: d.time,
+    savedAt: Date.now()
+  };
+  try {
+    localStorage.setItem(key, JSON.stringify(payload));
+  } catch {}
+  if (isDataPhoto) draftPhotoIdbPut(key, d.photo);
+  else draftPhotoIdbDel(key);
+}
+function setDraftStudySeconds(sec) {
+  draft.seconds = Math.max(60, Math.min(16 * 3600, Math.round(sec)));
+}
+function draftStudyHoursInputValue() {
+  // Four decimal places can round-trip every whole second.
+  return Number((draft.seconds / 3600).toFixed(4));
+}
+function updateStudyDurationPreview(unit) {
+  const isHours = unit === 'hours';
+  const seconds = draft.seconds;
+  const minutes = studyMinutesOf(draft);
+  const hours = studyHoursOf(draft);
+  const preview = $(isHours ? '#ck-study-derived' : '#ck-study-min-derived');
+  if (preview) preview.innerHTML = '<strong>' + (isHours ? minutes + ' 分钟' : hours.toFixed(2) + ' 小时') + '</strong>（' + seconds + ' 秒）';
+  $$('[data-modal="' + unit + '-set"]').forEach(el => {
+    const value = Number(el.dataset.value);
+    el.classList.toggle('selected', isHours ? value * 3600 === seconds : value === minutes);
+  });
+}
+function photoStorageHint(d) {
+  if (!d) return '';
+  if (d.photoUploading) return '正在上传照片至服务器（/uploads），请稍候…';
+  if (d.photoRestoreWarning && !d.photo) return '提示：上次的离线本地照片未能随草稿恢复，如需附图请重新选择。';
+  if (d.photo) {
+    if (d.photo.startsWith('/uploads/') || (d.photo.startsWith('http://') || d.photo.startsWith('https://'))) {
+      return '✓ 照片已上传至服务器（/uploads），保存打卡后可跨设备在记录档案中查看。';
+    }
+    if (d.photoStorage === 'local-fallback') {
+      return '⚠ 服务器上传失败，照片已降级保存在当前浏览器本地（仅本机可见）。';
+    }
+    return '● 照片已压缩并仅保存在当前浏览器本地（离线存储，仅本机可见）。';
+  }
+  return isServerOnline
+    ? '在线模式：选择照片后将上传至服务器（/uploads），跨设备可见；若上传失败则自动降级保存在当前浏览器。'
+    : '离线模式：照片将压缩后仅保存在当前浏览器本地，清理缓存或换设备后不可见。';
+}
+function photoTicketLabel(d) {
+  if (!d || !d.photo) return '本次无照片';
+  if (d.photo.startsWith('/uploads/') || (d.photo.startsWith('http://') || d.photo.startsWith('https://'))) return '已上传服务器 ✓';
+  return d.photoStorage === 'local-fallback' ? '仅存本机（上传降级）' : '仅存当前浏览器';
 }
 
 async function checkServerHealth() {
+  if (location.hostname === 'jared11-cpu.github.io') return false;
   if (embedded || demo) return false;
   if (typeof location !== 'undefined' && (location.protocol === 'file:' || location.origin === 'null' || window.mausbot)) return false;
   try {
@@ -347,13 +728,13 @@ function initSSE() {
   try {
     sseSource = new EventSource('/api/events?roomCode=' + encodeURIComponent(currentRoomCode));
     sseSource.addEventListener('state_change', async () => {
-      if (hasActiveEditingState() || pendingOps.length > 0) {
+      if (hasActiveEditingState() || roomPendingOps().length > 0) {
         toast('收到远端数据更新，保存当前编辑后自动同步');
         return;
       }
       const remoteState = await serverFetch('/state');
       if (remoteState && remoteState.ok) {
-        state = hydrateState(remoteState);
+        state = mergeRemoteState(remoteState);
         persistLocalOnly();
         render(true);
       }
@@ -377,7 +758,7 @@ async function syncLocalToCloud() {
     toast('本地全部数据已成功迁移同步至云端 SQLite！');
     const latest = await serverFetch('/state');
     if (latest && latest.ok) {
-      state = hydrateState(latest);
+      state = mergeRemoteState(latest);
       persistLocalOnly();
       render(true);
     }
@@ -420,14 +801,30 @@ function memberColor(name) {
   return MEMBER_PALETTE[Math.max(0, idx) % MEMBER_PALETTE.length];
 }
 function total(records = state.records) { return records.reduce((s, r) => s + r.km, 0); }
-function totalStudy(records = state.studyRecords) { return records.reduce((s, r) => s + (r.hours || 0), 0); }
+function totalStudySeconds(records = state.studyRecords) { return records.reduce((s, r) => s + studySecondsOf(r), 0); }
+function totalStudyMinutes(records = state.studyRecords) { return Math.round(totalStudySeconds(records) / 60); }
+function totalStudy(records = state.studyRecords) { return roundedStudyHours(totalStudySeconds(records) / 3600); }
 function monthly(records = state.records) { return records.filter(r => r.date.slice(0, 7) === today().slice(0, 7)); }
 function weekStart() { const d = chinaNow(); d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return dateKey(d); }
 function weekly(records = state.records) { return records.filter(r => r.date >= weekStart() && r.date <= today()); }
 function mine(records = state.records) { return records.filter(r => r.person === state.name); }
 function mineStudy(records = state.studyRecords) { return records.filter(r => r.person === state.name); }
-function runToday(name = state.name) { return state.records.some(r => r.person === name && r.date === today()); }
-function studyToday(name = state.name) { return state.studyRecords.some(r => r.person === name && r.date === today()); }
+function todaySportSummary(name = state.name) {
+  const dk = today();
+  const recs = state.records.filter(r => r.person === name && r.date === dk);
+  const km = Math.round(total(recs) * 100) / 100;
+  return { count: recs.length, km, done: recs.length > 0 };
+}
+function todayStudySummary(name = state.name) {
+  const dk = today();
+  const recs = state.studyRecords.filter(r => r.person === name && r.date === dk);
+  const seconds = totalStudySeconds(recs);
+  const minutes = Math.round(seconds / 60);
+  const hours = roundedStudyHours(seconds / 3600);
+  return { count: recs.length, seconds, minutes, hours, done: recs.length > 0 };
+}
+function runToday(name = state.name) { return todaySportSummary(name).done; }
+function studyToday(name = state.name) { return todayStudySummary(name).done; }
 function isSportPlanned(dk) {
   if (state.sportDatePlan && Object.prototype.hasOwnProperty.call(state.sportDatePlan, dk)) return !!state.sportDatePlan[dk];
   return state.days.includes(new Date(dk + 'T12:00:00').getDay());
@@ -439,16 +836,10 @@ function isStudyPlanned(dk) {
 
 function activeHabits() { return state.habits.filter(h => !h.archived); }
 function activeStudyTargets() { return state.studyTargets.filter(t => !t.archived); }
-function targetStats(t, person = state.name) {
-  const linked = state.studyRecords.filter(r => r.person === person && r.targetId === t.id);
-  const recTotal = Math.round(totalStudy(linked) * 100) / 100;
-  const baseH = Number(t.baseHours) || 0;
-  return { recTotal, baseH, cumulative: Math.round((baseH + recTotal) * 10) / 10, count: linked.length };
-}
-function recomputeStudyTargetDoneHours() {
-  state.studyTargets.forEach(t => {
-    const st = targetStats(t, state.name);
-    if (t.baseHours !== undefined || st.recTotal > 0) t.doneHours = Math.max(st.cumulative, 0);
+function recomputeStudyTargetDoneHours(data = state) {
+  data.studyTargets.forEach(t => {
+    const linked = data.studyRecords.filter(r => r.person === data.name && r.targetId === t.id);
+    t.doneHours = Math.max(0, roundedStudyHours((Number(t.baseHours) || 0) + totalStudySeconds(linked) / 3600));
   });
 }
 
@@ -672,48 +1063,97 @@ function arrowBoxMarkup() {
   return '<span class="arrow-box" aria-hidden="true"><i class="arr-main">→</i><i class="arr-clone">→</i></span>';
 }
 
+function ckEntryBarsMarkup(modes = ['sport', 'study']) {
+  const parts = [];
+  modes.forEach(m => {
+    const saved = getSavedDraft(m);
+    if (saved) {
+      const mLabel = m === 'study' ? '学习打卡' : '运动打卡';
+      const detail = m === 'study'
+        ? (studyMinutesOf(saved) + ' 分钟 / ' + studyHoursOf(saved).toFixed(1) + 'h')
+        : (Number(saved.km || 5).toFixed(1) + ' km · ' + (saved.minutes || 30) + ' min');
+      parts.push(
+        '<div class="ck-entry-bar is-draft" role="status">'
+        + '<span class="ck-entry-text"><strong>未完成' + mLabel + '草稿</strong> · ' + esc(detail) + '（第 ' + ((saved.step || 0) + 1) + '/5 步）</span>'
+        + '<span class="ck-entry-actions">'
+        + '<button type="button" class="ck-btn ck-btn-primary" data-action="resume-draft" data-mode="' + m + '">继续填写</button>'
+        + '<button type="button" class="ck-btn ck-btn-ghost" data-action="discard-draft" data-mode="' + m + '">丢弃草稿</button>'
+        + '</span></div>'
+      );
+    }
+  });
+  const ops = roomPendingOps();
+  if (ops.length) {
+    const failedOps = ops.filter(x => x.status === 'failed');
+    const isFailed = failedOps.length > 0;
+    const statusKey = isFailed ? 'failed' : (isServerOnline ? 'pending' : 'local');
+    const meta = syncStatusMeta(statusKey);
+    const detail = isFailed
+      ? (failedOps.length + ' 条 · ' + esc(failedOps[0].lastError || '请检查网络后重试'))
+      : (ops.length + ' 条' + (isServerOnline ? '待上传至服务器' : '已存本机，联网后可同步'));
+    parts.push(
+      '<div class="ck-entry-bar ' + (isFailed ? 'is-failed' : (isServerOnline ? 'is-pending' : 'is-local')) + '" role="' + (isFailed ? 'alert' : 'status') + '">'
+      + '<span class="ck-entry-text"><strong>' + meta.label + '</strong> · ' + detail + '</span>'
+      + '<span class="ck-entry-actions">'
+      + '<button type="button" class="ck-btn ck-btn-retry" data-action="retry-sync">重试同步</button>'
+      + '</span></div>'
+    );
+  }
+  return parts.length ? '<div class="ck-entry-bars">' + parts.join('') + '</div>' : '';
+}
+
 function cta(coral = false) {
-  const hasTeam = state.members.length > 0;
+  const rs = todaySportSummary(), ss = todayStudySummary();
+  const sportLabel = '记运动';
+  const studyLabel = '记学习';
+  const sportSummary = rs.done
+    ? ('今日 ' + rs.km.toFixed(1) + ' km · ' + rs.count + ' 次')
+    : '今日 0 km · 0 次';
+  const studySummary = ss.done
+    ? ('今日 ' + ss.minutes + ' 分钟 · ' + ss.count + ' 次')
+    : '今日 0 分钟 · 0 次';
+  const entryBars = ckEntryBarsMarkup(['sport', 'study']);
+
   if (coral) {
     return '<div class="cta-dual-bar">'
-      + '<button class="checkin-cta coral" data-action="checkin" data-mode="sport"><span><strong>运动打卡</strong><small>' + (runToday() ? '今日已跑 ✓' + (hasTeam ? ' · 支持切伙伴' : '') : '点击记录距离与配速') + '</small></span>' + arrowBoxMarkup() + '</button>'
-      + '<button class="checkin-cta blue-cta" data-action="checkin" data-mode="study"><span><strong>学习打卡</strong><small>' + (studyToday() ? '今日已学 ✓' + (hasTeam ? ' · 支持切伙伴' : '') : '点击记录专注与目标') + '</small></span>' + arrowBoxMarkup() + '</button>'
-      + '</div>';
+      + '<button class="checkin-cta coral" data-action="checkin" data-mode="sport" aria-label="' + sportLabel + '，' + sportSummary + '"><span><strong>' + sportLabel + '</strong><small class="ck-cta-summary">' + sportSummary + '</small></span>' + arrowBoxMarkup() + '</button>'
+      + '<button class="checkin-cta blue-cta" data-action="checkin" data-mode="study" aria-label="' + studyLabel + '，' + studySummary + '"><span><strong>' + studyLabel + '</strong><small class="ck-cta-summary">' + studySummary + '</small></span>' + arrowBoxMarkup() + '</button>'
+      + '</div>' + entryBars;
   }
-  const rDone = runToday(), sDone = studyToday();
   return '<div class="checkin-cta dual-home-cta">'
-    + '<button class="dual-cta-half is-sport" data-action="checkin" data-mode="sport"><span><strong>运动打卡</strong><small>RUN · ' + (rDone ? '今日已跑 1/1 ✓' : '点击记录跑步') + '</small></span>' + arrowBoxMarkup() + '</button>'
-    + '<button class="dual-cta-half is-study" data-action="checkin" data-mode="study"><span><strong>学习打卡</strong><small>STUDY · ' + (sDone ? '今日已学 1/1 ✓' : '点击记录专注') + '</small></span>' + arrowBoxMarkup() + '</button>'
+    + '<button class="dual-cta-half is-sport" data-action="checkin" data-mode="sport" aria-label="' + sportLabel + '，' + sportSummary + '"><span><strong>' + sportLabel + '</strong><small class="ck-cta-summary">' + sportSummary + '</small></span>' + arrowBoxMarkup() + '</button>'
+    + '<button class="dual-cta-half is-study" data-action="checkin" data-mode="study" aria-label="' + studyLabel + '，' + studySummary + '"><span><strong>' + studyLabel + '</strong><small class="ck-cta-summary">' + studySummary + '</small></span>' + arrowBoxMarkup() + '</button>'
+    + entryBars
     + '</div>';
 }
 
 const quotes = [
   ['SMALL STEPS.<br><em>EVERY</em> DAY.', 'flame', '不积跬步，无以至千里'],
   ['DISCIPLINE IS<br><em>FREEDOM.</em>', 'lightning', '自律的尽头，是真正的自由'],
-  ['SHARP MIND.<br>STRONG <em>BODY.</em>', 'black', '头脑清醒，体魄强健'],
+  ['SHARP MIND.<br>STRONG <em>BODY.</em>', 'storm', '头脑清醒，体魄强健'],
   ['ONE MORE<br><em>CHAPTER.</em>', 'flame', '再多学一章，再多跑一程'],
   ['EARN YOUR<br><em>PEACE.</em>', 'lightning', '流过汗与墨，才配得上从容'],
-  ['YOUR PACE.<br><em>YOUR</em> FUTURE.', 'black', '按自己的配速，跑向自己的未来'],
+  ['YOUR PACE.<br><em>YOUR</em> FUTURE.', 'storm', '按自己的配速，跑向自己的未来'],
   ['SHOW UP<br><em>BEFORE</em> DAWN.', 'flame', '在天亮之前出发，在喧嚣之前沉思'],
   ['DEEP WORK.<br><em>ZERO</em> EXCUSES.', 'lightning', '深度专注，绝不拖延'],
-  ['RUN WITH<br><em>RIVALS.</em>', 'black', '与强手并肩，在竞技中共同进化'],
+  ['RUN WITH<br><em>RIVALS.</em>', 'storm', '与强手并肩，在竞技中共同进化'],
   ['CONSISTENCY<br>BEATS <em>TALENT.</em>', 'flame', '持续执行，远胜一时天赋'],
   ['SWEAT NOW.<br><em>SHINE</em> LATER.', 'flame', '此刻流汗，来日闪光'],
   ['READ HARD.<br>THINK <em>CLEAR.</em>', 'lightning', '深读硬啃，思考清澈'],
   ['START EARLY.<br><em>FINISH</em> STRONG.', 'flame', '清晨启程，强势收官'],
   ['BUILD HABITS.<br><em>SHAPE</em> DESTINY.', 'lightning', '习惯成自然，日常塑命运'],
-  ['KEEP MOVING.<br><em>NO</em> SHORTCUTS.', 'black', '步履不停，没有捷径']
+  ['KEEP MOVING.<br><em>NO</em> SHORTCUTS.', 'storm', '步履不停，没有捷径']
 ];
 
 function quoteMarkup() {
   const idx = quoteIndex % quotes.length;
   const q = quotes[idx];
   const theme = q[1] || 'lightning';
-  const themeTag = theme === 'flame' ? 'PIXEL.FLAME' : theme === 'lightning' ? 'PIXEL.LIGHTNING' : 'PIXEL.MATRIX';
+  const themeTag = theme === 'flame' ? 'PIXEL.FLAME' : theme === 'lightning' ? 'PIXEL.LIGHTNING' : theme === 'storm' ? 'PIXEL.STORM' : theme === 'frost' ? 'PIXEL.FROST' : 'PIXEL.MATRIX';
   const dots = quotes.map((_, i) => '<button type="button" class="quote-dot ' + (i === idx ? 'active' : '') + '" data-quote="' + i + '" aria-label="切换到第 ' + (i + 1) + ' 句宣言"><i class="quote-dot-fill"></i></button>').join('');
   return '<section class="quote ' + theme + '" id="quote" aria-label="每日宣言卡片">'
     + '<canvas class="pixel-matrix-canvas" data-pixel-theme="' + theme + '" aria-hidden="true"></canvas>'
-    + '<div class="quote-meta"><span>[ 今日宣言 · ' + themeTag + '_0' + pad(idx + 1) + ' ]</span><div class="quote-meta-right"><div class="quote-tex-switch"><button type="button" class="quote-tex-btn ' + (theme === 'flame' ? 'active' : '') + '" data-quote="0"><span aria-hidden="true">🔥</span> 火焰</button><button type="button" class="quote-tex-btn ' + (theme === 'lightning' ? 'active' : '') + '" data-quote="1"><span aria-hidden="true">⚡</span> 闪电</button><button type="button" class="quote-tex-btn quote-cycle-btn" data-action="quote-next" aria-label="切换下一句每日宣言">下一句 <span aria-hidden="true">↻</span></button></div><span>' + pad(idx + 1) + ' / ' + pad(quotes.length) + '</span></div></div>'
+    + '<div class="quote-meta"><span>[ 今日宣言 · ' + themeTag + '_0' + pad(idx + 1) + ' ]</span><div class="quote-meta-right"><div class="quote-tex-switch"><button type="button" class="quote-tex-btn ' + (theme === 'flame' ? 'active' : '') + '" data-quote="0"><span aria-hidden="true">🔥</span> 火焰</button><button type="button" class="quote-tex-btn ' + (theme === 'lightning' ? 'active' : '') + '" data-quote="1"><span aria-hidden="true">⚡</span> 闪电</button><button type="button" class="quote-tex-btn ' + (theme === 'storm' ? 'active' : '') + '" data-quote="2"><span aria-hidden="true">🌪</span> 风暴</button><button type="button" class="quote-tex-btn quote-cycle-btn" data-action="quote-next" aria-label="切换下一句每日宣言">下一句 <span aria-hidden="true">↻</span></button></div><span>' + pad(idx + 1) + ' / ' + pad(quotes.length) + '</span></div></div>'
     + '<h2 class="mask-reveal">' + q[0] + '</h2>'
     + '<div class="quote-foot"><span class="quote-sub">' + q[2] + '</span><div class="quote-dots">' + dots + '</div></div>'
     + '<div class="pixel-dither-edge" aria-hidden="true"></div>'
@@ -886,6 +1326,34 @@ function track() {
     + '</div>';
 }
 
+function homeTodayPanel() {
+  const rs = todaySportSummary(), ss = todayStudySummary();
+  const totalCount = rs.count + ss.count;
+  const focusMeta = getStudyFocusEntryMeta();
+  const entryBars = ckEntryBarsMarkup(['sport', 'study']);
+  return '<section class="home-today-panel" aria-labelledby="home-today-heading">'
+    + '<div class="today-panel-head">'
+    + '<div class="today-head-title"><h2 id="home-today-heading">今天</h2><span class="today-total-count" aria-label="今日打卡共 ' + totalCount + ' 次">' + totalCount + ' 次打卡</span></div>'
+    + '<button type="button" class="today-records-btn" data-action="go-today-records" data-focus-key="home:today-records">查看今日记录 <span aria-hidden="true">→</span></button>'
+    + '</div>'
+    + '<div class="today-tracks">'
+    + '<div class="today-track-row is-sport">'
+    + '<div class="today-track-metric"><span class="today-track-name">运动</span><strong>' + rs.km.toFixed(1) + ' <em>km</em></strong><span class="today-track-count">' + rs.count + ' 次</span></div>'
+    + '<div class="today-track-actions">'
+    + '<button type="button" class="today-act-btn is-sport" data-action="checkin" data-mode="sport" data-focus-key="home:checkin-sport" aria-label="记运动，今日已跑 ' + rs.km.toFixed(1) + ' 公里，' + rs.count + ' 次">记运动</button>'
+    + '</div></div>'
+    + '<div class="today-track-row is-study">'
+    + '<div class="today-track-metric"><span class="today-track-name">学习</span><strong>' + ss.minutes + ' <em>分钟</em></strong><span class="today-track-count">' + ss.count + ' 次</span></div>'
+    + '<div class="today-track-actions">'
+    + '<button type="button" class="today-act-btn is-study" data-action="checkin" data-mode="study" data-focus-key="home:checkin-study" aria-label="记学习，今日已学 ' + ss.minutes + ' 分钟，' + ss.count + ' 次">记学习</button>'
+    + '<button type="button" class="today-act-btn is-focus" data-action="go-focus" data-focus-key="home:go-focus" aria-label="' + esc(focusMeta.aria) + '">' + focusMeta.label + '</button>'
+    + '</div></div>'
+    + '</div>'
+    + (focusMeta.stateText ? '<div class="today-focus-note" id="home-focus-note" role="status">专注计时：' + esc(findTargetTitle(pomodoroTargetId)) + ' · ' + esc(focusMeta.stateText) + '</div>' : '')
+    + entryBars
+    + '</section>';
+}
+
 function home() {
   const mt = total(mine(monthly())), stH = totalStudy(monthly(mineStudy()));
   const sPct = Math.round(mt / Math.max(1, state.goal) * 100);
@@ -903,14 +1371,13 @@ function home() {
   const solo = board.length === 1;
 
   return '<div class="home">'
-    + quoteMarkup() + track() + cta()
+    + quoteMarkup() + track() + homeTodayPanel()
     + '<section class="home-metrics home-metrics-4" aria-label="运动学习自律与核心进度">'
     + '<button class="metric-tile" data-action="go-view" data-value="plan"><div class="metric-top"><small>本月运动 / RUN</small><em class="metric-rank">' + (solo ? ('目标 ' + sPct + '%') : ('#' + mySportRank + (mySportRank === 1 ? ' 领跑' : ' 差' + sportLeadDelta + 'k'))) + '</em></div><strong>' + mt.toFixed(1) + '<em> KM</em></strong>' + PixelProgressBar.renderHtml({ progress: sPct, height: 12, width: '100%', bare: true, variant: 'orange', className: 'metric-ppb', ariaLabel: '本月运动目标进度' }) + '</button>'
     + '<button class="metric-tile" data-action="go-view" data-value="study"><div class="metric-top"><small>本月学习 / STUDY</small><em class="metric-rank is-blue">' + (solo ? ('目标 ' + stPct + '%') : ('#' + myStudyRank + (myStudyRank === 1 ? ' 领跑' : ' 差' + studyLeadDelta + 'h'))) + '</em></div><strong>' + stH.toFixed(1) + '<em> H</em></strong>' + PixelProgressBar.renderHtml({ progress: stPct, height: 12, width: '100%', bare: true, variant: 'blue', className: 'metric-ppb', ariaLabel: '本月学习目标进度' }) + '</button>'
     + (() => { const ds = dualStreak(); const ct = comboTier(ds); const nextGoal = ct.nextAt || 30; const cPct = ct.nextAt ? Math.min(100, Math.round(ds / nextGoal * 100)) : 100; return '<button class="metric-tile is-combo-tile tier-' + ct.tier + '" data-action="go-view" data-value="people"><div class="metric-top"><small>COMBO 连击 / STREAK</small><em class="metric-rank is-gold">' + ct.code + ' · ' + hb.done + '/' + hb.total + '</em></div><strong>COMBO ×' + ds + '</strong>' + PixelProgressBar.renderHtml({ progress: cPct, height: 12, width: '100%', bare: true, variant: 'gold', className: 'metric-ppb', ariaLabel: 'COMBO 连击进度' }) + '</button>'; })()
     + '<button class="metric-tile" data-action="go-view" data-value="progress"><div class="metric-top"><small>' + (solo ? '综合积分 / SCORE' : '多人竞技 / PK榜') + '</small><em class="metric-rank is-ink">' + (solo ? '单人基准' : (board.length + '人同榜')) + '</em></div><strong>' + (solo ? (myRow.score + '<em> 分</em>') : ('第' + myRank + '<em>名 · ' + myRow.score + '分</em>')) + '</strong>' + PixelProgressBar.renderHtml({ progress: solo ? Math.max(sPct, stPct) : Math.round(myRow.score / Math.max(1, board[0]?.score || 1) * 100), height: 12, width: '100%', bare: true, variant: 'ink', className: 'metric-ppb', ariaLabel: '综合竞技进度' }) + '</button>'
     + '</section>'
-    + '<div class="home-manifesto"><div class="home-manifesto-copy"><span>' + (solo ? '自律即自由，<em>日进一寸。</em>' : '运动强身，<em>结伴致远。</em>') + '</span><small>0x0610 // PIXEL.BLUEPRINT · RUN &amp; STUDY ↗</small></div><a class="manifesto-film-btn" href="film.html"><span>▶</span> 30s 品牌动效</a></div>'
     + '</div>';
 }
 
@@ -1034,7 +1501,11 @@ function blueprintChartCard(badgeText, rightText, svgAndBody, noteText = '', leg
 }
 
 /* ---------- Interactive 28-Day Unified Heatmap + Right-Side Day Explanation Card ---------- */
-function calendarHeatmap(daysCount = 28) {
+function calendarHeatmap(daysCount = 28, opts = null) {
+  const fKind = opts?.kind || 'all';
+  const fOnlyMine = opts ? Boolean(opts.onlyMine) : true;
+  const cellRunsBase = fKind === 'study' ? [] : (fOnlyMine ? mine() : state.records);
+  const cellStudyBase = fKind === 'sport' ? [] : (fOnlyMine ? mineStudy() : state.studyRecords);
   const startOffset = -(daysCount - 1);
   const startD = new Date(dateShift(startOffset) + 'T12:00:00');
   const leadBlanks = (startD.getDay() + 6) % 7;
@@ -1043,8 +1514,8 @@ function calendarHeatmap(daysCount = 28) {
   for (let i = 0; i < daysCount; i++) {
     const dk = dateShift(startOffset + i);
     const dObj = new Date(dk + 'T12:00:00');
-    const dayRuns = mine().filter(r => r.date === dk);
-    const dayStudy = mineStudy().filter(r => r.date === dk);
+    const dayRuns = cellRunsBase.filter(r => beijingDateOf(r) === dk);
+    const dayStudy = cellStudyBase.filter(r => beijingDateOf(r) === dk);
     const kmSum = total(dayRuns), hSum = totalStudy(dayStudy);
     const hb = habitRateForDate(dk);
     const isToday = dk === today();
@@ -1064,10 +1535,12 @@ function calendarHeatmap(daysCount = 28) {
   const selDateObj = new Date(selectedCalDate + 'T12:00:00');
   const selWeekLabel = '周' + '日一二三四五六'[selDateObj.getDay()];
   const isSelToday = selectedCalDate === today();
-  const selRuns = state.records.filter(r => r.date === selectedCalDate);
-  const selStudy = state.studyRecords.filter(r => r.date === selectedCalDate);
+  const detailRunsBase = opts ? cellRunsBase : state.records;
+  const detailStudyBase = opts ? cellStudyBase : state.studyRecords;
+  const selRuns = detailRunsBase.filter(r => beijingDateOf(r) === selectedCalDate);
+  const selStudy = detailStudyBase.filter(r => beijingDateOf(r) === selectedCalDate);
   const selKm = total(selRuns), selMin = selRuns.reduce((s, r) => s + (r.minutes || 0), 0);
-  const selHrs = totalStudy(selStudy), selStudyMin = selStudy.reduce((s, r) => s + (r.minutes || 0), 0);
+  const selHrs = totalStudy(selStudy), selStudyMin = totalStudyMinutes(selStudy);
   const selHb = habitRateForDate(selectedCalDate);
   const selDoneHbIds = state.habitLogs[selectedCalDate] || [];
   const selPlanned = isSportPlanned(selectedCalDate) || isStudyPlanned(selectedCalDate);
@@ -1092,7 +1565,7 @@ function calendarHeatmap(daysCount = 28) {
     ? selStudy.map(r => {
       const f = studyFocusLevels[r.focus] || ['🧠', '专注'];
       return '<div class="cdc-entry is-study">'
-        + '<div class="cdc-entry-top"><span class="cdc-who"><i style="background:' + esc(memberColor(r.person)) + '"></i>' + esc(r.person) + '</span><strong>' + r.hours.toFixed(1) + ' h</strong><em>' + esc(r.subject || findTargetTitle(r.targetId)) + '</em><button type="button" class="cdc-jump" data-action="open-record" data-value="study:' + r.id + '">小票 ↗</button></div>'
+        + '<div class="cdc-entry-top"><span class="cdc-who"><i style="background:' + esc(memberColor(r.person)) + '"></i>' + esc(r.person) + '</span><strong>' + studyHoursOf(r).toFixed(1) + ' h</strong><em>' + studyMinutesOf(r) + 'm · ' + esc(r.subject || findTargetTitle(r.targetId)) + '</em><button type="button" class="cdc-jump" data-action="open-record" data-value="study:' + r.id + '">小票 ↗</button></div>'
         + '<p class="cdc-entry-note">' + f[0] + ' ' + f[1] + (r.note ? ' · “' + esc(r.note) + '”' : '') + '</p>'
         + '</div>';
     }).join('')
@@ -1394,14 +1867,16 @@ function lineChart(type) {
         rankLabel: state.name + ' · 运动轨道'
       };
     });
-    let lSum = totalStudy(allLMonth.filter(r => r.date < minStr));
+    let lSeconds = totalStudySeconds(allLMonth.filter(r => r.date < minStr));
     const lPts = lRecs.map((r, i) => {
-      lSum += r.hours;
+      const seconds = studySecondsOf(r);
+      lSeconds += seconds;
+      const rHrs = seconds / 3600, lSum = lSeconds / 3600;
       const pct = Math.min(100, lSum / Math.max(1, state.studyGoal) * 100);
       return {
         x: mapX(r.date), y: 224 - (pct / maxPct) * 188, r, person: r.person, kind: 'study', color: '#203f91',
         nodeKey: 'pl-' + r.id + '-' + i, recordKey: 'study:' + r.id,
-        heroVal: r.hours.toFixed(1), heroUnit: 'HOURS', cumLabel: '本月累计学习', cumVal: lSum.toFixed(1) + ' h (' + Math.round(pct) + '%)',
+        heroVal: rHrs.toFixed(1), heroUnit: 'HOURS', cumLabel: '本月累计学习', cumVal: lSum.toFixed(1) + ' h (' + Math.round(pct) + '%)',
         yExact: Math.round(pct) + '%', pointTag: Math.round(pct) + '% · ' + lSum.toFixed(1) + 'h',
         rankLabel: state.name + ' · 学习轨道'
       };
@@ -1419,7 +1894,7 @@ function lineChart(type) {
     const kpiSummary = [
       { label: '记录笔数', val: (sPts.length + lPts.length) + ' 笔' },
       { label: '运动达成', val: lastSPct + ' (' + sSum.toFixed(1) + 'k)' },
-      { label: '学习达成', val: lastLPct + ' (' + lSum.toFixed(1) + 'h)' }
+      { label: '学习达成', val: lastLPct + ' (' + (lSeconds / 3600).toFixed(1) + 'h)' }
     ];
     return finishChartRender(seriesList, yLabels, yUnitTitle, ticks, targetRuleHtml, chartTitle, chartHint, topControlsBar, true, kpiSummary);
   }
@@ -1480,7 +1955,7 @@ function lineChart(type) {
     if (!allMonthly.length) return '<div class="empty">暂无本月学习曲线数据，完成第一次学习打卡后自动生成。</div>';
     const isSingle = chartScaleMode === 'single';
     const rawMax = isSingle
-      ? Math.max(2, ...allMonthly.map(r => r.hours))
+      ? Math.max(2, ...allMonthly.map(r => studyHoursOf(r)))
       : Math.max(4, ...visibleMembers.map(m => totalStudy(allMonthly.filter(r => r.person === m))));
     const { niceMax, ticks: yTicks } = niceUpperAndTicks(rawMax * 1.12, 'h', 4);
     const board = teamLeaderboard('本月', '按学习');
@@ -1490,26 +1965,28 @@ function lineChart(type) {
       const mRecs = inWindow.filter(r => r.person === m).sort((a, b) => (a.date + a.time).localeCompare(b.date + a.time));
       const clr = memberColor(m);
       const rIdx = board.findIndex(x => x.name === m) + 1;
-      let sum = isSingle ? 0 : totalStudy(mPrior);
+      let totalSeconds = isSingle ? 0 : totalStudySeconds(mPrior);
       const pts = mRecs.map((r, i) => {
-        sum += r.hours;
-        const plotVal = isSingle ? r.hours : sum;
+        const seconds = studySecondsOf(r);
+        totalSeconds += seconds;
+        const rHrs = seconds / 3600, sum = totalSeconds / 3600;
+        const plotVal = isSingle ? rHrs : sum;
         return {
           x: mapX(r.date), y: 224 - (plotVal / niceMax) * 188, r, person: m, kind: 'study', color: clr,
           nodeKey: 'st-' + m + '-' + r.id + '-' + i, recordKey: 'study:' + r.id,
-          heroVal: r.hours.toFixed(1), heroUnit: 'HOURS', cumLabel: solo ? '累计学习' : ('累计学习 (月榜 #' + rIdx + ')'), cumVal: sum.toFixed(1) + ' h',
+          heroVal: rHrs.toFixed(1), heroUnit: 'HOURS', cumLabel: solo ? '累计学习' : ('累计学习 (月榜 #' + rIdx + ')'), cumVal: sum.toFixed(1) + ' h',
           yExact: plotVal.toFixed(1) + 'h',
-          pointTag: isSingle ? '单场 ' + r.hours.toFixed(1) + 'h' : '累计 ' + sum.toFixed(1) + 'h (+' + r.hours.toFixed(1) + ')',
+          pointTag: isSingle ? '单场 ' + rHrs.toFixed(1) + 'h' : '累计 ' + sum.toFixed(1) + 'h (+' + rHrs.toFixed(1) + ')',
           rankLabel: solo ? (m + ' · 学习轨道') : ('学习月榜 #' + rIdx + '/' + board.length)
         };
       });
-      const lastVal = isSingle ? (mRecs.at(-1)?.hours || 0).toFixed(1) : sum.toFixed(1);
+      const lastVal = isSingle ? (studySecondsOf(mRecs.at(-1)) / 3600).toFixed(1) : (totalSeconds / 3600).toFixed(1);
       return { name: m, endTag: (solo ? '' : '#' + rIdx + ' ') + m + ' ' + lastVal + 'h', color: clr, points: pts, areaGrad: visibleMembers.length === 1 };
     });
     yLabels = yTicks;
     yUnitTitle = isSingle ? 'Y: 单场专注 (h)' : 'Y: 累计学习 (h)';
     chartTitle = isSingle ? (solo ? 'STUDY SINGLE · 单场专注明细线' : 'STUDY SINGLE · 多人单场时长对比') : (solo ? 'STUDY CURVE · 学习累计线性表' : 'STUDY PK CURVE · 多人月度学习竞速');
-    const maxHrs = Math.max(0, ...allMonthly.map(r => r.hours));
+    const maxHrs = Math.max(0, ...allMonthly.map(r => studyHoursOf(r)));
     const kpiSummary = [
       { label: '专注场次', val: allMonthly.length + ' 场' },
       { label: '最长单场', val: maxHrs.toFixed(1) + ' h' },
@@ -1531,7 +2008,7 @@ function lineChart(type) {
       const mapped = mRecs.map((r, i) => {
         const isSt = r._kind === 'study';
         const dayBonus = seenDays.has(r.date) ? 0 : (seenDays.add(r.date), 15);
-        const ptsDelta = Math.round((isSt ? r.hours * 25 : r.km * 10) + dayBonus + (r.likes || 0) * 5);
+        const ptsDelta = Math.round((isSt ? studyHoursOf(r) * 25 : r.km * 10) + dayBonus + (r.likes || 0) * 5);
         cumScore += ptsDelta;
         maxScore = Math.max(maxScore, cumScore);
         return { r, isSt, cumScore, ptsDelta, i };
@@ -1546,7 +2023,7 @@ function lineChart(type) {
       const pts = mapped.map(({ r, isSt, cumScore, ptsDelta, i }) => ({
         x: mapX(r.date), y: 224 - (cumScore / niceMax) * 188, r, person: m, kind: r._kind, color: clr,
         nodeKey: 'sc-' + m + '-' + r._key + '-' + i, recordKey: r._key,
-        heroVal: '+' + ptsDelta, heroUnit: 'PTS · ' + (isSt ? r.hours.toFixed(1) + 'h' : r.km.toFixed(1) + 'k'),
+        heroVal: '+' + ptsDelta, heroUnit: 'PTS · ' + (isSt ? studyHoursOf(r).toFixed(1) + 'h' : r.km.toFixed(1) + 'k'),
         cumLabel: '累计竞速积分', cumVal: cumScore + ' 分' + (solo ? '' : ' (#' + rIdx + ')'),
         yExact: cumScore + '分', pointTag: cumScore + '分 (+' + ptsDelta + ')',
         rankLabel: solo ? (m + ' · 综合积分') : ('综合总榜 #' + rIdx + '/' + board.length)
@@ -1569,18 +2046,18 @@ function lineChart(type) {
     const { minStr, maxStr, mapX, ticks } = fixed28DateScale(58, 486);
     const recs = state.studyRecords.filter(r => r.date >= minStr && r.date <= maxStr && visibleMembers.includes(r.person)).sort((a, b) => (a.date + a.time).localeCompare(b.date + a.time));
     if (!recs.length) return '<div class="empty">暂无近28天学习时长趋势数据。</div>';
-    const { niceMax, ticks: yTicks } = niceUpperAndTicks(Math.max(3, ...recs.map(r => r.hours)) * 1.12, 'h', 4);
+    const { niceMax, ticks: yTicks } = niceUpperAndTicks(Math.max(3, ...recs.map(r => studyHoursOf(r))) * 1.12, 'h', 4);
     seriesList = visibleMembers.map(m => {
       const mRecs = recs.filter(r => r.person === m);
       const clr = memberColor(m);
       const pts = mRecs.map((r, i) => ({
-        x: mapX(r.date), y: 224 - (r.hours / niceMax) * 188, r, person: m, kind: 'study', color: clr,
+        x: mapX(r.date), y: 224 - (studyHoursOf(r) / niceMax) * 188, r, person: m, kind: 'study', color: clr,
         nodeKey: 'sf-' + m + '-' + r.id + '-' + i, recordKey: 'study:' + r.id,
-        heroVal: r.hours.toFixed(1), heroUnit: 'HOURS', cumLabel: '本次专注评级', cumVal: (studyFocusLevels[r.focus]?.[0] || '🧠') + ' ' + (studyFocusLevels[r.focus]?.[1] || '专注'),
-        yExact: r.hours.toFixed(1) + 'h', pointTag: r.hours.toFixed(1) + 'h · ' + (studyFocusLevels[r.focus]?.[1] || '专注'),
+        heroVal: studyHoursOf(r).toFixed(1), heroUnit: 'HOURS', cumLabel: '本次专注评级', cumVal: (studyFocusLevels[r.focus]?.[0] || '🧠') + ' ' + (studyFocusLevels[r.focus]?.[1] || '专注'),
+        yExact: studyHoursOf(r).toFixed(1) + 'h', pointTag: studyHoursOf(r).toFixed(1) + 'h · ' + (studyFocusLevels[r.focus]?.[1] || '专注'),
         rankLabel: m + ' · 单场专注'
       }));
-      const lastH = mRecs.length ? mRecs.at(-1).hours.toFixed(1) : '0.0';
+      const lastH = mRecs.length ? studyHoursOf(mRecs.at(-1)).toFixed(1) : '0.0';
       return { name: m, endTag: m + ' ' + lastH + 'h', color: clr, points: pts, areaGrad: visibleMembers.length === 1 };
     });
     yLabels = yTicks;
@@ -1959,14 +2436,18 @@ function study() {
   const fc = getStudyFocusCharge();
   const sweepOn = performance.now() < electricSweepUntil;
   const sweepFxHtml = '<div class="electric-border-fx" aria-hidden="true"><i class="eb-top"></i><i class="eb-right"></i><i class="eb-bottom"></i><i class="eb-left"></i></div>';
+  const focusMeta = getStudyFocusEntryMeta();
+  const ssToday = todayStudySummary();
+  const pomoElapsed = getPomoElapsedSec();
+  const studyEntryBars = ckEntryBarsMarkup(['study']);
 
   return '<div class="plan-layout study-layout"><div class="plan-left">'
     + '<section class="poster-hero poster-lightning poster-compact ' + (sweepOn ? 'electric-sweep-active' : '') + '" data-wm="' + p + '%" data-focus-charge="' + fc.chargeNorm.toFixed(3) + '">'
     + sweepFxHtml
-    + '<div class="poster-meta"><span>[ 04 / 学习目标与多人竞学 ]</span><span>' + state.studyTargets.length + ' 个在研目标 · 每周 ' + state.studyDays.length + ' 天</span></div>'
+    + '<div class="poster-meta"><span>学习目标</span><span>' + activeStudyTargets().length + ' 个目标 · 每周 ' + state.studyDays.length + ' 天</span></div>'
     + '<div class="plan-hero-row">'
-    + '<div class="poster-big-stat"><small>本月学习进度</small><strong>' + p + '<em>%</em></strong></div>'
-    + '<div><h2>' + stH.toFixed(1) + ' <em>/ ' + state.studyGoal + ' H</em></h2><p class="poster-cn">已学 ' + stH.toFixed(1) + ' 小时 · ' + (remaining ? '还差 ' + remaining.toFixed(1) + ' 小时达成月目标' : '本月学习目标已达成 ✓') + '</p></div>'
+    + '<div class="poster-big-stat"><small>本月进度</small><strong>' + p + '<em>%</em></strong></div>'
+    + '<div><h2>' + stH.toFixed(1) + ' <em>/ ' + state.studyGoal + ' H</em></h2><p class="poster-cn">' + (remaining ? '还差 ' + remaining.toFixed(1) + ' 小时' : '本月目标已达成') + '</p></div>'
     + '</div>'
     + '<div class="poster-kpis poster-kpis-4">'
     + '<div><small>完成进度</small><strong>' + p + '<em>%</em></strong></div>'
@@ -1974,32 +2455,40 @@ function study() {
     + '<div><small>目标时长</small><strong>' + state.studyGoal + '<em>H</em></strong></div>'
     + '<div><small>剩余待学</small><strong>' + remaining.toFixed(1) + '<em>H</em></strong></div>'
     + '</div></section>'
+    + '<section class="study-entry-bar" aria-label="学习打卡入口">'
+    + '<div class="study-entry-summary"><strong>今日学习 ' + ssToday.minutes + ' 分钟</strong><span>' + ssToday.count + ' 次打卡' + '</span></div>'
+    + '<div class="study-entry-actions">'
+    + '<button type="button" class="study-entry-btn is-manual" data-action="checkin" data-mode="study" data-focus-key="study:manual-entry">手动补记</button>'
+    + '<button type="button" class="study-entry-btn is-focus" data-action="study-focus-entry" data-focus-key="study:focus-entry" aria-label="' + esc(focusMeta.aria) + '">' + focusMeta.label + '</button>'
+    + '</div>'
+    + '</section>'
+    + studyEntryBars
     + '<section class="plan-controls">'
-    + '<div class="preset-row">' + presets.map(g => '<button class="preset-chip ' + (state.studyGoal === g ? 'active' : '') + '" data-action="study-goal-set" data-value="' + g + '">' + g + 'H</button>').join('') + '</div>'
-    + '<div class="segments">' + [-10, -5, 5, 10].map(n => '<button data-action="study-goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + ' h</button>').join('') + '</div>'
+    + '<div class="preset-row">' + presets.map(g => '<button type="button" class="preset-chip ' + (state.studyGoal === g ? 'active' : '') + '" data-action="study-goal-set" data-value="' + g + '">' + g + 'H</button>').join('') + '</div>'
+    + '<div class="segments">' + [-10, -5, 5, 10].map(n => '<button type="button" data-action="study-goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + ' h</button>').join('') + '</div>'
     + '</section>'
     + render28DayPlanSection('study')
     + '<section class="study-targets-section">'
-    + '<div class="week-head"><span class="eyebrow">' + icon('target') + ' 学习目标拆解板（点击快速记录或打卡）</span><button class="add-target-btn" data-action="add-study-target">＋ 新建学习目标</button></div>'
+    + '<div class="week-head"><h3 class="eyebrow">' + icon('target') + ' 学习目标</h3><button type="button" class="add-target-btn" data-action="add-study-target">＋ 新建目标</button></div>'
     + '<div class="study-targets-grid">' + targetCards + '</div>'
     + '</section>'
     + '</div><div class="plan-right">'
-    + '<div class="pomodoro-panel ' + (fc.isFocusing ? 'is-charging ' : '') + (sweepOn ? 'electric-sweep-active' : '') + '">'
+    + '<section id="pomodoro-panel" tabindex="-1" class="pomodoro-panel ' + (fc.isFocusing ? 'is-charging ' : '') + (sweepOn ? 'electric-sweep-active' : '') + '" aria-label="专注计时">'
     + sweepFxHtml
-    + '<div class="pomo-head"><span>[ FOCUS ENGINE · 番茄蓄能舱 ]</span><div class="pomo-presets"><button class="' + (pomodoroTotal === 1500 ? 'active' : '') + '" data-action="pomo-set" data-value="25">25m</button><button class="' + (pomodoroTotal === 3000 ? 'active' : '') + '" data-action="pomo-set" data-value="50">50m</button></div></div>'
-    + '<div class="pomo-main"><strong id="pomo-clock">' + formatTimer(getPomoLeftSec()) + '</strong>'
+    + '<div class="pomo-head"><h3>专注计时</h3><div class="pomo-presets" role="group" aria-label="专注时长预设"><button type="button" class="' + (pomodoroTotal === 1500 ? 'active' : '') + '" data-action="pomo-set" data-value="25">25 分钟</button><button type="button" class="' + (pomodoroTotal === 3000 ? 'active' : '') + '" data-action="pomo-set" data-value="50">50 分钟</button></div></div>'
+    + '<div class="pomo-main"><strong id="pomo-clock" aria-live="off">' + formatTimer(getPomoLeftSec()) + '</strong>'
     + '<div class="pomo-ctrl">'
-    + '<button class="pomo-btn primary" data-action="pomo-toggle">' + (pomoSession.state === 'running' ? '暂停计时 Ⅱ' : pomoSession.state === 'paused' ? '继续专注 ▶' : '开始专注 ▶') + '</button>'
-    + '<button class="pomo-btn" data-action="pomo-reset">重置 ↺</button>'
-    + '<button class="pomo-btn accent" data-action="pomo-finish"' + (getPomoElapsedSec() < 60 || pomoSession.state === 'saving' ? ' disabled' : '') + '>' + (pomoSession.state === 'saving' ? '保存中…' : '记入学习 ✓') + '</button>'
+    + '<button type="button" class="pomo-btn primary" data-action="pomo-toggle">' + (pomoSession.state === 'running' ? '暂停' : pomoSession.state === 'paused' ? '继续专注' : '开始专注') + '</button>'
+    + '<button type="button" class="pomo-btn" data-action="pomo-reset">重置</button>'
+    + '<button type="button" class="pomo-btn accent" data-action="pomo-finish"' + (pomoElapsed < 60 || pomoSession.state === 'saving' ? ' disabled' : '') + '>' + (pomoSession.state === 'saving' ? '保存中…' : '记入学习') + '</button>'
     + '</div></div>'
-    + '<div class="pomo-hint" id="pomo-elapsed-hint">本轮已投入：' + Math.floor(getPomoElapsedSec() / 60) + '分' + (getPomoElapsedSec() % 60) + '秒 · 满 60 秒可精确记入</div>'
-    + (pomoSession.errorMsg ? '<div class="pomo-error">' + esc(pomoSession.errorMsg) + '</div>' : '')
-    + '<div class="pomo-target-select"><label>当前关联目标：</label><select id="pomo-target-sel" data-action="pomo-target">'
+    + '<div class="pomo-hint" id="pomo-elapsed-hint">已专注 ' + Math.floor(pomoElapsed / 60) + ' 分 ' + (pomoElapsed % 60) + ' 秒 · 满 60 秒可记入</div>'
+    + (pomoSession.errorMsg ? '<div class="pomo-error" role="alert"><span>' + esc(pomoSession.errorMsg) + '</span><span class="pomo-error-actions"><button type="button" class="ck-btn ck-btn-retry" data-action="pomo-finish">重试同步</button><button type="button" class="ck-btn ck-btn-ghost" data-action="pomo-save-local">先存本机</button></span></div>' : '')
+    + '<div class="pomo-target-select"><label for="pomo-target-sel">学习目标</label><select id="pomo-target-sel" data-action="pomo-target">'
     + (activeStudyTargets().length ? activeStudyTargets() : state.studyTargets).map(t => '<option value="' + esc(t.id) + '" ' + (t.id === pomodoroTargetId ? 'selected' : '') + '>' + esc(t.title) + '</option>').join('')
-    + '</select></div></div>'
+    + '</select></div></section>'
     + '<div class="blueprint-box">' + lineChart('study') + '</div>'
-    + '<div class="next-run"><div class="next-run-left">' + icon('brain') + '<div><span>下一次深度专注</span><small>每周 ' + state.studyDays.length + ' 天 · 告别手机干扰</small></div></div><strong>' + nextStudy() + '</strong></div>'
+    + '<div class="next-run"><div class="next-run-left">' + icon('brain') + '<div><span>下次计划学习</span><small>每周 ' + state.studyDays.length + ' 天</small></div></div><strong>' + nextStudy() + '</strong></div>'
     + '</div></div>';
 }
 
@@ -2037,40 +2526,68 @@ function nextStudy() {
 }
 
 /* ---------- View 5: Unified Multi-Player Ranking ---------- */
+function rankPeriodDateRange(period = rankPeriod) {
+  const t = today();
+  if (period === '今天') return { start: t, end: t, text: t };
+  if (period === '本周') {
+    const start = weekStart();
+    const end = dateShift(6 - ((chinaNow().getDay() + 6) % 7));
+    const last = [...state.records, ...state.studyRecords].reduce((latest, r) => r.date > latest ? r.date : latest, end);
+    return { start, end: last, text: start + ' 至 ' + last };
+  }
+  if (period === '本月') {
+    const start = t.slice(0, 7) + '-01';
+    const now = chinaNow();
+    const end = dateKey(new Date(now.getFullYear(), now.getMonth() + 1, 0));
+    return { start, end, text: start + ' 至 ' + end };
+  }
+  const allDates = [...state.records, ...state.studyRecords]
+    .map(r => r.date)
+    .filter(Boolean)
+    .sort();
+  if (allDates.length) {
+    return { start: allDates[0], end: allDates[allDates.length - 1], text: allDates[0] + ' 至 ' + allDates[allDates.length - 1] };
+  }
+  return { start: t, end: t, text: '全部历史（至 ' + t + '）' };
+}
+
 function ranking() {
   const rows = teamLeaderboard(rankPeriod, rankMetric);
+  const periodInfo = rankPeriodDateRange(rankPeriod);
   const valOf = r => rankMetric === '综合积分' ? r.score : rankMetric === '按公里' ? r.km : rankMetric === '按学习' ? r.hrs : rankMetric === '按天数' ? r.days : r.likes;
   const maxVal = Math.max(1, ...rows.map(valOf));
   const top = rows[0];
-  const topVal = top ? (rankMetric === '综合积分' ? top.score + ' <em>PTS</em>' : rankMetric === '按公里' ? top.km.toFixed(1) + ' <em>KM</em>' : rankMetric === '按学习' ? top.hrs.toFixed(1) + ' <em>H</em>' : rankMetric === '按天数' ? top.days + ' <em>天</em>' : top.likes + ' <em>赞</em>') : '—';
+  const topVal = top ? (rankMetric === '综合积分' ? top.score + ' <em>积分</em>' : rankMetric === '按公里' ? top.km.toFixed(1) + ' <em>km</em>' : rankMetric === '按学习' ? top.hrs.toFixed(1) + ' <em>h</em>' : rankMetric === '按天数' ? top.days + ' <em>天</em>' : top.likes + ' <em>赞</em>') : '—';
   const myRuns = mine(), myStudy = mineStudy();
-  const bestPace = myRuns.length ? formatPaceSec(Math.min(...myRuns.map(paceSeconds))) : '—';
+  const bestPace = myRuns.length ? (formatPaceSec(Math.min(...myRuns.map(paceSeconds))) + ' /km') : '—';
 
   const soloRank = rows.length === 1;
   return '<div class="rank-layout"><div class="rank-left">'
-    + '<section class="poster-hero poster-black poster-compact" data-wm="' + (soloRank ? 'SOLO' : '#1') + '">'
-    + '<div class="poster-meta"><span>[ 05 / ' + (soloRank ? '个人战绩档案' : '多人竞技总榜') + ' · ' + rankPeriod + ' ]</span><span>' + rankMetric + '</span></div>'
-    + '<div class="rank-hero-main"><div><span class="rank-crown-tag">' + icon('crown') + ' ' + (soloRank ? '个人基准档案' : '当前榜首') + '</span><h2>' + esc(top?.name || state.name) + '</h2></div><div class="rank-hero-score">' + topVal + '</div></div>'
+    + '<section class="poster-hero poster-storm poster-compact" data-wm="' + (soloRank ? 'SOLO' : '#1') + '">'
+    + '<div class="poster-meta"><span>' + (soloRank ? '个人榜单' : 'PK 榜单') + ' · ' + rankPeriod + '</span><span>' + rankMetric + '</span></div>'
+    + '<div class="rank-hero-main"><div><span class="rank-crown-tag">' + icon('crown') + ' ' + (soloRank ? '当前记录' : '榜首') + '</span><h2>' + esc(top?.name || state.name) + '</h2></div><div class="rank-hero-score">' + topVal + '</div></div>'
     + '</section>'
-    + '<div class="rank-filters">'
+    + '<section class="rank-filters" aria-label="榜单筛选">'
     + '<div class="filter-row"><span class="filter-label">' + icon('calendar') + ' 周期</span>' + subtabs(['今天', '本周', '本月', '总榜'], rankPeriod, 'rank-period', 'equal') + '</div>'
+    + '<div class="rank-period-meta" aria-label="统计周期与时区"><span>统计周期：<strong>' + esc(rankPeriod) + '</strong> · ' + esc(periodInfo.text) + '（北京时间）</span></div>'
     + '<div class="filter-row"><span class="filter-label">' + icon('bolt') + ' 维度</span>' + subtabs(['综合积分', '按公里', '按学习', '按天数', '按人气'], rankMetric, 'rank-metric', 'equal', { '综合积分': 'trophy', '按公里': 'shoe', '按学习': 'book', '按天数': 'calendar', '按人气': 'heart' }) + '</div>'
-    + '</div>'
+    + (rankMetric === '综合积分' ? '<p class="rank-bonus-note">综合积分含近 7 天自律达成率加分（自律率 × 0.5，不随所选周期变化）。</p>' : '')
+    + '</section>'
     + rows.map((r, i) => {
       const clr = memberColor(r.name);
       const val = valOf(r), barPct = val ? Math.max(8, Math.round(val / maxVal * 100)) : 0;
       const result = rankMetric === '综合积分' ? r.score : rankMetric === '按公里' ? r.km.toFixed(1) : rankMetric === '按学习' ? r.hrs.toFixed(1) : rankMetric === '按天数' ? r.days : r.likes;
-      const unit = rankMetric === '综合积分' ? '积分' : rankMetric === '按公里' ? '公里' : rankMetric === '按学习' ? '小时' : rankMetric === '按天数' ? '天' : '赞';
+      const unit = rankMetric === '综合积分' ? '积分' : rankMetric === '按公里' ? 'km' : rankMetric === '按学习' ? 'h' : rankMetric === '按天数' ? '天' : '赞';
       return '<div class="rank-person ' + (i === 0 && val ? 'is-first' : '') + '">'
         + '<span class="place" style="' + (i > 0 ? 'border-color:' + clr + ';color:' + clr : '') + '">' + (val ? (i === 0 ? icon('crown', 'place-ico') : pad(i + 1)) : '—') + '</span>'
         + '<div class="rank-main"><div class="person-head"><strong>' + esc(r.name) + (r.name === state.name ? ' · 我' : '') + '</strong><span class="badge-tag">' + level(r.name) + '</span></div>'
         + PixelProgressBar.renderHtml({ progress: barPct, height: 12, width: '100%', bare: true, color: (i === 0 && val) ? '#e5492b' : clr, className: 'rank-ppb', ariaLabel: r.name + ' 排行进度' })
-        + '<p>🏃 ' + r.km.toFixed(1) + ' km · 📚 ' + r.hrs.toFixed(1) + ' h · 出勤 ' + r.days + ' 天 · 自律 ' + r.hbRate + '%</p></div>'
+        + '<p>运动 ' + r.km.toFixed(1) + ' km · 学习 ' + r.hrs.toFixed(1) + ' h · 综合 ' + r.score + ' 积分 · 出勤 ' + r.days + ' 天 · 近7天自律 ' + r.hbRate + '%</p></div>'
         + '<div class="rank-result">' + result + '<small>' + unit + '</small></div></div>';
     }).join('')
-    + '<div class="rank-invite"><div>' + icon('users') + '<div><strong>' + (soloRank ? '暂未添加竞技伙伴' : '持续扩大自律竞技圈') + '</strong><small>' + (soloRank ? '当前处于个人专注模式，点击右侧随时添加室友/搭子同榜 PK' : '支持邀请更多室友或学习搭子加入实时排行榜 PK') + '</small></div></div><button data-action="add-person">＋ 加人物</button></div>'
+    + '<div class="rank-invite"><div>' + icon('users') + '<div><strong>' + (soloRank ? '添加伙伴同榜 PK' : '邀请更多伙伴') + '</strong><small>支持同榜对比运动、学习与积分</small></div></div><button type="button" data-action="add-person">＋ 添加伙伴</button></div>'
     + '</div><div class="rank-right">'
-    + '<div class="pace-summary"><div><small>我的最快配速</small><strong>' + bestPace + '</strong></div><div><small>我的累计学习</small><strong>' + totalStudy(myStudy).toFixed(1) + ' h</strong></div><div><small>我的双轨连胜</small><strong>' + dualStreak() + ' 天</strong></div></div>'
+    + '<div class="pace-summary"><div><small>最快配速</small><strong>' + bestPace + '</strong></div><div><small>累计学习</small><strong>' + totalStudy(myStudy).toFixed(1) + ' h</strong></div><div><small>双轨连胜</small><strong>' + dualStreak() + ' 天</strong></div></div>'
     + subtabs(['运动配速对比', '学习专注对比'], rankChartMode === 'study' ? '学习专注对比' : '运动配速对比', 'rank-chart-mode', 'equal', { '运动配速对比': 'shoe', '学习专注对比': 'book' })
     + '<div class="blueprint-box">' + lineChart(rankChartMode === 'study' ? 'study-focus' : 'pace') + '</div>'
     + '</div></div>';
@@ -2116,8 +2633,8 @@ function achievements() {
   const achPct = Math.round(count / Math.max(1, all.length) * 100);
   const totalKm = total(mine()), totalHrs = totalStudy(mineStudy());
   return '<div class="ach-page">'
-    + '<section class="poster-hero poster-black poster-compact" data-wm="' + achPct + '%">'
-    + '<div class="poster-meta"><span>[ 06 / 运动 · 学习 · 自律勋章墙 ]</span><span>LV' + lv + ' · ' + level() + ' · ' + count + ' / ' + all.length + ' UNLOCKED</span></div>'
+    + '<section class="poster-hero poster-storm poster-compact" data-wm="' + achPct + '%">'
+    + '<div class="poster-meta"><span>[ 06 / 运动 · 学习 · 自律勋章墙 · STORM PIXEL ]</span><span>LV' + lv + ' · ' + level() + ' · ' + count + ' / ' + all.length + ' UNLOCKED</span></div>'
     + '<div class="ach-poster-row">'
     + '<div class="poster-big-stat"><small>勋章解锁进度</small><strong>' + achPct + '<em>%</em></strong></div>'
     + '<div class="ach-poster-copy"><h2>' + count + ' <em>/ ' + all.length + ' MEDALS</em></h2><p class="poster-cn">6 枚运动 + 6 枚学习 + 6 枚自律 · 已跑 ' + totalKm.toFixed(1) + ' km · 已学 ' + totalHrs.toFixed(1) + ' h</p></div>'
@@ -2149,8 +2666,8 @@ function achievements() {
 }
 
 /* ---------- View 7: Records & Interactive Blueprint Charts ---------- */
-function departureChart(kindFilter = 'all') {
-  const list = allUnifiedRecords(kindFilter);
+function departureChart(kindFilter = 'all', customList = null) {
+  const list = Array.isArray(customList) ? customList : allUnifiedRecords(kindFilter);
   const hrs = list.map(r => Number(r.time.slice(0, 2)) + Number(r.time.slice(3)) / 60);
   const avgH = hrs.length ? hrs.reduce((s, h) => s + h, 0) / hrs.length : 7.5;
   const avgStr = pad(Math.floor(avgH)) + ':' + pad(Math.round((avgH % 1) * 60));
@@ -2196,24 +2713,24 @@ function interactiveBucketsChart(mode, list) {
   } else {
     if (recordKindFilter === 'study') {
       rows = [
-        { label: '< 1.5 小时', items: list.filter(r => r.hours < 1.5), color: '#203f91' },
-        { label: '1.5–2.5 小时', items: list.filter(r => r.hours >= 1.5 && r.hours < 2.5), color: '#e5492b' },
-        { label: '2.5–4 小时', items: list.filter(r => r.hours >= 2.5 && r.hours < 4), color: '#e4a334' },
-        { label: '4+ 深度攻坚', items: list.filter(r => r.hours >= 4), color: '#262624' }
+        { label: '< 90 分钟', items: list.filter(r => studyMinutesOf(r) < 90), color: '#203f91' },
+        { label: '90–150 分钟', items: list.filter(r => studyMinutesOf(r) >= 90 && studyMinutesOf(r) < 150), color: '#e5492b' },
+        { label: '150–240 分钟', items: list.filter(r => studyMinutesOf(r) >= 150 && studyMinutesOf(r) < 240), color: '#e4a334' },
+        { label: '240+ 深度攻坚', items: list.filter(r => studyMinutesOf(r) >= 240), color: '#262624' }
       ];
     } else if (recordKindFilter === 'sport') {
       rows = [
-        { label: '0–5 km', items: list.filter(r => r.km < 5), color: '#e5492b' },
-        { label: '5–10 km', items: list.filter(r => r.km >= 5 && r.km < 10), color: '#203f91' },
-        { label: '10–21 km', items: list.filter(r => r.km >= 10 && r.km < 21.1), color: '#e4a334' },
-        { label: '21.1+ 半马', items: list.filter(r => r.km >= 21.1), color: '#262624' }
+        { label: '0–5 km', items: list.filter(r => Number(r.km) < 5), color: '#e5492b' },
+        { label: '5–10 km', items: list.filter(r => Number(r.km) >= 5 && Number(r.km) < 10), color: '#203f91' },
+        { label: '10–21 km', items: list.filter(r => Number(r.km) >= 10 && Number(r.km) < 21.1), color: '#e4a334' },
+        { label: '21.1+ 半马', items: list.filter(r => Number(r.km) >= 21.1), color: '#262624' }
       ];
     } else {
       rows = [
-        { label: '🏃 短程 <10km', items: list.filter(r => r._kind === 'sport' && r.km < 10), color: '#e5492b' },
-        { label: '🏃 长距 ≥10km', items: list.filter(r => r._kind === 'sport' && r.km >= 10), color: '#e4a334' },
-        { label: '📚 专注 <2h', items: list.filter(r => r._kind === 'study' && r.hours < 2), color: '#203f91' },
-        { label: '📚 深度 ≥2h', items: list.filter(r => r._kind === 'study' && r.hours >= 2), color: '#262624' }
+        { label: '🏃 短程 <10km', items: list.filter(r => r._kind === 'sport' && Number(r.km) < 10), color: '#e5492b' },
+        { label: '🏃 长距 ≥10km', items: list.filter(r => r._kind === 'sport' && Number(r.km) >= 10), color: '#e4a334' },
+        { label: '📚 专注 <120m', items: list.filter(r => r._kind === 'study' && studyMinutesOf(r) < 120), color: '#203f91' },
+        { label: '📚 深度 ≥120m', items: list.filter(r => r._kind === 'study' && studyMinutesOf(r) >= 120), color: '#262624' }
       ];
     }
   }
@@ -2240,92 +2757,581 @@ function interactiveBucketsChart(mode, list) {
   return blueprintChartCard((mode === 'feeling' ? 'STATE & FOCUS' : 'INTENSITY SPLIT') + ' · CLICK BAR', '点击横条直达小票', barsHtml + drawer, '');
 }
 
+/* ---------- Unified Records Page Shared Data Pipeline & External Record Opener ---------- */
+function getRecordsPageDataset() {
+  const onlyMine = recordPersonFilter === 'mine';
+  const sBase = onlyMine ? mine() : state.records;
+  const lBase = onlyMine ? mineStudy() : state.studyRecords;
+  const rangeDays = recordRangeFilter === '30d' ? 30 : 7;
+  const minDate = recordRangeFilter === 'all' ? '0000-01-01' : dateShift(-(rangeDays - 1));
+  const maxDate = today();
+
+  const sList = recordKindFilter === 'study'
+    ? []
+    : sBase.map(r => ({ ...r, _kind: 'sport', _key: 'sport:' + r.id, _bjDate: beijingDateOf(r) }));
+  const lList = recordKindFilter === 'sport'
+    ? []
+    : lBase.map(r => ({ ...r, _kind: 'study', _key: 'study:' + r.id, _bjDate: beijingDateOf(r) }));
+
+  const allMatchingPersonKind = [...sList, ...lList].sort((a, b) =>
+    (b._bjDate + (b.time || '00:00') + String(b.id).padStart(8, '0')).localeCompare(a._bjDate + (a.time || '00:00') + String(a.id).padStart(8, '0'))
+  );
+  const inRangeList = allMatchingPersonKind.filter(r => r._bjDate >= minDate && r._bjDate <= maxDate);
+  const displayList = recordSelectedDate
+    ? inRangeList.filter(r => r._bjDate === recordSelectedDate)
+    : inRangeList;
+
+  return { onlyMine, rangeDays, minDate, maxDate, allMatchingPersonKind, inRangeList, displayList };
+}
+
+function openExternalRecord(key, triggerSelector = '') {
+  if (!key) return;
+  const allEver = allUnifiedRecords('all', false);
+  const target = allEver.find(r => r._key === key);
+  if (!target) {
+    recordSelectKey = key;
+    navigate('records');
+    return;
+  }
+
+  const changes = [];
+  if (recordPersonFilter === 'mine' && target.person !== state.name) {
+    recordPersonFilter = 'all';
+    changes.push('人员：我 → 全员');
+  }
+  if (recordKindFilter !== 'all' && recordKindFilter !== target._kind) {
+    const prevKind = recordKindFilter === 'sport' ? '运动' : '学习';
+    recordKindFilter = 'all';
+    changes.push('类型：' + prevKind + ' → 全部');
+  }
+
+  const td = beijingDateOf(target);
+  const min7 = dateShift(-6);
+  const min30 = dateShift(-29);
+  if (recordRangeFilter === '7d' && td < min7) {
+    if (td >= min30) {
+      recordRangeFilter = '30d';
+      changes.push('时间：近 7 天 → 近 30 天');
+    } else {
+      recordRangeFilter = 'all';
+      changes.push('时间：近 7 天 → 全部历史（含 ' + td + '）');
+    }
+  } else if (recordRangeFilter === '30d' && td < min30) {
+    recordRangeFilter = 'all';
+    changes.push('时间：近 30 天 → 全部历史（含 ' + td + '）');
+  }
+
+  recordSelectedDate = '';
+  selectedBarDate = td;
+  recordSelectKey = key;
+  externalFilterNotice = changes.length
+    ? '已为指定记录自动放宽筛选（' + changes.join(' · ') + '），以便展示该历史小票'
+    : '';
+
+  if (view !== 'records') navigate('records');
+  else render(true);
+
+  openReceiptDialog(key, triggerSelector || ('.wall-card[data-value="' + key + '"]'));
+}
+
+/* ---------- Interactive Dual-Axis Trend Chart (Daily Bars / Interval Cumulative Line) ---------- */
+function recordsTrendChart(dataset) {
+  const numDays = recordRangeFilter === '7d' ? 7 : 30;
+  const is30d = numDays === 30;
+  const isCum = recordTrendMode === 'cum';
+  const showSport = recordKindFilter === 'all' || recordKindFilter === 'sport';
+  const showStudy = recordKindFilter === 'all' || recordKindFilter === 'study';
+
+  const days = Array.from({ length: numDays }, (_, i) => {
+    const dk = dateShift(i - (numDays - 1));
+    const items = dataset.inRangeList.filter(r => r._bjDate === dk);
+    const runs = items.filter(r => r._kind === 'sport');
+    const st = items.filter(r => r._kind === 'study');
+    const km = Math.round(runs.reduce((s, r) => s + (Number(r.km) || 0), 0) * 100) / 100;
+    const min = st.reduce((s, r) => s + studyMinutesOf(r), 0);
+    const hr = Math.round((min / 60) * 10) / 10;
+    const hb = habitRateForDate(dk);
+    return { dk, km, min, hr, runs, st, items, hb };
+  });
+
+  let runKm = 0, runMin = 0;
+  days.forEach(d => {
+    runKm = Math.round((runKm + d.km) * 100) / 100;
+    runMin += d.min;
+    d.cumKm = runKm;
+    d.cumMin = runMin;
+    d.cumHr = Math.round((runMin / 60) * 10) / 10;
+  });
+
+  const maxKmRaw = isCum ? (days[numDays - 1]?.cumKm || 0) : Math.max(0, ...days.map(v => v.km));
+  const maxMinRaw = isCum ? (days[numDays - 1]?.cumMin || 0) : Math.max(0, ...days.map(v => v.min));
+  const maxKm = Math.max(10, Math.ceil((maxKmRaw * 1.12 || 10) / 5) * 5);
+  const maxMin = Math.max(60, Math.ceil((maxMinRaw * 1.12 || 60) / 30) * 30);
+
+  const activeDate = recordSelectedDate || (days.some(d => d.dk === selectedBarDate) ? selectedBarDate : days[numDays - 1].dk);
+  const selDay = days.find(d => d.dk === activeDate) || days[numDays - 1];
+
+  const plotLeft = 48, plotRight = 492, plotTop = 30, plotBottom = 142;
+  const plotW = plotRight - plotLeft, plotH = plotBottom - plotTop;
+
+  const ySteps = [0, 0.5, 1];
+  const gridHtml = ySteps.map(st => {
+    const y = plotBottom - st * plotH;
+    const kmLbl = (st * maxKm).toFixed(st === 0 ? 0 : 1) + 'k';
+    const minLbl = Math.round(st * maxMin) + 'm';
+    return '<path class="grid" d="M' + plotLeft + ' ' + y.toFixed(1) + 'H' + plotRight + '"/>'
+      + (showSport ? '<text x="' + (plotLeft - 6) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="end" class="axis-tick-sport">' + kmLbl + '</text>' : '')
+      + (showStudy ? '<text x="' + (plotRight + 6) + '" y="' + (y + 3).toFixed(1) + '" text-anchor="start" class="axis-tick-study">' + minLbl + '</text>' : '');
+  }).join('');
+
+  const axisTitlesHtml =
+    (showSport ? '<text x="' + plotLeft + '" y="18" text-anchor="start" class="axis-title-sport">◀ 运动 (KM)</text>' : '')
+    + (showStudy ? '<text x="' + plotRight + '" y="18" text-anchor="end" class="axis-title-study">学习 (MIN) ▶</text>' : '')
+    + '<text x="' + ((plotLeft + plotRight) / 2).toFixed(1) + '" y="18" text-anchor="middle" class="axis-title-mid">' + (isCum ? '区间累计折线 · 北京时间' : '每日量对比 · 北京时间') + '</text>';
+
+  let chartSvgBody = '';
+  const colW = plotW / numDays;
+
+  if (isCum) {
+    const getX = i => plotLeft + i * colW + colW / 2;
+    const getYKm = v => plotBottom - (v / maxKm) * plotH;
+    const getYMin = v => plotBottom - (v / maxMin) * plotH;
+
+    let linesHtml = '';
+    if (showSport) {
+      const pts = days.map((d, i) => getX(i).toFixed(1) + ',' + getYKm(d.cumKm).toFixed(1)).join(' ');
+      const lastD = days[numDays - 1];
+      linesHtml += '<polyline points="' + pts + '" fill="none" stroke="#e5492b" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>';
+      if (lastD.cumKm > 0) {
+        linesHtml += '<text x="' + (getX(numDays - 1) - 4).toFixed(1) + '" y="' + Math.max(plotTop + 10, getYKm(lastD.cumKm) - 7).toFixed(1) + '" text-anchor="end" class="bar-val-s">' + lastD.cumKm.toFixed(1) + 'km</text>';
+      }
+    }
+    if (showStudy) {
+      const pts = days.map((d, i) => getX(i).toFixed(1) + ',' + getYMin(d.cumMin).toFixed(1)).join(' ');
+      const lastD = days[numDays - 1];
+      linesHtml += '<polyline points="' + pts + '" fill="none" stroke="#203f91" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="' + (showSport ? '5 2' : 'none') + '"/>';
+      if (lastD.cumMin > 0) {
+        linesHtml += '<text x="' + (getX(numDays - 1) - 4).toFixed(1) + '" y="' + Math.min(plotBottom - 5, getYMin(lastD.cumMin) + 12).toFixed(1) + '" text-anchor="end" class="bar-val-l">' + lastD.cumMin + 'min</text>';
+      }
+    }
+
+    const colsHtml = days.map((v, i) => {
+      const cx = getX(i);
+      const isPinned = v.dk === recordSelectedDate;
+      const isCur = v.dk === selDay.dk;
+      const isToday = i === numDays - 1;
+      const dObj = new Date(v.dk + 'T12:00:00');
+      const wLabel = isToday ? '今天' : ('周' + '日一二三四五六'[dObj.getDay()]);
+      const dateLabel = v.dk.slice(5);
+      const showLbl = !is30d || i === 0 || i === numDays - 1 || i % 5 === 0 || isCur;
+
+      let dots = '';
+      if (showSport) dots += '<circle cx="' + cx.toFixed(1) + '" cy="' + getYKm(v.cumKm).toFixed(1) + '" r="' + (isCur ? 4.8 : (is30d ? 2.4 : 3.4)) + '" fill="#e5492b" stroke="#f2f1e8" stroke-width="1.5"/>';
+      if (showStudy) dots += '<rect x="' + (cx - (isCur ? 4 : (is30d ? 2.2 : 3))).toFixed(1) + '" y="' + (getYMin(v.cumMin) - (isCur ? 4 : (is30d ? 2.2 : 3))).toFixed(1) + '" width="' + (isCur ? 8 : (is30d ? 4.4 : 6)) + '" height="' + (isCur ? 8 : (is30d ? 4.4 : 6)) + '" fill="#203f91" stroke="#f2f1e8" stroke-width="1.4"/>';
+
+      return '<g class="bp-hit bar-col ' + (isPinned ? 'is-selected is-pinned' : isCur ? 'is-selected' : '') + '" data-action="select-date-bar" data-value="' + v.dk + '" data-focus-key="bar:' + v.dk + '" role="button" tabindex="0" aria-pressed="' + isPinned + '" aria-label="' + v.dk + ' 累计运动 ' + v.cumKm.toFixed(1) + ' 公里，累计学习 ' + v.cumMin + ' 分钟，当日 ' + v.items.length + ' 条记录">'
+        + '<rect class="bar-hit-bg" x="' + (plotLeft + i * colW).toFixed(1) + '" y="' + plotTop + '" width="' + colW.toFixed(1) + '" height="' + (plotH + 38).toFixed(1) + '" fill="' + (isPinned ? 'rgba(26,26,24,.10)' : isCur ? 'rgba(228,163,52,.14)' : 'transparent') + '" stroke="' + (isPinned ? '#1a1a18' : isCur ? 'rgba(26,26,24,.45)' : 'none') + '" stroke-width="' + (isPinned ? '1.5' : '1') + '"/>'
+        + (isCur ? '<line x1="' + cx.toFixed(1) + '" y1="' + plotTop + '" x2="' + cx.toFixed(1) + '" y2="' + plotBottom + '" stroke="#1a1a18" stroke-width="1" stroke-dasharray="2 2" opacity=".45"/>' : '')
+        + dots
+        + (showLbl ? '<text x="' + cx.toFixed(1) + '" y="' + (plotBottom + 15) + '" text-anchor="middle" class="bar-x-main ' + (isCur ? 'is-active' : '') + '">' + (is30d ? dateLabel : wLabel) + '</text>' : '')
+        + (!is30d ? '<text x="' + cx.toFixed(1) + '" y="' + (plotBottom + 28) + '" text-anchor="middle" class="bar-date">' + dateLabel + '</text>' : '')
+        + '</g>';
+    }).join('');
+
+    chartSvgBody = linesHtml + colsHtml;
+  } else {
+    const colsHtml = days.map((v, i) => {
+      const cx = plotLeft + i * colW;
+      const midX = cx + colW / 2;
+      const isPinned = v.dk === recordSelectedDate;
+      const isCur = v.dk === selDay.dk;
+      const isToday = i === numDays - 1;
+      const dObj = new Date(v.dk + 'T12:00:00');
+      const wLabel = isToday ? '今天' : ('周' + '日一二三四五六'[dObj.getDay()]);
+      const dateLabel = v.dk.slice(5);
+      const showLbl = !is30d || i === 0 || i === numDays - 1 || i % 5 === 0 || isCur;
+
+      const hKm = v.km > 0 ? Math.max(6, (v.km / maxKm) * plotH) : 0;
+      const hMin = v.min > 0 ? Math.max(6, (v.min / maxMin) * plotH) : 0;
+
+      let bars = '';
+      if (showSport && showStudy) {
+        const bw = is30d ? 5 : 16;
+        const gap = is30d ? 1.5 : 4;
+        const leftX = midX - bw - gap / 2;
+        const rightX = midX + gap / 2;
+        bars += hKm
+          ? '<rect x="' + leftX.toFixed(1) + '" y="' + (plotBottom - hKm).toFixed(1) + '" width="' + bw + '" rx="1.5" height="' + hKm.toFixed(1) + '" fill="#e5492b"/>'
+            + (!is30d ? '<text x="' + (leftX + bw / 2).toFixed(1) + '" y="' + (plotBottom - hKm - 3).toFixed(1) + '" text-anchor="middle" class="bar-val-s">' + (v.km >= 10 ? v.km.toFixed(1) : v.km.toFixed(1)) + 'k</text>' : '')
+          : '<rect x="' + leftX.toFixed(1) + '" y="' + (plotBottom - 2) + '" width="' + bw + '" height="2" fill="#d8d5ca"/>';
+        bars += hMin
+          ? '<rect x="' + rightX.toFixed(1) + '" y="' + (plotBottom - hMin).toFixed(1) + '" width="' + bw + '" rx="1.5" height="' + hMin.toFixed(1) + '" fill="#203f91"/>'
+            + (!is30d ? '<text x="' + (rightX + bw / 2).toFixed(1) + '" y="' + (plotBottom - hMin - 3).toFixed(1) + '" text-anchor="middle" class="bar-val-l">' + v.min + 'm</text>' : '')
+          : '<rect x="' + rightX.toFixed(1) + '" y="' + (plotBottom - 2) + '" width="' + bw + '" height="2" fill="#d8d5ca"/>';
+      } else if (showSport) {
+        const bw = is30d ? 8.5 : 26;
+        const leftX = midX - bw / 2;
+        bars += hKm
+          ? '<rect x="' + leftX.toFixed(1) + '" y="' + (plotBottom - hKm).toFixed(1) + '" width="' + bw + '" rx="1.5" height="' + hKm.toFixed(1) + '" fill="' + (isToday ? '#e5492b' : '#c63b21') + '"/>'
+            + (!is30d ? '<text x="' + midX.toFixed(1) + '" y="' + (plotBottom - hKm - 3).toFixed(1) + '" text-anchor="middle" class="bar-val-s">' + v.km.toFixed(1) + 'k</text>' : '')
+          : '<rect x="' + leftX.toFixed(1) + '" y="' + (plotBottom - 2) + '" width="' + bw + '" height="2" fill="#d8d5ca"/>';
+      } else {
+        const bw = is30d ? 8.5 : 26;
+        const leftX = midX - bw / 2;
+        bars += hMin
+          ? '<rect x="' + leftX.toFixed(1) + '" y="' + (plotBottom - hMin).toFixed(1) + '" width="' + bw + '" rx="1.5" height="' + hMin.toFixed(1) + '" fill="' + (isToday ? '#203f91' : '#1b357c') + '"/>'
+            + (!is30d ? '<text x="' + midX.toFixed(1) + '" y="' + (plotBottom - hMin - 3).toFixed(1) + '" text-anchor="middle" class="bar-val-l">' + v.min + 'm</text>' : '')
+          : '<rect x="' + leftX.toFixed(1) + '" y="' + (plotBottom - 2) + '" width="' + bw + '" height="2" fill="#d8d5ca"/>';
+      }
+
+      return '<g class="bp-hit bar-col ' + (isPinned ? 'is-selected is-pinned' : isCur ? 'is-selected' : '') + '" data-action="select-date-bar" data-value="' + v.dk + '" data-focus-key="bar:' + v.dk + '" role="button" tabindex="0" aria-pressed="' + isPinned + '" aria-label="' + v.dk + ' 运动 ' + v.km.toFixed(1) + ' 公里，学习 ' + v.min + ' 分钟，共 ' + v.items.length + ' 条记录">'
+        + '<rect class="bar-hit-bg" x="' + cx.toFixed(1) + '" y="' + plotTop + '" width="' + colW.toFixed(1) + '" height="' + (plotH + 38).toFixed(1) + '" fill="' + (isPinned ? 'rgba(26,26,24,.10)' : isCur ? 'rgba(228,163,52,.14)' : 'transparent') + '" stroke="' + (isPinned ? '#1a1a18' : isCur ? 'rgba(26,26,24,.45)' : 'none') + '" stroke-width="' + (isPinned ? '1.5' : '1') + '"/>'
+        + bars
+        + (showLbl ? '<text x="' + midX.toFixed(1) + '" y="' + (plotBottom + 15) + '" text-anchor="middle" class="bar-x-main ' + (isCur ? 'is-active' : '') + '">' + (is30d ? dateLabel : wLabel) + '</text>' : '')
+        + (!is30d ? '<text x="' + midX.toFixed(1) + '" y="' + (plotBottom + 28) + '" text-anchor="middle" class="bar-date">' + dateLabel + '</text>' : '')
+        + '</g>';
+    }).join('');
+    chartSvgBody = colsHtml;
+  }
+
+  const svg = '<svg class="line-chart dual-axis-trend" viewBox="0 0 540 186" role="img" aria-label="' + (recordPersonFilter === 'mine' ? '本人' : '全员') + '近' + numDays + '天' + (isCum ? '累计折线图' : '每日柱状图') + '，按北京时间归日，方向键或点击选择日期">'
+    + gridHtml
+    + axisTitlesHtml
+    + '<path d="M' + plotLeft + ' ' + plotBottom + 'H' + plotRight + '" stroke="#262624" stroke-width="1.1" opacity=".65"/>'
+    + '<path class="cross" d="M12 8V20M6 14H18M528 8V20M522 14H534"/>'
+    + chartSvgBody
+    + '</svg>';
+
+  const dayPillsHtml = selDay.items.map(item => {
+    const isStudy = item._kind === 'study';
+    const isAct = item._key === recordSelectKey;
+    const syncKey = recordSyncStateKey(item);
+    const isAbn = syncKey === 'failed' || syncKey === 'pending';
+    const primaryVal = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
+    return '<button type="button" class="inspect-pill ' + (isStudy ? 'is-study' : 'is-sport') + (isAct ? ' is-active' : '') + (isAbn ? ' is-abnormal' : '') + '" data-action="open-receipt-modal" data-value="' + item._key + '" data-focus-key="daypill:' + item._key + '">'
+      + '<span>' + (isStudy ? '学习' : '运动') + '</span>'
+      + '<span>' + esc(item.time || '--:--') + '</span>'
+      + '<span>' + esc(item.person) + '</span>'
+      + '<b>' + primaryVal + '</b>'
+      + (syncKey === 'failed' ? '<em class="pill-err-dot">失败</em>' : syncKey === 'pending' ? '<em class="pill-pend-dot">待同步</em>' : '')
+      + '<span aria-hidden="true">↗</span>'
+      + '</button>';
+  }).join('');
+
+  const rangeLabel = recordRangeFilter === 'all' ? '全部历史' : ('近 ' + numDays + ' 天');
+  const backRangeBtn = recordSelectedDate
+    ? '<button type="button" class="btn-back-range" data-action="clear-date-filter">‹ 返回' + rangeLabel + '列表（' + dataset.inRangeList.length + ' 条）</button>'
+    : '';
+
+  const inspectorHtml = '<div class="day-inspector" data-inspector-date="' + selDay.dk + '">'
+    + '<div class="day-inspector-head">'
+    + '<strong>[ ' + selDay.dk + ' · 当日匹配 ' + selDay.items.length + ' 条 ]</strong>'
+    + '<span>' + (recordSelectedDate ? '已筛选该日列表' : '点击柱列/按回车按日筛选') + '</span>'
+    + '</div>'
+    + '<div class="day-inspector-stats">'
+    + (showSport ? '<span>运动：<b>' + selDay.km.toFixed(2) + ' km</b>（' + selDay.runs.length + ' 次）</span>' : '')
+    + (showStudy ? '<span>学习：<b>' + selDay.min + ' 分钟</b> / ' + selDay.hr + ' h（' + selDay.st.length + ' 场）</span>' : '')
+    + (isCum ? '<span>至当日累计：<b>' + (showSport ? selDay.cumKm.toFixed(1) + ' km' : '') + (showSport && showStudy ? ' · ' : '') + (showStudy ? selDay.cumMin + ' 分钟' : '') + '</b></span>' : '')
+    + backRangeBtn
+    + '</div>'
+    + '<div class="day-inspector-items" aria-label="' + selDay.dk + ' 全部匹配记录小票入口">'
+    + (dayPillsHtml || '<span class="inspect-empty">当日在当前筛选下无匹配记录</span>')
+    + '</div>'
+    + '</div>';
+
+  const legendHtml = (showSport ? '<span><i style="background:#e5492b"></i>运动 KM（左轴）</span>' : '')
+    + (showStudy ? '<span><i style="background:#203f91"></i>学习 MIN（右轴）</span>' : '')
+    + (recordRangeFilter === 'all' ? '<span>主图展示近 30 天 · 卡墙含历史小票</span>' : '');
+
+  const cardTitle = (is30d ? '30-DAY' : '7-DAY') + ' DUAL-AXIS // ' + (isCum ? 'CUMULATIVE' : 'DAILY');
+  const cardHint = (recordPersonFilter === 'mine' ? esc(state.name) + '（我）' : '全员') + ' · ' + rangeLabel + ' · ' + (isCum ? '区间累计折线' : '每日柱状图');
+  return blueprintChartCard(cardTitle, cardHint, svg + inspectorHtml, '', legendHtml);
+}
+
+function moreAnalyticsChart(dataset) {
+  if (recordsMoreChartType === '28天热力') {
+    return calendarHeatmap(28, { kind: recordKindFilter, onlyMine: recordPersonFilter === 'mine', inRecordsPage: true });
+  }
+  if (recordsMoreChartType === '黄金时段') {
+    return departureChart(recordKindFilter, dataset.inRangeList);
+  }
+  if (recordsMoreChartType === '强度分布') {
+    return interactiveBucketsChart('intensity', dataset.inRangeList);
+  }
+  return interactiveBucketsChart('feeling', dataset.inRangeList);
+}
+
 function dataChart() {
-  const list = allUnifiedRecords(recordKindFilter);
-  if (chartType === '7天趋势') return barChart(recordKindFilter === 'all' ? 'dual' : recordKindFilter);
-  if (chartType === '28天热力') return calendarHeatmap(28);
-  if (chartType === '黄金时段') return departureChart(recordKindFilter);
-  if (chartType === '强度分布') return interactiveBucketsChart('intensity', list);
-  return interactiveBucketsChart('feeling', list);
+  return recordsTrendChart(getRecordsPageDataset());
+}
+
+function buildReceiptCardMarkup(r, seqIndex, totalInList) {
+  if (!r) return '<div class="empty">当前筛选下还没有打卡记录。</div>';
+  const recPendingOp = r.operationId ? roomPendingOps().find(x => x.operationId === r.operationId) : null;
+  const recNeedsRetry = Boolean(recPendingOp);
+  const recRetryBtn = recNeedsRetry
+    ? '<button type="button" class="ck-btn ck-btn-retry" data-action="retry-sync" data-value="' + esc(r.operationId || '') + '">重试同步</button>'
+    : '';
+  const rStudyHrs = r._kind === 'study' ? studyHoursOf(r) : 0;
+  const rStudyMin = r._kind === 'study' ? studyMinutesOf(r) : 0;
+  const displaySeq = Math.max(1, totalInList - seqIndex);
+  const stampNo = pad(displaySeq).padStart(3, '0');
+  const syncErrMsg = r.syncError || recPendingOp?.lastError || '';
+
+  if (r._kind === 'study') {
+    return '<article class="record-card is-study-receipt">'
+      + '<div class="record-stamp"><span>STUDY RECEIPT //' + stampNo + ' ' + syncPillMarkup(r) + '</span><span>' + icon('clock') + ' ' + r._bjDate + ' · ' + esc(r.time || '') + '</span></div>'
+      + (syncErrMsg ? '<div class="ck-record-sync-err">同步失败：' + esc(syncErrMsg) + '</div>' : '')
+      + '<div class="record-hero-km is-study"><strong>' + rStudyMin + ' <em>MIN</em></strong><span>' + esc(r.person) + ' · ' + rStudyHrs.toFixed(1) + ' h · ' + (studyFocusLevels[r.focus]?.[0] || '🧠') + ' ' + (studyFocusLevels[r.focus]?.[1] || '专注') + '</span></div>'
+      + '<div class="record-subject-line">' + icon('book') + ' <strong>' + esc(r.subject || findTargetTitle(r.targetId)) + '</strong></div>'
+      + '<div class="record-tags"><span class="badge-tag is-study-tag">学习档案</span>' + (r.tags || []).map(t => '<span>' + esc(t) + '</span>').join('') + '</div>'
+      + '<div class="record-numbers"><div><strong>' + rStudyMin + '</strong><small>MIN / 分钟</small></div><div><strong>' + rStudyHrs.toFixed(1) + '</strong><small>HOURS / 小时</small></div><div><strong>#' + displaySeq + '</strong><small>LOG / 序号</small></div></div>'
+      + '<p class="record-note">“' + esc(r.note || '专注一小时，胜过焦虑一整天。') + '”</p>'
+      + (r.photo ? '<img class="record-photo" src="' + r.photo + '" alt="学习笔记照片">' : '')
+      + '<div class="record-actions"><button type="button" class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button>' + recRetryBtn + '<button type="button" id="receipt-edit-btn" class="edit-btn" data-action="edit-unified" data-value="' + r._key + '">编辑</button><button type="button" class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
+      + '</article>';
+  }
+  return '<article class="record-card">'
+    + '<div class="record-stamp"><span>RUN RECEIPT //' + stampNo + ' ' + syncPillMarkup(r) + '</span><span>' + icon('clock') + ' ' + r._bjDate + ' · ' + esc(r.time || '') + '</span></div>'
+    + (syncErrMsg ? '<div class="ck-record-sync-err">同步失败：' + esc(syncErrMsg) + '</div>' : '')
+    + '<div class="record-hero-km"><strong>' + Number(r.km).toFixed(2) + ' <em>KM</em></strong><span>' + esc(r.person) + ' ' + (feelings[r.feel]?.[0] || '🏃') + ' · ' + (feelings[r.feel]?.[1] || '') + '</span></div>'
+    + '<div class="record-tags"><span class="badge-tag">' + level(r.person) + '</span>' + (r.tags || []).map(t => '<span>' + esc(t) + '</span>').join('') + '</div>'
+    + '<div class="record-numbers"><div><strong>' + r.minutes + '</strong><small>MIN / 时长</small></div><div><strong>' + pace(r) + '</strong><small>PACE / 配速</small></div><div><strong>#' + displaySeq + '</strong><small>RUN / 序号</small></div></div>'
+    + '<p class="record-note">“' + esc(r.note || '今天，也跑完了。') + '”</p>'
+    + (r.photo ? '<img class="record-photo" src="' + r.photo + '" alt="本次晨跑照片">' : '')
+    + '<div class="record-actions"><button type="button" class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button>' + recRetryBtn + '<button type="button" id="receipt-edit-btn" class="edit-btn" data-action="edit-unified" data-value="' + r._key + '">编辑</button><button type="button" class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
+    + '</article>';
+}
+
+function ensureReceiptDialog() {
+  let dlg = $('#record-receipt-dialog');
+  if (dlg) return dlg;
+  dlg = document.createElement('dialog');
+  dlg.id = 'record-receipt-dialog';
+  dlg.className = 'receipt-dialog';
+  dlg.setAttribute('aria-labelledby', 'receipt-dialog-title');
+  dlg.innerHTML = '<div class="receipt-dialog-shell">'
+    + '<div class="receipt-dialog-head">'
+    + '<span id="receipt-dialog-title">战绩小票详情</span>'
+    + '<div class="receipt-dialog-tools">'
+    + '<span class="pager" id="receipt-dialog-pager"></span>'
+    + '<button type="button" id="receipt-dialog-close" class="receipt-close-btn" aria-label="关闭小票">关闭 ×</button>'
+    + '</div></div>'
+    + '<div id="receipt-dialog-notice"></div>'
+    + '<div id="receipt-dialog-body"></div>'
+    + '</div>';
+  document.body.appendChild(dlg);
+
+  dlg.addEventListener('click', ev => {
+    if (ev.target === dlg) closeReceiptDialog();
+  });
+  $('#receipt-dialog-close', dlg).addEventListener('click', () => closeReceiptDialog());
+  dlg.addEventListener('close', () => {
+    restoreFocusBySelector(lastReceiptFocusSelector, '.wall-card.is-selected, .records-filter-panel button');
+  });
+  return dlg;
+}
+
+function restoreFocusBySelector(sel, fallbackSel = '') {
+  requestAnimationFrame(() => {
+    const el = (sel && document.querySelector(sel)) || (fallbackSel && document.querySelector(fallbackSel));
+    if (el && typeof el.focus === 'function') {
+      try { el.focus({ preventScroll: false }); } catch { try { el.focus(); } catch {} }
+    }
+  });
+}
+
+function refreshReceiptDialog() {
+  const dlg = $('#record-receipt-dialog');
+  if (!dlg || !dlg.open) return;
+  const dataset = getRecordsPageDataset();
+  const list = dataset.displayList;
+  let idx = list.findIndex(x => x._key === recordSelectKey);
+  let target = idx >= 0 ? list[idx] : dataset.inRangeList.find(x => x._key === recordSelectKey);
+  if (!target) {
+    const allEver = allUnifiedRecords('all', false).map(x => ({ ...x, _bjDate: beijingDateOf(x) }));
+    target = allEver.find(x => x._key === recordSelectKey);
+  }
+  if (!target) {
+    dlg.close();
+    return;
+  }
+  const effectiveList = idx >= 0 ? list : [target];
+  const effectiveIdx = idx >= 0 ? idx : 0;
+
+  $('#receipt-dialog-title', dlg).textContent = (target._kind === 'study' ? '学习战绩小票 · ' : '运动战绩小票 · ') + target._bjDate + ' · ' + target.person;
+  $('#receipt-dialog-pager', dlg).innerHTML =
+    '<button type="button" data-action="record-prev" aria-label="上一条记录" ' + (effectiveIdx <= 0 ? 'disabled' : '') + '>‹</button>'
+    + '<span>' + (effectiveIdx + 1) + ' / ' + effectiveList.length + '</span>'
+    + '<button type="button" data-action="record-next" aria-label="下一条记录" ' + (effectiveIdx >= effectiveList.length - 1 ? 'disabled' : '') + '>›</button>';
+  $('#receipt-dialog-notice', dlg).innerHTML = externalFilterNotice
+    ? '<div class="external-filter-notice is-in-dialog" role="status"><span>' + icon('spark') + ' ' + esc(externalFilterNotice) + '</span></div>'
+    : '';
+  $('#receipt-dialog-body', dlg).innerHTML = buildReceiptCardMarkup(target, effectiveIdx, effectiveList.length);
+}
+
+function openReceiptDialog(key, focusSelector = '') {
+  if (key) recordSelectKey = key;
+  if (focusSelector) lastReceiptFocusSelector = focusSelector;
+  const dlg = ensureReceiptDialog();
+  if (!dlg.open) dlg.showModal();
+  refreshReceiptDialog();
+  const closeBtn = $('#receipt-dialog-close', dlg);
+  if (closeBtn) closeBtn.focus({ preventScroll: true });
+}
+
+function closeReceiptDialog() {
+  const dlg = $('#record-receipt-dialog');
+  if (dlg && dlg.open) dlg.close('cancel');
 }
 
 function recordsPage() {
-  const list = allUnifiedRecords(recordKindFilter);
-  let curIdx = list.findIndex(x => x._key === recordSelectKey);
-  if (curIdx < 0) curIdx = 0;
-  const r = list[curIdx];
-  if (r) recordSelectKey = r._key;
+  const dataset = getRecordsPageDataset();
+  const inRangeList = dataset.inRangeList;
+  const displayList = dataset.displayList;
 
-  const sKm = total(state.records), stH = totalStudy(state.studyRecords);
-  const totalCount = state.records.length + state.studyRecords.length;
-  const hb = habitRateForDate(today());
+  let curIdx = displayList.findIndex(x => x._key === recordSelectKey);
+  if (curIdx < 0 && displayList.length) {
+    curIdx = 0;
+    recordSelectKey = displayList[0]._key;
+  }
+  const r = curIdx >= 0 ? displayList[curIdx] : null;
 
-  const receiptBody = r ? (r._kind === 'study'
-    ? '<article class="record-card is-study-receipt">'
-      + '<div class="record-stamp"><span>STUDY RECEIPT //' + pad(list.length - curIdx).padStart(3, '0') + '</span><span>' + icon('clock') + ' ' + r.date + ' · ' + r.time + '</span></div>'
-      + '<div class="record-hero-km is-study"><strong>' + r.hours.toFixed(1) + ' <em>HOURS</em></strong><span>' + esc(r.person) + ' ' + (studyFocusLevels[r.focus]?.[0] || '🧠') + ' · ' + (studyFocusLevels[r.focus]?.[1] || '专注') + '</span></div>'
-      + '<div class="record-subject-line">' + icon('book') + ' <strong>' + esc(r.subject || findTargetTitle(r.targetId)) + '</strong></div>'
-      + '<div class="record-tags"><span class="badge-tag is-study-tag">学习档案</span>' + (r.tags || []).map(t => '<span>' + esc(t) + '</span>').join('') + '</div>'
-      + '<div class="record-numbers"><div><strong>' + r.minutes + '</strong><small>MIN / 分钟</small></div><div><strong>' + Math.max(1, Math.round(r.minutes / 25)) + '</strong><small>POMO / 番茄</small></div><div><strong>#' + (list.length - curIdx) + '</strong><small>LOG / 序号</small></div></div>'
-      + '<p class="record-note">“' + esc(r.note || '专注一小时，胜过焦虑一整天。') + '”</p>'
-      + (r.photo ? '<img class="record-photo" src="' + r.photo + '" alt="学习笔记照片">' : '')
-      + '<div class="record-actions"><button class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button><button class="edit-btn" data-action="edit-unified" data-value="' + r._key + '">编辑</button><button class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
-      + '</article>'
-    : '<article class="record-card">'
-      + '<div class="record-stamp"><span>RUN RECEIPT //' + pad(list.length - curIdx).padStart(3, '0') + '</span><span>' + icon('clock') + ' ' + r.date + ' · ' + r.time + '</span></div>'
-      + '<div class="record-hero-km"><strong>' + r.km.toFixed(2) + ' <em>KM</em></strong><span>' + esc(r.person) + ' ' + (feelings[r.feel]?.[0] || '🏃') + ' · ' + (feelings[r.feel]?.[1] || '') + '</span></div>'
-      + '<div class="record-tags"><span class="badge-tag">' + level(r.person) + '</span>' + (r.tags || []).map(t => '<span>' + esc(t) + '</span>').join('') + '</div>'
-      + '<div class="record-numbers"><div><strong>' + r.minutes + '</strong><small>MIN / 时长</small></div><div><strong>' + pace(r) + '</strong><small>PACE / 配速</small></div><div><strong>#' + (list.length - curIdx) + '</strong><small>RUN / 序号</small></div></div>'
-      + '<p class="record-note">“' + esc(r.note || '今天，也跑完了。') + '”</p>'
-      + (r.photo ? '<img class="record-photo" src="' + r.photo + '" alt="本次晨跑照片">' : '')
-      + '<div class="record-actions"><button class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button><button class="edit-btn" data-action="edit-unified" data-value="' + r._key + '">编辑</button><button class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
-      + '</article>')
-    : '<div class="empty">当前筛选下还没有打卡记录。</div>';
+  // Interval KPIs driven strictly by inRangeList (shared batch)
+  const sportRuns = inRangeList.filter(x => x._kind === 'sport');
+  const studyItems = inRangeList.filter(x => x._kind === 'study');
+  const sKm = sportRuns.reduce((s, x) => s + (Number(x.km) || 0), 0);
+  const stMin = studyItems.reduce((s, x) => s + studyMinutesOf(x), 0);
+  const stH = Math.round((stMin / 60) * 10) / 10;
+  let paceStr = "--'--\"";
+  if (sportRuns.length && sKm > 0) {
+    const totMin = sportRuns.reduce((s, x) => s + (Number(x.minutes) || 0), 0);
+    const pSec = Math.round((totMin * 60) / sKm);
+    paceStr = Math.floor(pSec / 60) + "'" + pad(pSec % 60) + '"';
+  }
+  const activeDays = new Set(inRangeList.map(x => x._bjDate)).size;
 
-  const wallCards = list.map((item, idx) => {
-    const isStudy = item._kind === 'study';
-    const isSel = idx === curIdx;
-    const isNew = item._key === newlyArchivedRecordKey;
-    const seqNo = '#' + pad(list.length - idx).padStart(3, '0');
-    return '<article class="wall-card ' + (isStudy ? 'is-study ' : 'is-sport ') + (isSel ? 'is-selected ' : '') + (isNew ? 'is-newly-archived ' : '') + '" data-action="record-select" data-value="' + item._key + '" role="button" tabindex="0">'
-      + '<div class="wall-card-head">'
-      + '<span class="wall-type-badge slash-chip">' + (isStudy ? '⚡ STUDY CIRCUIT' : '🔥 RUN ENERGY') + '</span>'
-      + '<span class="wall-seq">' + seqNo + ' · ' + item.date.slice(5) + '</span>'
-      + '</div>'
-      + '<div class="wall-card-score">'
-      + '<strong>' + (isStudy ? item.hours.toFixed(1) : item.km.toFixed(2)) + '</strong>'
-      + '<em>' + (isStudy ? 'HOURS' : 'KM') + '</em>'
-      + '</div>'
-      + '<div class="wall-card-meta">'
-      + '<span>' + esc(item.person) + '</span>'
-      + '<span>' + (isStudy ? (item.minutes + 'm · ' + (studyFocusLevels[item.focus]?.[1] || '专注')) : (pace(item) + ' · ' + item.minutes + 'm')) + '</span>'
-      + '</div>'
-      + '<p class="wall-card-note">' + esc(isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || '一步一步，跑出自己的节奏。')) + '</p>'
-      + '<div class="wall-card-foot">'
-      + '<span class="wall-tag-mini">' + esc((item.tags && item.tags[0]) || (isStudy ? '学习战绩' : '运动战绩')) + '</span>'
-      + '<span class="wall-like-mini"><span aria-hidden="true">' + (item.liked ? '♥ ' : '♡ ') + '</span>' + (item.likes || 0) + '</span>'
-      + '</div>'
-      + '</article>';
-  }).join('');
+  const rangeText = recordRangeFilter === '30d' ? '近 30 天' : recordRangeFilter === 'all' ? '全部历史' : '近 7 天';
+  const personText = recordPersonFilter === 'mine' ? (esc(state.name) + '（我）') : '全员';
+  const kindText = recordKindFilter === 'sport' ? '运动' : recordKindFilter === 'study' ? '学习' : '全部';
+
+  const dateGroups = new Map();
+  for (const item of displayList) {
+    if (!dateGroups.has(item._bjDate)) dateGroups.set(item._bjDate, []);
+    dateGroups.get(item._bjDate).push(item);
+  }
+  const todayDk = today();
+  const wallCards = Array.from(dateGroups, ([date, items]) =>
+    '<section class="record-day"><h3>' + esc(date) + (date === todayDk ? ' · 今天' : '') + '</h3>'
+    + items.map(item => {
+      const isStudy = item._kind === 'study';
+      const selected = item._key === recordSelectKey;
+      const type = isStudy ? '学习' : '运动';
+      const value = isStudy ? studyMinutesOf(item) + ' 分钟' : Number(item.km).toFixed(2) + ' km';
+      const time = item.time || '';
+      const status = recordSyncStateKey(item);
+      const statusMeta = syncStatusMeta(status);
+      const itemOp = item.operationId ? roomPendingOps().find(x => x.operationId === item.operationId) : null;
+      const errMsg = item.syncError || itemOp?.lastError || '';
+      const needsRetry = Boolean(itemOp);
+      return '<div class="record-row-item ' + (status === 'failed' ? 'is-sync-failed' : (status === 'pending' || status === 'local') ? 'is-sync-pending' : '') + '">'
+        + '<button type="button" class="wall-card record-row ' + (isStudy ? 'is-study' : 'is-sport')
+        + (selected ? ' is-selected' : '') + (item._key === newlyArchivedRecordKey ? ' is-newly-archived' : '')
+        + '" data-action="open-receipt-modal" data-value="' + esc(item._key)
+        + '" data-focus-key="wall:' + esc(item._key) + '" aria-pressed="' + selected
+        + '" aria-label="' + esc([date, time, type, value, item.person, statusMeta.label, errMsg].filter(Boolean).join('，')) + '">'
+        + '<span class="record-row-type">' + type + '</span><strong>' + value + '</strong>'
+        + '<span class="record-row-meta">' + esc([time, item.person].filter(Boolean).join(' · ')) + '</span>'
+        + '<span class="record-row-sync is-' + statusMeta.key + '">' + statusMeta.label + '</span>'
+        + '<span class="record-row-arrow" aria-hidden="true">›</span></button>'
+        + (needsRetry ? '<div class="record-row-sync-bar" role="' + (status === 'failed' ? 'alert' : 'status') + '">'
+          + '<span>' + (errMsg ? ('原因：' + esc(errMsg)) : esc(statusMeta.detail)) + '</span>'
+          + (item.operationId ? '<button type="button" class="ck-btn ck-btn-retry" data-action="retry-sync" data-value="' + esc(item.operationId) + '">重试同步</button>' : '')
+          + '</div>' : '')
+        + '</div>';
+    }).join('') + '</section>'
+  ).join('');
+
+  const externalNoticeHtml = externalFilterNotice
+    ? '<div class="external-filter-notice" role="status" aria-live="polite"><span>' + icon('spark') + ' ' + esc(externalFilterNotice) + '</span><button type="button" class="btn-xs" data-action="reset-filter-default">恢复默认筛选</button></div>'
+    : '';
+
+  const filterPanelHtml = '<section class="records-filter-panel" aria-label="记录筛选">'
+    + externalNoticeHtml
+    + '<div class="filter-row">'
+    + '<div class="filter-group"><span class="filter-label">类型</span><div class="mini-subtabs" role="group" aria-label="按类型筛选">'
+    + '<button type="button" aria-pressed="' + (recordKindFilter === 'all') + '" class="subtab ' + (recordKindFilter === 'all' ? 'active' : '') + '" data-action="set-record-kind" data-value="all">全部</button>'
+    + '<button type="button" aria-pressed="' + (recordKindFilter === 'sport') + '" class="subtab is-sport-tab ' + (recordKindFilter === 'sport' ? 'active' : '') + '" data-action="set-record-kind" data-value="sport">运动</button>'
+    + '<button type="button" aria-pressed="' + (recordKindFilter === 'study') + '" class="subtab is-study-tab ' + (recordKindFilter === 'study' ? 'active' : '') + '" data-action="set-record-kind" data-value="study">学习</button>'
+    + '</div></div>'
+    + '<div class="filter-group"><span class="filter-label">人员</span><div class="mini-subtabs" role="group" aria-label="按人员筛选">'
+    + '<button type="button" aria-pressed="' + (recordPersonFilter === 'mine') + '" class="subtab ' + (recordPersonFilter === 'mine' ? 'active' : '') + '" data-action="set-record-person" data-value="mine">我</button>'
+    + '<button type="button" aria-pressed="' + (recordPersonFilter === 'all') + '" class="subtab ' + (recordPersonFilter === 'all' ? 'active' : '') + '" data-action="set-record-person" data-value="all">全员</button>'
+    + '</div></div>'
+    + '</div>'
+    + '<div class="filter-row">'
+    + '<div class="filter-group"><span class="filter-label">范围</span><div class="mini-subtabs" role="group" aria-label="按时间范围筛选">'
+    + '<button type="button" aria-pressed="' + (recordRangeFilter === '7d') + '" class="subtab ' + (recordRangeFilter === '7d' ? 'active' : '') + '" data-action="set-record-range" data-value="7d">近 7 天</button>'
+    + '<button type="button" aria-pressed="' + (recordRangeFilter === '30d') + '" class="subtab ' + (recordRangeFilter === '30d' ? 'active' : '') + '" data-action="set-record-range" data-value="30d">近 30 天</button>'
+    + (recordRangeFilter === 'all' ? '<button type="button" aria-pressed="true" class="subtab active" data-action="set-record-range" data-value="all">全部历史</button>' : '')
+    + '</div></div>'
+    + '<div class="filter-group filter-date-group"><label class="filter-label" for="records-date-jump">日期</label>'
+    + '<input type="date" id="records-date-jump" name="record-date" class="records-date-input" value="' + esc(recordSelectedDate) + '" max="' + todayDk + '" autocomplete="off">'
+    + (recordSelectedDate ? '<button type="button" class="btn-back-range" data-action="clear-date-filter">清除日期</button>' : '')
+    + '</div>'
+    + '</div>'
+    + '</section>';
+
+  const chartModeBarHtml = '<div class="records-chart-mode-bar" role="group" aria-label="切换每日柱或累计折线">'
+    + '<span class="filter-label">图表口径</span>'
+    + '<div class="mini-subtabs">'
+    + '<button type="button" aria-pressed="' + (recordTrendMode === 'daily') + '" class="subtab ' + (recordTrendMode === 'daily' ? 'active' : '') + '" data-action="set-record-trend" data-value="daily">每日量</button>'
+    + '<button type="button" aria-pressed="' + (recordTrendMode === 'cum') + '" class="subtab ' + (recordTrendMode === 'cum' ? 'active' : '') + '" data-action="set-record-trend" data-value="cum">累计量</button>'
+    + '</div></div>';
+
+  const moreAnalyticsHtml = '<section class="records-more-box" aria-label="更多分析">'
+    + '<button type="button" class="records-more-toggle" data-action="toggle-more-analytics" aria-expanded="' + recordsMoreOpen + '">'
+    + '<span>' + icon('chart') + ' 更多分析</span>'
+    + '<span class="more-toggle-ind">' + (recordsMoreOpen ? '收起 ▲' : '展开 ▼') + '</span>'
+    + '</button>'
+    + (recordsMoreOpen
+      ? '<div class="records-more-body">'
+        + subtabs(['28天热力', '黄金时段', '强度分布', '状态感觉'], recordsMoreChartType, 'more-chart-type', 'data-tabs', { '28天热力': 'calendar', '黄金时段': 'clock', '强度分布': 'route', '状态感觉': 'spark' })
+        + '<div class="data-chart blueprint-chart">' + moreAnalyticsChart(dataset) + '</div>'
+        + '</div>'
+      : '')
+    + '</section>';
+
+  const wallScopeBarHtml = recordSelectedDate
+    ? '<div class="wall-active-filter-bar is-date-focused" role="status"><span>已选日期：<b>' + esc(recordSelectedDate) + (recordSelectedDate === todayDk ? '（今天）' : '') + '</b> · 共 ' + displayList.length + ' 条</span></div>'
+    : '<div class="wall-active-filter-bar"><span>当前范围：<b>' + personText + '</b> · <b>' + kindText + '</b> · <b>' + rangeText + '</b>（共 ' + displayList.length + ' 条）</span></div>';
+
+  const anyTodayRecForPerson = allUnifiedRecords('all', recordPersonFilter === 'mine').some(x => beijingDateOf(x) === todayDk);
+  const isTodayEmpty = recordSelectedDate === todayDk && !anyTodayRecForPerson;
+  const emptyWallHtml = isTodayEmpty
+    ? '<div class="empty records-empty" role="status"><p><strong>今天还没有记录</strong></p><div class="records-empty-actions"><button type="button" class="today-act-btn is-sport" data-action="checkin" data-mode="sport">记运动</button><button type="button" class="today-act-btn is-study" data-action="checkin" data-mode="study">记学习</button><button type="button" class="btn-back-range" data-action="clear-date-filter">查看' + rangeText + '记录</button></div></div>'
+    : '<div class="empty records-empty" role="status"><p><strong>没有符合筛选条件的记录</strong></p><div class="records-empty-actions">'
+      + (recordSelectedDate ? '<button type="button" class="btn-back-range" data-action="clear-date-filter">清除日期</button>' : '')
+      + '<button type="button" class="btn-back-range" data-action="reset-filter-default">恢复默认筛选</button>'
+      + '</div></div>';
 
   return '<div class="records-layout"><div class="records-left">'
-    + '<section class="poster-hero poster-blue poster-compact" data-wm="LOG">'
-    + '<div class="poster-meta"><span>[ 07 / 全员运动 × 学习数据档案 ]</span><span>共 ' + totalCount + ' 条战绩</span></div>'
+    + '<section class="poster-hero poster-frost poster-compact" data-wm="LOG">'
+    + '<div class="poster-meta"><span>' + personText + ' · ' + kindText + ' · ' + rangeText + '</span><span>活跃 ' + activeDays + ' 天 · 共 ' + inRangeList.length + ' 条</span></div>'
     + '<div class="poster-kpis poster-kpis-4">'
-    + '<div><small>全员跑量</small><strong>' + sKm.toFixed(1) + '<em>K</em></strong></div>'
-    + '<div><small>全员学习</small><strong>' + stH.toFixed(1) + '<em>H</em></strong></div>'
-    + '<div><small>今日自律</small><strong>' + hb.done + '<em>/' + hb.total + '</em></strong></div>'
-    + '<div><small>均配速</small><strong>' + avgPace() + '</strong></div>'
+    + '<div><small>区间跑量</small><strong>' + sKm.toFixed(1) + '<em>KM</em></strong></div>'
+    + '<div><small>区间学习</small><strong>' + stMin + '<em>MIN</em></strong><span class="kpi-sub">(' + stH + 'H)</span></div>'
+    + '<div><small>区间条数</small><strong>' + inRangeList.length + '<em>条</em></strong></div>'
+    + '<div><small>区间均配速</small><strong>' + paceStr + '</strong></div>'
     + '</div></section>'
-    + '<div class="domain-filter-bar">'
-    + subtabs(['全部', '运动', '学习'], recordKindFilter === 'sport' ? '运动' : recordKindFilter === 'study' ? '学习' : '全部', 'record-kind', 'equal', { '全部': 'spark', '运动': 'shoe', '学习': 'book' })
-    + '</div>'
-    + subtabs(['7天趋势', '28天热力', '黄金时段', '强度分布', '状态感觉'], chartType, 'chart-type', 'data-tabs', { '7天趋势': 'chart', '28天热力': 'calendar', '黄金时段': 'clock', '强度分布': 'route', '状态感觉': 'spark' })
-    + '<div class="data-chart blueprint-chart">' + dataChart() + '</div>'
+    + chartModeBarHtml
+    + '<div class="data-chart blueprint-chart records-main-chart">' + recordsTrendChart(dataset) + '</div>'
+    + moreAnalyticsHtml
     + '</div><div class="records-right">'
-    + heading('[07] 战绩卡墙 · BATTLE RECORD WALL', '<span class="pager"><button data-action="record-prev" aria-label="上一条记录" ' + (curIdx <= 0 ? 'disabled' : '') + '>‹</button><span>' + (r ? curIdx + 1 : 0) + ' / ' + list.length + '</span><button data-action="record-next" aria-label="下一条记录" ' + (curIdx >= list.length - 1 ? 'disabled' : '') + '>›</button></span>', 'spark')
-    + (list.length ? '<div class="record-wall-grid" aria-label="多条战绩同屏卡墙">' + wallCards + '</div>' : '')
-    + receiptBody
+    + heading('记录', '<span class="pager"><button type="button" data-action="record-prev" aria-label="上一条记录" ' + (curIdx <= 0 ? 'disabled' : '') + '>‹</button><span>' + (r ? curIdx + 1 : 0) + ' / ' + displayList.length + '</span><button type="button" data-action="record-next" aria-label="下一条记录" ' + (curIdx >= displayList.length - 1 || !displayList.length ? 'disabled' : '') + '>›</button></span>', 'spark')
+    + filterPanelHtml
+    + wallScopeBarHtml
+    + (displayList.length ? '<div class="record-wall-grid records-wall-scoped" aria-label="按日期分组的记录">' + wallCards + '</div>' : emptyWallHtml)
     + '</div></div>';
 }
 
@@ -2435,17 +3441,24 @@ const renderers = { home, progress, plan, study, ranking, achievements, records:
 function render(preserveScroll = false) {
   const page = $('#page');
   const prevTop = preserveScroll && page ? page.scrollTop : 0;
+  const active = document.activeElement;
+  const restoreAction = preserveScroll && page?.contains(active) && active.dataset.focusKey
+    && ['home', 'study', 'records', 'ranking'].includes(view)
+    ? buildStableFocusSelector(active) : '';
   updateHeader();
   page.dataset.page = view;
   page.innerHTML = '<div class="' + (preserveScroll ? 'page-stay' : 'page-enter') + '" style="display:flex;flex-direction:column;flex:1;min-height:0">' + renderers[view]() + '</div>';
   if (preserveScroll) page.scrollTop = prevTop;
-  $('.bottom-nav').innerHTML = nav.map(([id, label, ico], i) => '<button data-view="' + id + '" class="' + (id === view ? 'active' : '') + '" ' + (id === view ? 'aria-current="page"' : '') + '>' + icon(ico, 'nav-ico') + '<span class="nav-label"><small>' + pad(i + 1) + '</small>' + label + '</span></button>').join('');
+  if (restoreAction) page.querySelector(restoreAction)?.focus({ preventScroll: true });
+  $('.bottom-nav').innerHTML = nav.map(([id, label, ico]) => '<button data-view="' + id + '" class="' + (id === view ? 'active' : '') + '" ' + (id === view ? 'aria-current="page"' : '') + '>' + icon(ico, 'nav-ico') + '<span class="nav-label">' + label + '</span></button>').join('');
   clearInterval(quoteTimer);
   if (view === 'home' && !matchMedia('(prefers-reduced-motion: reduce)').matches) quoteTimer = setInterval(nextQuote, 7000);
+  if (view === 'records') refreshReceiptDialog();
 }
 function nextQuote() { quoteIndex = (quoteIndex + 1) % quotes.length; const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); initPixelMatrices(); }
 function navigate(v) {
   if (!VALID_VIEWS.includes(v)) v = 'home';
+  if (v !== 'records') closeReceiptDialog();
   view = v;
   if (typeof location !== 'undefined' && location.hash !== '#' + v) {
     try { history.replaceState(null, '', '#' + v); } catch { location.hash = v; }
@@ -2459,14 +3472,40 @@ window.addEventListener('hashchange', () => {
   if (VALID_VIEWS.includes(hv) && hv !== view) navigate(hv);
 });
 
+function buildStableFocusSelector(el) {
+  if (!(el instanceof HTMLElement)) return '';
+  if (el.dataset && el.dataset.focusKey) return '[data-focus-key="' + el.dataset.focusKey + '"]';
+  if (el.id) return '#' + el.id;
+  if (el.dataset && el.dataset.action) {
+    let sel = '[data-action="' + el.dataset.action + '"]';
+    if (el.dataset.mode) sel += '[data-mode="' + el.dataset.mode + '"]';
+    if (el.dataset.target) sel += '[data-target="' + el.dataset.target + '"]';
+    if (el.dataset.value) sel += '[data-value="' + el.dataset.value + '"]';
+    return sel;
+  }
+  return '';
+}
+
 function openEditor(title, body, onSave, button = '保存 →') {
+  lastEditorOpener = document.activeElement;
+  lastEditorFocusSelector = buildStableFocusSelector(lastEditorOpener);
   dialogSave = onSave;
   $('#editor-title').textContent = title;
   $('#editor-body').innerHTML = body;
   $('#editor-save').textContent = button;
   $('#editor-save').hidden = !onSave;
-  if (!$('#editor').open) $('#editor').showModal();
+  const dlg = $('#editor');
+  if (!dlg.open) dlg.showModal();
+  const firstInput = dlg.querySelector('#editor-body input:not([type="hidden"]), #editor-body select, #editor-body textarea, #editor-body button, #editor-save:not([hidden]), #editor-close');
+  if (firstInput && typeof firstInput.focus === 'function') firstInput.focus({ preventScroll: true });
 }
+$('#editor')?.addEventListener('close', () => {
+  if (lastEditorOpener && lastEditorOpener.isConnected && typeof lastEditorOpener.focus === 'function') {
+    try { lastEditorOpener.focus(); } catch {}
+  } else if (lastEditorFocusSelector) {
+    restoreFocusBySelector(lastEditorFocusSelector);
+  }
+});
 $('#editor-close')?.addEventListener('click', () => { pendingImportBackup = null; $('#editor').close('cancel'); });
 $('#editor-cancel')?.addEventListener('click', () => { pendingImportBackup = null; $('#editor').close('cancel'); });
 $('#editor')?.addEventListener('click', e => { if (e.target === $('#editor')) { pendingImportBackup = null; $('#editor').close('cancel'); } });
@@ -2549,7 +3588,7 @@ $('#open-settings').onclick = () => {
     ? '<div style="margin-bottom:12px;padding:8px 12px;background:#eef7ed;border:1px solid #7bc676;color:#1e4620;font-size:12px;display:flex;align-items:center;justify-content:space-between"><span><strong>● 在线后端已连接</strong> (房间: ' + esc(currentRoomCode) + ')</span><button type="button" id="btn-sync-to-cloud" style="border:1px solid #7bc676;background:#fff;padding:2px 8px;font-size:11px;cursor:pointer">将本地缓存推送到云端 ↑</button></div>'
     : '<div style="margin-bottom:12px;padding:8px 12px;background:#fff8ee;border:1px solid #e4a334;color:#7a4b04;font-size:12px"><strong>○ 离线模式 (localStorage)</strong><br><small>双击打开网页.cmd 或纯本地使用；启动后端后刷新即享 SQLite 真持久化与云端多人同步。</small></div>';
 
-  openEditor('RUN & STUDY / 设置与云端', modeBadge + '<p class="hint">支持在线 SQLite 真持久化与离线本地缓存自适应双模式。数据可随时导出备份。</p><button type="button" class="settings-link" id="export-data">↗ 导出完整数据备份 .json</button><label for="import-data">从备份恢复（将替换当前数据）</label><input id="import-data" type="file" accept=".json,application/json"><button type="button" class="settings-link" id="open-ppb-demo">🧩 像素进度条组件演示 (0%–100% / 不确定状态)</button><a class="settings-link" href="pixel-progress-demo.html" target="_blank">↗ 在独立窗口打开完整组件演示页</a><a class="settings-link" href="film.html">▶ 播放 30 秒品牌动效</a><button type="button" class="settings-link" id="download-poster">↓ 保存今日双轨打卡海报 .png</button><button type="button" class="settings-link danger" id="clear-records">清空当前运动与学习记录</button>', null);
+  openEditor('设置与备份', modeBadge + '<button type="button" class="settings-link" id="export-data">↗ 导出完整数据备份 .json</button><label for="import-data">从备份恢复（将替换当前数据）</label><input id="import-data" type="file" accept=".json,application/json"><button type="button" class="settings-link" id="open-ppb-demo">🧩 像素进度条组件演示 (0%–100% / 不确定状态)</button><a class="settings-link" href="pixel-progress-demo.html" target="_blank">↗ 在独立窗口打开完整组件演示页</a><a class="settings-link" href="film.html">品牌短片</a><button type="button" class="settings-link" id="download-poster">↓ 保存今日双轨打卡海报 .png</button><button type="button" class="settings-link danger" id="clear-records">清空当前运动与学习记录</button>', null);
 };
 
 function downloadBlob(blob, name) {
@@ -2584,6 +3623,28 @@ function applyConfirmedBackupImport(backup) {
   toast('数据已恢复。');
 }
 document.addEventListener('change', async e => {
+  if (e.target.id === 'records-date-jump') {
+    const val = (e.target.value || '').trim();
+    externalFilterNotice = '';
+    if (!val) {
+      recordSelectedDate = '';
+      render(true);
+      restoreFocusBySelector('#records-date-jump');
+      return;
+    }
+    recordSelectedDate = val;
+    selectedBarDate = val;
+    const min7 = dateShift(-6);
+    const min30 = dateShift(-29);
+    if (recordRangeFilter === '7d' && val < min7) {
+      recordRangeFilter = val >= min30 ? '30d' : 'all';
+    } else if (recordRangeFilter === '30d' && val < min30) {
+      recordRangeFilter = 'all';
+    }
+    render(true);
+    restoreFocusBySelector('#records-date-jump');
+    return;
+  }
   if (e.target.id === 'pomo-target-sel') {
     pomodoroTargetId = e.target.value;
     pomoSession.targetId = pomodoroTargetId;
@@ -2638,9 +3699,14 @@ function syncPomoClock() {
   const el = $('#pomo-clock');
   if (el) el.textContent = formatTimer(left);
   const hint = $('#pomo-elapsed-hint');
-  if (hint) hint.textContent = '本轮已投入：' + Math.floor(elapsed / 60) + '分' + (elapsed % 60) + '秒 · 满 60 秒可精确记入';
+  if (hint) hint.textContent = '已专注 ' + Math.floor(elapsed / 60) + ' 分 ' + (elapsed % 60) + ' 秒 · 满 60 秒可记入';
   const finBtn = $('[data-action="pomo-finish"]');
   if (finBtn) finBtn.disabled = elapsed < 60 || pomoSession.state === 'saving';
+  const homeNote = $('#home-focus-note');
+  if (homeNote) {
+    const fm = getStudyFocusEntryMeta();
+    homeNote.textContent = fm.stateText ? ('专注计时：' + findTargetTitle(pomodoroTargetId) + ' · ' + fm.stateText) : '';
+  }
   const fc = getStudyFocusCharge();
   const lightHero = $('.poster-lightning');
   if (lightHero) lightHero.dataset.focusCharge = fc.chargeNorm.toFixed(3);
@@ -2699,8 +3765,8 @@ function openRecordEditModal(key) {
     + '<div class="form-grid-2">'
     + (isStudy
       ? '<div class="field-group"><label for="er-target">所属学习目标</label><select id="er-target">' + state.studyTargets.map(t => '<option value="' + esc(t.id) + '" ' + (t.id === rec.targetId ? 'selected' : '') + '>' + esc(t.title) + '</option>').join('') + '</select></div>'
-        + '<div class="field-group"><label for="er-min">专注时长（分钟，1–960）</label><input id="er-min" type="number" inputmode="numeric" autocomplete="off" min="1" max="960" value="' + esc(rec.minutes || Math.round((rec.hours || 1) * 60)) + '"></div>'
-      : '<div class="field-group"><label for="er-km">距离（km）</label><input id="er-km" type="number" inputmode="decimal" autocomplete="off" min="0.05" max="300" step="0.01" value="' + esc(rec.km) + '"></div>'
+        + '<div class="field-group"><label for="er-min">专注时长（分钟，1–960）</label><input id="er-min" type="number" inputmode="numeric" autocomplete="off" min="1" max="960" value="' + esc(studyMinutesOf(rec) || 60) + '"></div>'
+      : '<div class="field-group"><label for="er-km">距离（km，0.1–300）</label><input id="er-km" type="number" inputmode="decimal" autocomplete="off" min="0.1" max="300" step="0.01" value="' + esc(rec.km) + '"></div>'
         + '<div class="field-group"><label for="er-min">时长（分钟）</label><input id="er-min" type="number" inputmode="numeric" autocomplete="off" min="1" max="1440" value="' + esc(rec.minutes) + '"></div>')
     + '</div>'
     + '<div class="field-group"><label for="er-feel">' + (isStudy ? '专注度' : '体感') + '</label><select id="er-feel">' + feelsPool.map((f, idx) => '<option value="' + idx + '" ' + (idx === (rec.feel ?? rec.focus ?? 3) ? 'selected' : '') + '>' + f[0] + ' ' + f[1] + '</option>').join('') + '</select></div>'
@@ -2722,32 +3788,49 @@ function openRecordEditModal(key) {
     if (isStudy) {
       if (minVal > 960) { toast('单条学习不超过 960 分钟'); return false; }
       const newTid = $('#er-target').value;
-      const hoursVal = Math.round((minVal / 60) * 100) / 100;
+      const seconds = minVal === studyMinutesOf(rec) ? studySecondsOf(rec) : minVal * 60;
       const tObj = state.studyTargets.find(t => t.id === newTid);
-      patchPayload = { ...patchPayload, targetId: newTid, subject: tObj?.title || rec.subject, hours: hoursVal, seconds: minVal * 60, focus: feelVal };
+      patchPayload = normalizeStudyRecord({ ...patchPayload, targetId: newTid, subject: tObj?.title || rec.subject, seconds, focus: feelVal });
     } else {
       const kmVal = Math.round(Number($('#er-km').value) * 100) / 100;
-      if (!Number.isFinite(kmVal) || kmVal < 0.05 || kmVal > 300) { toast('距离需在 0.05–300 km 之间'); return false; }
+      if (!Number.isFinite(kmVal) || kmVal < 0.1 || kmVal > 300) { toast('跑步距离需在 0.1–300 km 之间'); return false; }
       patchPayload = { ...patchPayload, km: kmVal, feel: feelVal };
     }
 
+    const oldDate = beijingDateOf(rec);
     if (isServerOnline) {
       const res = await serverFetch('/records/' + kind + '/' + id, 'PATCH', patchPayload);
       if (!res.ok) { toast(res.error || '编辑失败'); return false; }
-      Object.assign(rec, res.record || patchPayload);
+      const merged = res.record || patchPayload;
+      Object.assign(rec, isStudy ? normalizeStudyRecord(merged) : merged, { syncStatus: 'synced', syncError: '' });
     } else {
-      Object.assign(rec, patchPayload);
+      Object.assign(rec, isStudy ? normalizeStudyRecord(patchPayload) : patchPayload, { syncStatus: 'local' });
     }
+    if (oldDate !== dateVal) {
+      selectedBarDate = dateVal;
+      if (recordSelectedDate === oldDate) {
+        const rangeMin = recordRangeFilter === '30d' ? dateShift(-29) : (recordRangeFilter === 'all' ? '0000-01-01' : dateShift(-6));
+        recordSelectedDate = dateVal >= rangeMin && dateVal <= today() ? dateVal : '';
+      }
+    }
+    recordSelectKey = (isStudy ? 'study:' : 'sport:') + rec.id;
     recomputeStudyTargetDoneHours();
     persistLocalOnly();
     render(true);
-    toast('记录已更新，统计与目标已同步重算！');
+    toast('记录已更新，两天汇总与目标已同步重算！');
   }, '保存修改 →');
 }
 
 /* ---------- Global Event Delegation ---------- */
 document.addEventListener('click', async e => {
-  const navButton = e.target.closest('[data-view]'); if (navButton) { navigate(navButton.dataset.view); return; }
+  const navButton = e.target.closest('[data-view]'); if (navButton) {
+    if (navButton.dataset.view === 'records' && view !== 'records') {
+      recordSelectedDate = '';
+      externalFilterNotice = '';
+    }
+    navigate(navButton.dataset.view);
+    return;
+  }
   if (e.target.closest('#btn-sync-to-cloud')) { syncLocalToCloud(); return; }
   if (e.target.closest('#open-ppb-demo')) { $('#editor').close(); openPixelProgressDemoModal(); return; }
   if (e.target.closest('#export-data') || e.target.closest('#export-before-import')) { exportData(); return; }
@@ -2850,23 +3933,55 @@ document.addEventListener('click', async e => {
     return;
   }
 
-  const qdot = e.target.closest('[data-quote]'); if (qdot) { e.stopPropagation(); quoteIndex = Number(qdot.dataset.quote); const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); initPixelMatrices(); syncMotion(); const qTheme = quotes[quoteIndex % quotes.length]?.[1]; if (qTheme === 'flame') triggerFlameSurge(950); else triggerLightningSurge(520); return; }
-  if (e.target.closest('#quote') && !e.target.closest('button')) { nextQuote(); syncMotion(); const qTheme = quotes[quoteIndex % quotes.length]?.[1]; if (qTheme === 'flame') triggerFlameSurge(950); else triggerLightningSurge(520); return; }
+  const qdot = e.target.closest('[data-quote]'); if (qdot) { e.stopPropagation(); quoteIndex = Number(qdot.dataset.quote); const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); initPixelMatrices(); syncMotion(); const qTheme = quotes[quoteIndex % quotes.length]?.[1]; if (qTheme === 'flame') triggerFlameSurge(950); else if (qTheme === 'storm') triggerStormSurge(3600); else if (qTheme === 'frost') triggerFrostSurge(3100); else triggerLightningSurge(520); return; }
+  if (e.target.closest('#quote') && !e.target.closest('button')) { nextQuote(); syncMotion(); const qTheme = quotes[quoteIndex % quotes.length]?.[1]; if (qTheme === 'flame') triggerFlameSurge(950); else if (qTheme === 'storm') triggerStormSurge(3600); else if (qTheme === 'frost') triggerFrostSurge(3100); else triggerLightningSurge(520); return; }
   if (!e.target.closest('button, a, input, [data-action]')) {
     if (e.target.closest('.poster-flame')) { triggerFlameSurge(1150); }
     else if (e.target.closest('.poster-lightning')) { triggerLightningSurge(950); }
+    else if (e.target.closest('.poster-storm')) { triggerStormSurge(3600); }
+    else if (e.target.closest('.poster-frost')) { triggerFrostSurge(3100); }
   }
 
   const b = e.target.closest('[data-action]'); if (!b) return;
   const a = b.dataset.action, v = b.dataset.value;
 
   if (a === 'checkin') { openCheckin(b.dataset.mode || 'sport', b.dataset.target || null, b.dataset.person || state.name); return; }
+  if (a === 'resume-draft') { openCheckin(b.dataset.mode || 'sport'); return; }
+  if (a === 'discard-draft') { clearSavedDraft(b.dataset.mode || 'sport'); render(true); toast('已丢弃未完成草稿'); return; }
+  if (a === 'retry-sync') { await retryPendingOps(v || null); return; }
   if (a === 'go-view') { navigate(v); return; }
+  if (a === 'go-today-records') {
+    const t = today();
+    recordKindFilter = 'all';
+    recordPersonFilter = 'mine';
+    recordSelectedDate = t;
+    selectedBarDate = t;
+    externalFilterNotice = '';
+    navigate('records');
+    return;
+  }
+  if (a === 'go-focus') {
+    navigate('study');
+    $('[data-action="study-focus-entry"]')?.click();
+    return;
+  }
+  if (a === 'study-focus-entry') {
+    if (['idle', 'saved', 'paused'].includes(pomoSession.state) && !pomoSession.errorMsg) {
+      $('[data-action="pomo-toggle"]')?.click();
+    }
+    requestAnimationFrame(() => {
+      const panel = $('#pomodoro-panel');
+      if (panel) panel.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+      const btn = $((pomoSession.state === 'completed' || pomoSession.errorMsg) ? '[data-action="pomo-finish"]' : '[data-action="pomo-toggle"]');
+      if (btn) btn.focus({ preventScroll: true });
+    });
+    return;
+  }
   if (a === 'toggle-home-bp') { homeBpMode = homeBpMode === 'track' ? 'study' : 'track'; render(true); return; }
   if (a === 'radar-axis') { radarFocusAxis = v; render(true); toast('四维聚焦：' + v); return; }
   if (a === 'home-pick-target') { navigate('study'); toast('已定位到学习目标：' + findTargetTitle(v)); return; }
   if (a === 'bp-focus') { if (!focusAppleRing(v, b.closest('.apple-rings-panel'))) render(true); return; }
-  if (a === 'quote-next') { nextQuote(); syncMotion(); const qTheme = quotes[quoteIndex % quotes.length]?.[1]; if (qTheme === 'flame') triggerFlameSurge(950); else triggerLightningSurge(520); return; }
+  if (a === 'quote-next') { nextQuote(); syncMotion(); const qTheme = quotes[quoteIndex % quotes.length]?.[1]; if (qTheme === 'flame') triggerFlameSurge(950); else if (qTheme === 'storm') triggerStormSurge(3600); else if (qTheme === 'frost') triggerFrostSurge(3100); else triggerLightningSurge(520); return; }
   if (a === 'open-ppb-demo') { openPixelProgressDemoModal(); return; }
 
   if (a === 'chart-person') { chartPersonFilter = v; selectedNodeKey = ''; render(true); return; }
@@ -2882,14 +3997,80 @@ document.addEventListener('click', async e => {
     selectedBucket = (selectedBucket && selectedBucket.mode === m && selectedBucket.idx === idx) ? null : { mode: m, idx };
     render(true); return;
   }
-  if (a === 'open-record') { recordSelectKey = v; navigate('records'); return; }
+  if (a === 'open-record') { openExternalRecord(v, b.dataset.focusKey ? ('[data-focus-key="' + b.dataset.focusKey + '"]') : ''); return; }
 
-  if (a === 'rank-period') { rankPeriod = v; render(true); return; }
-  if (a === 'rank-metric') { rankMetric = v; render(true); return; }
+  if (a === 'rank-period' || a === 'rank-metric') {
+    if (a === 'rank-period') rankPeriod = v;
+    else rankMetric = v;
+    render(true);
+    restoreFocusBySelector('[data-action="' + a + '"][data-value="' + v + '"]');
+    return;
+  }
   if (a === 'rank-chart-mode') { rankChartMode = v === '学习专注对比' ? 'study' : 'sport'; selectedNodeKey = ''; render(true); return; }
 
   if (a === 'chart-type') { chartType = v; selectedChartNote = ''; render(true); return; }
-  if (a === 'record-kind') { recordKindFilter = v === '运动' ? 'sport' : v === '学习' ? 'study' : 'all'; selectedChartNote = ''; selectedBucket = null; render(true); return; }
+  if (a === 'more-chart-type') { recordsMoreChartType = v; selectedChartNote = ''; selectedBucket = null; render(true); restoreFocusBySelector('[data-action="more-chart-type"][data-value="' + v + '"]'); return; }
+  if (a === 'toggle-more-analytics') { recordsMoreOpen = !recordsMoreOpen; render(true); restoreFocusBySelector('[data-action="toggle-more-analytics"]'); return; }
+  if (a === 'record-kind' || a === 'set-record-kind') {
+    recordKindFilter = (v === '运动' || v === 'sport') ? 'sport' : (v === '学习' || v === 'study') ? 'study' : 'all';
+    selectedChartNote = ''; selectedBucket = null; externalFilterNotice = '';
+    render(true);
+    restoreFocusBySelector('[data-action="set-record-kind"][data-value="' + recordKindFilter + '"]');
+    return;
+  }
+  if (a === 'set-record-person') {
+    recordPersonFilter = v === 'all' ? 'all' : 'mine';
+    selectedChartNote = ''; selectedBucket = null; externalFilterNotice = '';
+    render(true);
+    restoreFocusBySelector('[data-action="set-record-person"][data-value="' + recordPersonFilter + '"]');
+    return;
+  }
+  if (a === 'set-record-range') {
+    recordRangeFilter = (v === '30d' || v === 'all') ? v : '7d';
+    if (recordSelectedDate && recordRangeFilter !== 'all') {
+      const rMin = recordRangeFilter === '30d' ? dateShift(-29) : dateShift(-6);
+      if (recordSelectedDate < rMin) recordSelectedDate = '';
+    }
+    selectedChartNote = ''; selectedBucket = null; externalFilterNotice = '';
+    render(true);
+    restoreFocusBySelector('[data-action="set-record-range"][data-value="' + recordRangeFilter + '"]');
+    return;
+  }
+  if (a === 'set-record-trend') {
+    recordTrendMode = v === 'cum' ? 'cum' : 'daily';
+    render(true);
+    restoreFocusBySelector('[data-action="set-record-trend"][data-value="' + recordTrendMode + '"]');
+    return;
+  }
+  if (a === 'select-date-bar') {
+    recordSelectedDate = v;
+    selectedBarDate = v;
+    render(true);
+    restoreFocusBySelector('[data-action="select-date-bar"][data-value="' + v + '"]');
+    return;
+  }
+  if (a === 'clear-date-filter') {
+    recordSelectedDate = '';
+    render(true);
+    restoreFocusBySelector('#records-date-jump');
+    return;
+  }
+  if (a === 'reset-filter-default') {
+    recordKindFilter = 'all'; recordPersonFilter = 'mine'; recordRangeFilter = '7d';
+    recordTrendMode = 'daily'; recordSelectedDate = ''; externalFilterNotice = '';
+    render(true);
+    restoreFocusBySelector('[data-action="set-record-kind"][data-value="all"]');
+    toast('已恢复默认筛选（我 · 近 7 天 · 每日量）');
+    return;
+  }
+  if (a === 'open-receipt-modal') {
+    const fKey = b.dataset.focusKey;
+    const focusSel = fKey ? ('[data-focus-key="' + fKey + '"]') : ('.wall-card[data-value="' + v + '"]');
+    recordSelectKey = v;
+    render(true);
+    openReceiptDialog(v, focusSel);
+    return;
+  }
   if (a === 'ach-filter') { achFilter = v; render(true); return; }
 
   if (a === 'goal') { state.goal = Math.max(5, Math.min(10000, state.goal + Number(v))); persist(true); render(true); return; }
@@ -2921,36 +4102,55 @@ document.addEventListener('click', async e => {
   }
 
   if (a === 'quick-study') {
-    const [tid, hStr] = v.split(':'); const hrs = Number(hStr);
+    if (b.disabled) return;
+    const [tid, hStr] = v.split(':'); const hrsRaw = Number(hStr);
     const tObj = state.studyTargets.find(x => x.id === tid);
     if (tObj) {
-      const minutes = Math.round(hrs * 60);
-      const qRec = {
+      b.disabled = true;
+      const opId = nextOpId('quick');
+      const sec = Math.round(hrsRaw * 3600);
+      const qRec = normalizeStudyRecord({
         id: Date.now(), person: state.name, date: today(),
         time: pad(chinaNow().getHours()) + ':' + pad(chinaNow().getMinutes()),
-        hours: hrs, minutes, seconds: minutes * 60, source: 'quick', operationId: nextOpId('quick'),
+        seconds: sec, source: 'quick', operationId: opId,
         focus: 3, targetId: tid, subject: tObj.title,
-        note: '快捷专注记录 +' + hrs + 'h', tags: ['深度工作'], likes: 0, liked: false
-      };
+        note: '快捷专注记录 +' + hrsRaw + 'h', tags: ['深度工作'], likes: 0, liked: false,
+        syncStatus: isServerOnline ? 'pending' : 'local', syncError: ''
+      });
       if (isServerOnline) {
-        const res = await serverFetch('/records/study', 'POST', qRec);
-        if (!res.ok) { toast('保存失败：' + (res.error || '请稍后重试')); return; }
-        if (res.record) Object.assign(qRec, res.record);
+        const res = await serverFetch('/records/study', 'POST', { ...qRec, room: currentRoomCode });
+        if (!res.ok) {
+          qRec.syncStatus = 'failed';
+          qRec.syncError = res.error || '服务器未响应';
+          insertLocalRecordDedup('study', qRec);
+          enqueuePendingOp({ operationId: opId, kind: 'study', recordId: qRec.id, endpoint: '/records/study', method: 'POST', payload: qRec, status: 'failed', lastError: qRec.syncError });
+          persistLocalOnly();
+          b.disabled = false;
+          render(true);
+          toast('同步失败：' + qRec.syncError + '（已暂存本机，可点击重试同步）');
+          return;
+        }
+        if (res.record) Object.assign(qRec, normalizeStudyRecord(res.record));
+        qRec.syncStatus = 'synced';
+        qRec.syncError = '';
+      } else {
+        enqueuePendingOp({ operationId: opId, kind: 'study', recordId: qRec.id, endpoint: '/records/study', method: 'POST', payload: qRec, status: 'pending', lastError: '' });
       }
-      state.studyRecords.unshift(qRec);
+      insertLocalRecordDedup('study', qRec);
       const hbArr = state.habitLogs[today()] || [];
       if (state.habits.some(h => h.id === 'hb-3') && !hbArr.includes('hb-3')) state.habitLogs[today()] = [...hbArr, 'hb-3'];
       recomputeStudyTargetDoneHours();
       newlyArchivedRecordKey = 'study:' + qRec.id;
       recordSelectKey = newlyArchivedRecordKey;
       persistLocalOnly();
+      b.disabled = false;
       triggerElectricSweep(2600);
       triggerArenaSprint(2600);
       triggerLightningSurge(2000);
       triggerFlameSurge(1800);
       render(true);
-      triggerCheckinFeedback({ mode: 'study', value: hrs.toFixed(1), unit: 'H', title: tObj.title, person: state.name, goalHit: totalStudy(monthly(mineStudy())) >= state.studyGoal, recordKey: newlyArchivedRecordKey });
-      celebrate(); toast('已为「' + tObj.title + '」记入 ' + hrs + ' 小时！');
+      triggerCheckinFeedback({ mode: 'study', value: String(studyMinutesOf(qRec)), unit: '分钟', title: tObj.title, person: state.name, goalHit: totalStudy(monthly(mineStudy())) >= state.studyGoal, recordKey: newlyArchivedRecordKey, syncStatus: qRec.syncStatus, operationId: qRec.operationId });
+      celebrate();
     }
     return;
   }
@@ -3043,57 +4243,102 @@ document.addEventListener('click', async e => {
     pomodoroLeft = pomoSession.totalSec;
     savePomoSession(); render(true); return;
   }
-  if (a === 'pomo-finish') {
+  if (a === 'pomo-save-local') {
     const elapsedSec = getPomoElapsedSec();
     if (elapsedSec < 60) { toast('专注不足 60 秒（当前 ' + elapsedSec + ' 秒），满 60 秒后可记入'); return; }
-    if (pomoSession.state === 'saving') return;
-    stopPomodoro('saving');
-    pomoSession.errorMsg = '';
-    savePomoSession(); render(true);
-
+    const opId = pomoSession.sessionId || nextOpId('pomo');
     const tObj = state.studyTargets.find(x => x.id === pomodoroTargetId) || state.studyTargets[0];
-    const minutes = Math.max(1, Math.round(elapsedSec / 60));
-    const hrs = Math.round((elapsedSec / 3600) * 100) / 100;
-    const pRec = {
+    const pRec = normalizeStudyRecord({
       id: Date.now(), person: state.name, date: today(),
       time: pad(chinaNow().getHours()) + ':' + pad(chinaNow().getMinutes()),
-      hours: hrs, minutes, seconds: elapsedSec, source: 'pomodoro',
-      sessionId: pomoSession.sessionId, operationId: pomoSession.sessionId,
-      focus: 4, targetId: tObj?.id || 'st-1', subject: tObj?.title || '番茄专注',
-      note: '实测番茄专注 ' + Math.floor(elapsedSec / 60) + ' 分 ' + (elapsedSec % 60) + ' 秒。',
-      tags: ['番茄钟', '无手机'], likes: 0, liked: false
-    };
-    if (isServerOnline) {
-      const res = await serverFetch('/records/study', 'POST', pRec);
-      if (!res.ok) {
-        pomoSession.state = 'paused';
-        pomoSession.errorMsg = '服务器保存失败：' + (res.error || '请稍后重试') + '（已保留计时）';
-        savePomoSession(); render(true);
-        toast('保存失败，当前专注已保留');
-        return;
-      }
-      if (res.record) Object.assign(pRec, res.record);
-    }
-    if (!state.studyRecords.some(r => r.sessionId === pRec.sessionId || r.id === pRec.id)) {
-      state.studyRecords.unshift(pRec);
-    }
+      seconds: elapsedSec, source: 'pomodoro',
+      sessionId: opId, operationId: opId,
+      focus: 4, targetId: tObj?.id || 'st-1', subject: tObj?.title || '专注计时',
+      note: '专注 ' + Math.floor(elapsedSec / 60) + ' 分 ' + (elapsedSec % 60) + ' 秒。',
+      tags: ['番茄钟'], likes: 0, liked: false,
+      syncStatus: isServerOnline ? 'pending' : 'local', syncError: ''
+    });
+    enqueuePendingOp({ operationId: opId, kind: 'study', recordId: pRec.id, endpoint: '/records/study', method: 'POST', payload: pRec, status: 'pending', lastError: '' });
+    insertLocalRecordDedup('study', pRec);
     const hbArr = state.habitLogs[today()] || [];
     if (state.habits.some(h => h.id === 'hb-3') && !hbArr.includes('hb-3')) state.habitLogs[today()] = [...hbArr, 'hb-3'];
     recomputeStudyTargetDoneHours();
     newlyArchivedRecordKey = 'study:' + pRec.id;
     recordSelectKey = newlyArchivedRecordKey;
     persistLocalOnly();
+    stopPomodoro('idle');
     pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
     pomodoroLeft = pomoSession.totalSec;
     savePomoSession();
     triggerElectricSweep(2800);
     triggerArenaSprint(2600);
     triggerLightningSurge(2000);
-    triggerFlameSurge(1800);
     render(true);
-    triggerCheckinFeedback({ mode: 'study', value: hrs.toFixed(2), unit: 'H', title: pRec.subject || '番茄专注', person: state.name, goalHit: totalStudy(monthly(mineStudy())) >= state.studyGoal, recordKey: newlyArchivedRecordKey });
+    triggerCheckinFeedback({ mode: 'study', value: String(pRec.minutes), unit: '分钟', title: pRec.subject || '专注计时', person: state.name, goalHit: totalStudy(monthly(mineStudy())) >= state.studyGoal, recordKey: newlyArchivedRecordKey, syncStatus: pRec.syncStatus, operationId: pRec.operationId });
     celebrate();
-    toast('专注保存成功！记入 ' + minutes + ' 分钟 (' + hrs.toFixed(2) + ' h)');
+    return;
+  }
+  if (a === 'pomo-finish') {
+    const elapsedSec = getPomoElapsedSec();
+    if (elapsedSec < 60) { toast('专注不足 60 秒（当前 ' + elapsedSec + ' 秒），满 60 秒后可记入'); return; }
+    const opId = pomoSession.sessionId || nextOpId('pomo');
+    if (pomoSession.state === 'saving' || inFlightOpIds.has(opId)) return;
+    if (pomoSession.state === 'running' && !pomoSession.pauseStartedAt) {
+      pomoSession.pauseStartedAt = Date.now();
+    }
+    pomoSession.sessionId = opId;
+    stopPomodoro('saving');
+    pomoSession.errorMsg = '';
+    inFlightOpIds.add(opId);
+    savePomoSession(); render(true);
+
+    const tObj = state.studyTargets.find(x => x.id === pomodoroTargetId) || state.studyTargets[0];
+    const pRec = normalizeStudyRecord({
+      id: Date.now(), person: state.name, date: today(),
+      time: pad(chinaNow().getHours()) + ':' + pad(chinaNow().getMinutes()),
+      seconds: elapsedSec, source: 'pomodoro',
+      sessionId: opId, operationId: opId,
+      focus: 4, targetId: tObj?.id || 'st-1', subject: tObj?.title || '专注计时',
+      note: '专注 ' + Math.floor(elapsedSec / 60) + ' 分 ' + (elapsedSec % 60) + ' 秒。',
+      tags: ['番茄钟'], likes: 0, liked: false,
+      syncStatus: isServerOnline ? 'pending' : 'local', syncError: ''
+    });
+    try {
+      if (isServerOnline) {
+        const res = await serverFetch('/records/study', 'POST', { ...pRec, room: currentRoomCode });
+        if (!res.ok) {
+          pomoSession.state = 'paused';
+          pomoSession.errorMsg = '同步失败：' + (res.error || '服务器未响应') + '（已保留计时、目标与原操作编号）';
+          savePomoSession(); render(true);
+          return;
+        }
+        if (res.record) Object.assign(pRec, normalizeStudyRecord(res.record));
+        pRec.syncStatus = 'synced';
+        pRec.syncError = '';
+      } else {
+        pRec.syncStatus = 'local';
+        enqueuePendingOp({ operationId: opId, kind: 'study', recordId: pRec.id, endpoint: '/records/study', method: 'POST', payload: pRec, status: 'pending', lastError: '' });
+      }
+      insertLocalRecordDedup('study', pRec);
+      const hbArr = state.habitLogs[today()] || [];
+      if (state.habits.some(h => h.id === 'hb-3') && !hbArr.includes('hb-3')) state.habitLogs[today()] = [...hbArr, 'hb-3'];
+      recomputeStudyTargetDoneHours();
+      newlyArchivedRecordKey = 'study:' + pRec.id;
+      recordSelectKey = newlyArchivedRecordKey;
+      persistLocalOnly();
+      pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+      pomodoroLeft = pomoSession.totalSec;
+      savePomoSession();
+      triggerElectricSweep(2800);
+      triggerArenaSprint(2600);
+      triggerLightningSurge(2000);
+      triggerFlameSurge(1800);
+      render(true);
+      triggerCheckinFeedback({ mode: 'study', value: String(pRec.minutes), unit: '分钟', title: pRec.subject || '专注计时', person: state.name, goalHit: totalStudy(monthly(mineStudy())) >= state.studyGoal, recordKey: newlyArchivedRecordKey, syncStatus: pRec.syncStatus, operationId: pRec.operationId });
+      celebrate();
+    } finally {
+      inFlightOpIds.delete(opId);
+    }
     return;
   }
 
@@ -3176,11 +4421,17 @@ document.addEventListener('click', async e => {
 
   if (a === 'flip') { b.classList.toggle('flipped'); b.setAttribute('aria-pressed', b.classList.contains('flipped')); return; }
 
-  const curList = allUnifiedRecords(recordKindFilter);
+  const navDataset = getRecordsPageDataset();
+  const curList = navDataset.displayList;
   const curIdx = Math.max(0, curList.findIndex(x => x._key === recordSelectKey));
   if (a === 'record-prev' && curIdx > 0) { recordSelectKey = curList[curIdx - 1]._key; render(true); return; }
   if (a === 'record-next' && curIdx < curList.length - 1) { recordSelectKey = curList[curIdx + 1]._key; render(true); return; }
-  if (a === 'record-select') { recordSelectKey = v; render(true); return; }
+  if (a === 'record-select') {
+    recordSelectKey = v;
+    render(true);
+    openReceiptDialog(v, '.wall-card[data-value="' + v + '"]');
+    return;
+  }
 
   if (a === 'like-unified') {
     const [kind, idStr] = v.split(':'), id = Number(idStr);
@@ -3205,7 +4456,7 @@ document.addEventListener('click', async e => {
       if (kind === 'study') state.studyRecords = state.studyRecords.filter(x => x.id !== id);
       else state.records = state.records.filter(x => x.id !== id);
       recomputeStudyTargetDoneHours();
-      recordSelectKey = ''; selectedNodeKey = ''; persistLocalOnly(); render(true); toast('这条记录已删除。');
+      recordSelectKey = ''; selectedNodeKey = ''; closeReceiptDialog(); persistLocalOnly(); render(true); toast('这条记录已删除。');
     }, '删除记录');
     return;
   }
@@ -3227,111 +4478,243 @@ document.addEventListener('click', async e => {
 });
 
 /* ---------- Unified 5-Step Check-in Modal (Sport + Study + Multi-Person Co-Check-in) ---------- */
-function openCheckin(mode = 'sport', targetId = null, personName = state.name) {
-  modalPreviousFocus = document.activeElement;
-  step = 0;
+function createFreshDraft(mode = 'sport', targetId = null, personName = state.name) {
   const tid = targetId || state.studyTargets[0]?.id || 'st-1';
   const validPerson = allMembers().includes(personName) ? personName : state.name;
-  draft = {
+  return {
     mode,
     person: validPerson,
     km: 5,
-    hours: 1.5,
+    ...(mode === 'study' ? { seconds: 90 * 60 } : { seconds: 30 * 60, minutes: 30, hours: 0.5 }),
     targetId: tid,
-    minutes: mode === 'study' ? 90 : 30,
     feel: null,
     tags: [],
     note: '',
     photo: '',
+    photoStorage: '',
+    photoUploading: false,
+    photoRestoreWarning: false,
     operationId: nextOpId('chk'),
     saving: false,
+    saveState: '',
+    saveError: '',
+    restoredFromDraft: false,
     time: pad(chinaNow().getHours()) + ':' + pad(chinaNow().getMinutes())
   };
+}
+
+function openCheckin(mode = 'sport', targetId = null, personName = state.name, opts = {}) {
+  modalPreviousFocus = document.activeElement;
+  modalPreviousFocusSelector = buildStableFocusSelector(modalPreviousFocus);
+  const saved = (!opts || !opts.fresh) ? getSavedDraft(mode) : null;
+  if (saved) {
+    draft = {
+      ...createFreshDraft(mode, targetId || saved.targetId, personName || saved.person),
+      ...saved,
+      mode,
+      person: allMembers().includes(saved.person) ? saved.person : state.name,
+      targetId: targetId || saved.targetId || state.studyTargets[0]?.id || 'st-1',
+      saving: false,
+      photoUploading: false,
+      photoRestoreWarning: false,
+      restoredFromDraft: true
+    };
+    step = Math.max(0, Math.min(4, Number(saved.step) || 0));
+    if (step === 4 && draft.feel === null) step = 3;
+    if (saved.photoInIdb && !draft.photo) {
+      const key = draftStorageKey(mode);
+      const restoreOpId = draft.operationId;
+      draftPhotoIdbGet(key).then(dataUrl => {
+        if (!draft || draft.operationId !== restoreOpId) return;
+        if (dataUrl) {
+          draft.photo = dataUrl;
+          draft.photoRestoreWarning = false;
+        } else {
+          draft.photoRestoreWarning = true;
+        }
+        drawModal();
+      });
+    }
+  } else {
+    step = 0;
+    draft = createFreshDraft(mode, targetId, personName);
+  }
   $('#app').inert = true; drawModal();
 }
-function closeCheckin() { draft = null; $('#modal-root').innerHTML = ''; $('#app').inert = false; modalPreviousFocus?.focus(); }
+
+function syncDraftFromDom() {
+  if (!draft) return;
+  if (step === 1) {
+    if (draft.mode === 'study') {
+      const hEl = $('#hours-input');
+      if (hEl) {
+        const h = Number(hEl.value);
+        if (Number.isFinite(h) && h >= 1 / 60 && h <= 16 && h !== draftStudyHoursInputValue()) setDraftStudySeconds(h * 3600);
+      }
+      const tEl = $('#study-target-select');
+      if (tEl && tEl.value) draft.targetId = tEl.value;
+    } else {
+      const dEl = $('#distance-input');
+      if (dEl) {
+        const n = Number(dEl.value);
+        if (Number.isFinite(n) && n >= 0.1 && n <= 300) draft.km = Math.round(n * 100) / 100;
+      }
+    }
+  }
+  if (step === 2) {
+    const mEl = $('#minutes-input');
+    if (mEl) {
+      const n = Number(mEl.value);
+      if (draft.mode === 'study') {
+        if (Number.isFinite(n) && n >= 1 && n <= 960 && n !== studyMinutesOf(draft)) setDraftStudySeconds(Math.round(n) * 60);
+      } else if (Number.isFinite(n) && n >= 1 && n <= 1440) {
+        draft.minutes = Math.round(n);
+        draft.seconds = draft.minutes * 60;
+      }
+    }
+    const stEl = $('#start-time');
+    if (stEl && stEl.value) draft.time = stEl.value;
+  }
+  if (step === 3) {
+    const nEl = $('#run-note');
+    if (nEl) draft.note = nEl.value.trim();
+  }
+}
+
+function closeCheckin(opts = {}) {
+  const discard = Boolean(opts && opts.discard);
+  const prevMode = draft ? draft.mode : null;
+  if (draft) {
+    if (discard) {
+      clearSavedDraft(draft.mode);
+    } else {
+      syncDraftFromDom();
+      persistCheckinDraft(draft, step);
+    }
+  }
+  draft = null;
+  $('#modal-root').innerHTML = '';
+  $('#app').inert = false;
+  if (!discard && prevMode) render(true);
+  if (modalPreviousFocus && modalPreviousFocus.isConnected && typeof modalPreviousFocus.focus === 'function') {
+    try { modalPreviousFocus.focus({ preventScroll: true }); } catch { try { modalPreviousFocus.focus(); } catch {} }
+  } else if (modalPreviousFocusSelector) {
+    restoreFocusBySelector(modalPreviousFocusSelector);
+  }
+}
 
 function readStep() {
   if (step === 1) {
     if (draft.mode === 'study') {
       const h = Number($('#hours-input').value);
-      if (!Number.isFinite(h) || h < 0.2 || h > 16) { toast('学习时长请填 0.2–16 小时。'); return false; }
-      draft.hours = Math.round(h * 10) / 10;
-      draft.minutes = Math.round(draft.hours * 60);
+      if (!Number.isFinite(h) || h < 1 / 60 || h > 16) { toast('学习时长须在 1 分钟至 16 小时之间。'); return false; }
+      if (h !== draftStudyHoursInputValue()) setDraftStudySeconds(h * 3600);
       draft.targetId = $('#study-target-select')?.value || draft.targetId;
     } else {
       const n = Number($('#distance-input').value);
-      if (!Number.isFinite(n) || n < .1 || n > 300) { toast('距离请填 0.1–300 km。'); return false; }
+      if (!Number.isFinite(n) || n < 0.1 || n > 300) { toast('跑步距离请填 0.1–300 km。'); return false; }
       draft.km = Math.round(n * 100) / 100;
     }
   }
   if (step === 2) {
     const n = Number($('#minutes-input').value);
-    if (!Number.isFinite(n) || n < 1 || n > 1440) { toast('时长请填 1–1440 分钟。'); return false; }
-    draft.minutes = Math.round(n); draft.time = $('#start-time').value || draft.time;
+    if (draft.mode === 'study') {
+      if (!Number.isFinite(n) || n < 1 || n > 960) { toast('学习时长请填 1–960 分钟。'); return false; }
+      // Keep exact seconds when the minute field only shows a rounded conversion.
+      if (n !== studyMinutesOf(draft)) setDraftStudySeconds(Math.round(n) * 60);
+    } else {
+      if (!Number.isFinite(n) || n < 1 || n > 1440) { toast('时长请填 1–1440 分钟。'); return false; }
+      draft.minutes = Math.round(n);
+      draft.seconds = draft.minutes * 60;
+    }
+    draft.time = $('#start-time').value || draft.time;
   }
   if (step === 3) {
     draft.note = $('#run-note').value.trim();
     if (draft.feel === null) { toast(draft.mode === 'study' ? '选一个今天的学习专注度吧。' : '选一个今天的跑步感觉吧。'); return false; }
   }
+  persistCheckinDraft(draft, step);
   return true;
 }
 
 function stepMarkup() {
   const isStudy = draft.mode === 'study';
-  const modeBar = '<div class="modal-mode-switch">'
+  const draftBanner = draft.restoredFromDraft
+    ? '<div class="ck-draft-banner" role="status"><span>已恢复草稿</span><button type="button" class="ck-btn ck-btn-ghost" data-modal="discard-draft">丢弃草稿</button></div>'
+    : '';
+  const modeBar = draftBanner + '<div class="modal-mode-switch">'
     + '<button type="button" class="' + (!isStudy ? 'active' : '') + '" data-modal="switch-mode" data-value="sport">🏃 运动打卡</button>'
     + '<button type="button" class="' + (isStudy ? 'active' : '') + '" data-modal="switch-mode" data-value="study">📚 学习打卡</button>'
     + '</div>'
-    + '<div class="modal-person-row"><span>打卡人：</span>'
+    + '<div class="modal-person-row"><span>打卡人</span>'
     + allMembers().map(m => '<button type="button" class="mp-pill ' + (draft.person === m ? 'active' : '') + '" style="--mclr:' + memberColor(m) + '" data-modal="switch-person" data-value="' + esc(m) + '">' + esc(m) + (m === state.name ? ' (我)' : '') + '</button>').join('')
     + '</div>';
 
   if (step === 0) {
-    return modeBar + '<h3>SNAP</h3><p class="step-description">' + (isStudy ? '拍一张书桌笔记、自习室或学习界面截图。' : '拍张跑步照片，或者跑步 App 的截图。') + '</p>'
-      + '<label class="photo-drop ' + (draft.photo ? 'has-photo' : '') + '" for="photo-file">' + (draft.photo ? '<img src="' + draft.photo + '" alt="已选打卡照片">' : '') + '<span class="camera-disc"><svg viewBox="0 0 36 36"><path d="M5 11h7l3-4h7l3 4h6v20H5z"/><circle cx="18" cy="21" r="7"/></svg></span><span>' + (draft.photo ? '点击更换照片' : '点这里选照片') + '</span></label>'
+    const pHint = photoStorageHint(draft);
+    const pCls = draft.photoUploading ? 'is-pending' : (draft.photo && (draft.photo.startsWith('/uploads/') || (draft.photo.startsWith('http://') || draft.photo.startsWith('https://')))) ? 'is-synced' : (draft.photoStorage === 'local-fallback' || draft.photoRestoreWarning) ? 'is-warn' : 'is-local';
+    return modeBar + '<h3>照片</h3>'
+      + '<label class="photo-drop ' + (draft.photo ? 'has-photo' : '') + '" for="photo-file">' + (draft.photo ? '<img src="' + draft.photo + '" alt="已选打卡照片">' : '') + '<span class="camera-disc"><svg viewBox="0 0 36 36"><path d="M5 11h7l3-4h7l3 4h6v20H5z"/><circle cx="18" cy="21" r="7"/></svg></span><span>' + (draft.photoUploading ? '正在上传…' : (draft.photo ? '点击更换照片' : '点这里选照片')) + '</span></label>'
       + '<input type="file" id="photo-file" accept="image/*" hidden><input type="file" id="camera-file" accept="image/*" capture="environment" hidden>'
       + '<div class="photo-buttons"><button type="button" data-modal="camera">▣ 直接拍照</button><button type="button" data-modal="album">▧ 从相册选</button></div>'
-      + '<button type="button" class="skip-photo" data-modal="next">先跳过照片，继续打卡 →</button>'
-      + '<p class="hint">照片只保存在当前浏览器，可在记录档案中查看。</p>';
+      + '<button type="button" class="skip-photo" data-modal="next">跳过照片</button>'
+      + '<p class="hint ck-photo-hint ' + pCls + '" id="ck-photo-storage-hint">' + esc(pHint) + '</p>';
   }
   if (step === 1) {
     if (isStudy) {
-      return modeBar + '<h3>STUDY HOURS</h3><p class="step-description">专注学习了多久？选择所属学习目标与时长。</p>'
+      const sMin = studyMinutesOf(draft), sSec = draft.seconds;
+      const sHrs = draftStudyHoursInputValue();
+      return modeBar + '<h3>学习时长</h3>'
         + '<select id="study-target-select" class="modal-target-select">' + state.studyTargets.map(t => '<option value="' + esc(t.id) + '" ' + (t.id === draft.targetId ? 'selected' : '') + '>目标：' + esc(t.title) + '</option>').join('') + '</select>'
-        + '<input id="hours-input" class="big-input" type="number" inputmode="decimal" autocomplete="off" min=".2" max="16" step=".1" value="' + draft.hours.toFixed(1) + '" aria-label="学习时长，小时"><div class="input-unit">HOURS</div>'
-        + '<div class="segments">' + [-1, -0.5, 0.5, 1].map(n => '<button data-modal="hours-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + '</button>').join('') + '</div>'
-        + '<div class="pills">' + [0.5, 1, 1.5, 2, 3].map(n => '<button class="pill ' + (draft.hours === n ? 'selected' : '') + '" data-modal="hours-set" data-value="' + n + '">' + n + 'h</button>').join('') + '</div>';
+        + '<input id="hours-input" class="big-input" type="number" inputmode="decimal" autocomplete="off" min="' + (1 / 60) + '" max="16" step="any" value="' + sHrs + '" aria-label="学习时长，小时"><div class="input-unit">小时</div>'
+        + '<div class="ck-derived-duration" id="ck-study-derived"><strong>' + sMin + ' 分钟</strong>（' + sSec + ' 秒）</div>'
+        + '<div class="segments">' + [-1, -0.5, 0.5, 1].map(n => '<button type="button" data-modal="hours-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + '</button>').join('') + '</div>'
+        + '<div class="pills">' + [0.5, 1, 1.5, 2, 3].map(n => '<button type="button" class="pill ' + (n * 3600 === sSec ? 'selected' : '') + '" data-modal="hours-set" data-value="' + n + '">' + n + 'h</button>').join('') + '</div>';
     }
-    return modeBar + '<h3>DISTANCE</h3><p class="step-description">跑了多远？点按钮调，或者选一个常用距离。</p>'
-      + '<input id="distance-input" class="big-input" type="number" inputmode="decimal" autocomplete="off" min=".1" max="300" step=".01" value="' + draft.km.toFixed(2) + '" aria-label="跑步距离，公里"><div class="input-unit">KILOMETERS</div>'
-      + '<div class="segments">' + [-1, -.1, .1, 1].map(n => '<button data-modal="distance-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + '</button>').join('') + '</div>'
-      + '<div class="pills">' + [3, 5, 8, 10, 21.1].map(n => '<button class="pill ' + (draft.km === n ? 'selected' : '') + '" data-modal="distance-set" data-value="' + n + '">' + (n === 21.1 ? '半马' : n + 'K') + '</button>').join('') + '</div>';
+    return modeBar + '<h3>距离</h3>'
+      + '<input id="distance-input" class="big-input" type="number" inputmode="decimal" autocomplete="off" min="0.1" max="300" step="0.01" value="' + draft.km.toFixed(2) + '" aria-label="跑步距离，公里"><div class="input-unit">公里</div>'
+      + '<div class="segments">' + [-1, -0.1, 0.1, 1].map(n => '<button type="button" data-modal="distance-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + '</button>').join('') + '</div>'
+      + '<div class="pills">' + [3, 5, 8, 10, 21.1].map(n => '<button type="button" class="pill ' + (draft.km === n ? 'selected' : '') + '" data-modal="distance-set" data-value="' + n + '">' + (n === 21.1 ? '半马' : n + 'K') + '</button>').join('') + '</div>';
   }
   if (step === 2) {
-    return '<h3>TIME</h3><p class="step-description">' + (isStudy ? '确认实际投入分钟数与开始学习时间。' : '不必赶时间，跑出自己的节奏。') + '</p>'
-      + '<input id="minutes-input" class="big-input" type="number" inputmode="numeric" autocomplete="off" min="1" max="1440" step="1" value="' + draft.minutes + '" aria-label="时长，分钟"><div class="input-unit">MINUTES</div>'
-      + '<div class="segments">' + [-15, -5, 5, 15].map(n => '<button data-modal="minutes-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + ' min</button>').join('') + '</div>'
-      + '<label class="hint" for="start-time" style="display:block;margin-top:25px">开始时间</label>'
+    const sMin = isStudy ? studyMinutesOf(draft) : draft.minutes;
+    const sHrs = isStudy ? studyHoursOf(draft) : 0;
+    const sSec = isStudy ? studySecondsOf(draft) : (draft.minutes * 60);
+    return draftBanner + '<h3>时长</h3>'
+      + '<input id="minutes-input" class="big-input" type="number" inputmode="numeric" autocomplete="off" min="1" max="' + (isStudy ? '960' : '1440') + '" step="1" value="' + sMin + '" aria-label="时长，分钟"><div class="input-unit">分钟</div>'
+      + (isStudy ? '<div class="ck-derived-duration" id="ck-study-min-derived"><strong>' + sHrs.toFixed(2) + ' 小时</strong>（' + sSec + ' 秒）</div>' : '')
+      + '<div class="segments">' + [-15, -5, 5, 15].map(n => '<button type="button" data-modal="minutes-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + ' min</button>').join('') + '</div>'
+      + (isStudy ? '<div class="pills">' + [25, 45, 60, 90].map(n => '<button type="button" class="pill ' + (sMin === n ? 'selected' : '') + '" data-modal="minutes-set" data-value="' + n + '">' + n + ' 分钟</button>').join('') + '</div>' : '')
+      + '<label class="hint" for="start-time" style="display:block;margin-top:20px">开始时间</label>'
       + '<input type="time" id="start-time" value="' + draft.time + '" style="margin-top:8px;width:100%;padding:10px;border:1px solid var(--ink);background:var(--paper-warm)">';
   }
   if (step === 3) {
     const fList = isStudy ? studyFocusLevels : feelings;
     const tList = isStudy ? studyTags : tags;
-    return '<h3>' + (isStudy ? 'FOCUS' : 'FEEL') + '</h3><p class="step-description">' + (isStudy ? '这次学习的专注度如何？' : '今天跑得怎么样？') + '</p>'
-      + '<div class="feel-options">' + fList.map((f, i) => '<button class="feel-option ' + (draft.feel === i ? 'selected' : '') + '" data-modal="feel" data-value="' + i + '" aria-pressed="' + (draft.feel === i) + '"><span>' + f[0] + '</span>' + f[1] + '</button>').join('') + '</div>'
-      + '<div class="pills">' + tList.map(t => '<button class="pill ' + (draft.tags.includes(t) ? 'selected' : '') + '" data-modal="tag" data-value="' + t + '">' + t + '</button>').join('') + '</div>'
-      + '<textarea class="note-input" id="run-note" maxlength="200" placeholder="' + (isStudy ? '写一句学习收获或复盘要点（可选）' : '一句话跑步感想（可选）') + '">' + esc(draft.note) + '</textarea>';
+    return draftBanner + '<h3>' + (isStudy ? '专注度' : '体感') + '</h3>'
+      + '<div class="feel-options">' + fList.map((f, i) => '<button type="button" class="feel-option ' + (draft.feel === i ? 'selected' : '') + '" data-modal="feel" data-value="' + i + '" aria-pressed="' + (draft.feel === i) + '"><span>' + f[0] + '</span>' + f[1] + '</button>').join('') + '</div>'
+      + '<div class="pills">' + tList.map(t => '<button type="button" class="pill ' + (draft.tags.includes(t) ? 'selected' : '') + '" data-modal="tag" data-value="' + t + '">' + t + '</button>').join('') + '</div>'
+      + '<textarea class="note-input" id="run-note" maxlength="200" placeholder="' + (isStudy ? '备注（可选）' : '备注（可选）') + '">' + esc(draft.note) + '</textarea>';
   }
+  const syncBanner = draft.saveState === 'failed'
+    ? '<div class="ck-sync-status is-failed ck-shake" role="alert"><div><strong>同步失败</strong>：' + esc(draft.saveError || '服务器未响应') + '（已保留全部输入与原操作编号）</div><div class="ck-sync-actions"><button type="button" class="ck-btn ck-btn-retry" data-modal="save">重试同步</button><button type="button" class="ck-btn ck-btn-ghost" data-modal="save-local-pending">先存本机（等待同步）</button></div></div>'
+    : draft.saveState === 'pending'
+      ? '<div class="ck-sync-status is-pending" role="status"><strong>等待同步</strong>：正在提交到服务器，请勿重复操作…</div>'
+      : '<div class="ck-sync-status ' + (isServerOnline ? 'is-synced' : 'is-local') + '" role="status">' + (isServerOnline ? '在线模式：确认保存后将直接同步至服务器' : '离线模式：确认后将先保存在本机浏览器，联网后可同步') + '</div>';
+
   if (isStudy) {
-    return '<h3>STUDY DONE.</h3><p class="step-description">为 <strong>' + esc(draft.person) + '</strong> 保存本次学习成果并更新排行榜。</p><div class="review-ticket is-study-ticket"><strong>' + draft.hours.toFixed(1) + ' <span style="font-size:25px;letter-spacing:0">hours</span></strong><small>' + today() + ' / ' + esc(draft.person) + ' · ' + esc(findTargetTitle(draft.targetId)) + '</small><dl><dt>专注时长</dt><dd>' + draft.minutes + ' MIN</dd><dt>番茄折算</dt><dd>' + Math.max(1, Math.round(draft.minutes / 25)) + ' 个</dd><dt>专注度</dt><dd>' + studyFocusLevels[draft.feel][0] + ' ' + studyFocusLevels[draft.feel][1] + '</dd><dt>照片</dt><dd>' + (draft.photo ? '已添加 ✓' : '本次无照片') + '</dd></dl></div>';
+    const sSec = studySecondsOf(draft), sMin = studyMinutesOf(draft), sHrs = studyHoursOf(draft);
+    const fObj = studyFocusLevels[draft.feel] || ['🧠', '专注'];
+    return draftBanner + '<h3>确认记录</h3><div class="review-ticket is-study-ticket"><strong>' + sHrs.toFixed(2) + ' <span style="font-size:25px;letter-spacing:0">hours</span></strong><small>' + today() + ' / ' + esc(draft.person) + ' · ' + esc(findTargetTitle(draft.targetId)) + '</small><dl><dt>专注时长</dt><dd>' + sMin + ' MIN（' + sSec + ' 秒）</dd><dt>折合番茄</dt><dd>约 ' + Math.max(1, Math.round(sMin / 25)) + ' 个</dd><dt>专注度</dt><dd>' + fObj[0] + ' ' + fObj[1] + '</dd><dt>照片存储</dt><dd>' + photoTicketLabel(draft) + '</dd></dl></div>' + syncBanner;
   }
-  return '<h3>ONE MORE DONE.</h3><p class="step-description">为 <strong>' + esc(draft.person) + '</strong> 保存本次跑步里程并同步竞技曲线。</p><div class="review-ticket"><strong>' + draft.km.toFixed(2) + ' <span style="font-size:25px;letter-spacing:0">km</span></strong><small>' + today() + ' / ' + esc(draft.person) + '</small><dl><dt>时长</dt><dd>' + draft.minutes + ' MIN</dd><dt>配速</dt><dd>' + pace(draft) + ' /KM</dd><dt>感觉</dt><dd>' + feelings[draft.feel][0] + ' ' + feelings[draft.feel][1] + '</dd><dt>照片</dt><dd>' + (draft.photo ? '已添加 ✓' : '本次无照片') + '</dd></dl></div>';
+  const fObj = feelings[draft.feel] || ['🏃', '舒服'];
+  return draftBanner + '<h3>确认记录</h3><div class="review-ticket"><strong>' + draft.km.toFixed(2) + ' <span style="font-size:25px;letter-spacing:0">km</span></strong><small>' + today() + ' / ' + esc(draft.person) + '</small><dl><dt>时长</dt><dd>' + draft.minutes + ' MIN</dd><dt>配速</dt><dd>' + pace(draft) + ' /KM</dd><dt>感觉</dt><dd>' + fObj[0] + ' ' + fObj[1] + '</dd><dt>照片存储</dt><dd>' + photoTicketLabel(draft) + '</dd></dl></div>' + syncBanner;
 }
 
 function drawModal() {
   const root = $('#modal-root');
-  root.innerHTML = '<div class="modal-overlay"><section class="checkin-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-heading"><div class="sheet-grabber" aria-hidden="true"><span></span></div><div class="modal-header"><h2 id="checkin-heading"><small>[' + (draft.mode === 'study' ? 'STUDY' : 'RUN') + ' · 0' + (step + 1) + '/05]</small> ' + (draft.mode === 'study' ? '学习打卡' : '运动打卡') + ' · ' + esc(draft.person) + '</h2><button type="button" class="close-modal" data-modal="close" aria-label="关闭弹窗"><span aria-hidden="true">×</span></button></div><div class="steps" aria-label="第 ' + (step + 1) + ' 步，共 5 步">' + Array.from({ length: 5 }, (_, i) => '<i class="' + (i <= step ? 'done' : '') + '"></i>').join('') + '</div><div class="step-content">' + stepMarkup() + '</div><div class="step-footer"><button type="button" data-modal="back">' + (step ? '← 上一步' : '× 取消') + '</button><button type="button" data-modal="' + (step === 4 ? 'save' : 'next') + '" ' + (step === 3 && draft.feel === null ? 'disabled' : '') + '>' + (step === 4 ? '保存打卡 ✓' : '下一步 →') + '</button></div></section></div>';
+  const saveBtnText = draft.saving ? '同步中…' : (draft.saveState === 'failed' ? '重试同步 ↻' : '保存打卡 ✓');
+  root.innerHTML = '<div class="modal-overlay"><section class="checkin-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-heading"><div class="sheet-grabber" aria-hidden="true"><span></span></div><div class="modal-header"><h2 id="checkin-heading">' + (draft.mode === 'study' ? '学习打卡' : '运动打卡') + ' · ' + esc(draft.person) + '</h2><button type="button" class="close-modal" data-modal="close" aria-label="关闭弹窗（保留草稿）"><span aria-hidden="true">×</span></button></div><div class="steps" aria-label="第 ' + (step + 1) + ' 步，共 5 步">' + Array.from({ length: 5 }, (_, i) => '<i class="' + (i <= step ? 'done' : '') + '"></i>').join('') + '</div><div class="step-content">' + stepMarkup() + '</div><div class="step-footer"><button type="button" data-modal="back">' + (step ? '← 上一步' : '× 暂存退出') + '</button><button type="button" data-modal="' + (step === 4 ? 'save' : 'next') + '" ' + ((step === 3 && draft.feel === null) || draft.saving ? 'disabled' : '') + '>' + (step === 4 ? saveBtnText : '下一步 →') + '</button></div></section></div>';
   const overlay = $('.modal-overlay', root), sheet = $('.checkin-modal', root), grab = $('.sheet-grabber', root), header = $('.modal-header', root);
   if (overlay && sheet) {
     overlay.addEventListener('click', ev => { if (ev.target === overlay) closeCheckin(); });
@@ -3352,7 +4735,7 @@ function drawModal() {
       if (!dragging) return;
       dragging = false;
       sheet.style.transition = 'transform .24s cubic-bezier(.22,1,.36,1)';
-      if (curDy > 88) { sheet.style.transform = 'translateY(100%)'; setTimeout(closeCheckin, 180); }
+      if (curDy > 88) { sheet.style.transform = 'translateY(100%)'; setTimeout(() => closeCheckin(), 180); }
       else { sheet.style.transform = ''; }
     };
     [grab, header].forEach(el => {
@@ -3362,135 +4745,292 @@ function drawModal() {
       el.addEventListener('touchend', onEnd);
     });
   }
-  $('.close-modal').focus({ preventScroll: true });
+  const focusTarget = (step === 1 && ($('#distance-input') || $('#hours-input')))
+    || (step === 2 && $('#minutes-input'))
+    || (step === 3 && ($('.feel-option.selected') || $('.feel-option')))
+    || (step === 4 && $('[data-modal="save"]'))
+    || $('.step-content button, .step-content input, .step-content select')
+    || $('.close-modal');
+  if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus({ preventScroll: true });
 }
+
+function buildCheckinRecord(syncStatus, syncError = '') {
+  const record = {
+    id: Date.now(), person: draft.person || state.name, date: today(), time: draft.time,
+    source: 'manual', operationId: draft.operationId,
+    note: draft.note, tags: draft.tags, photo: draft.photo, likes: 0, liked: false,
+    syncStatus, syncError
+  };
+  if (draft.mode === 'study') {
+    const target = state.studyTargets.find(t => t.id === draft.targetId);
+    return normalizeStudyRecord({
+      ...record, seconds: draft.seconds, focus: draft.feel, targetId: draft.targetId, subject: target?.title || '自主学习'
+    });
+  }
+  return { ...record, km: draft.km, minutes: draft.minutes, feel: draft.feel };
+}
+
+function finalizeCheckinSave(savedMode, savedRec, who) {
+  insertLocalRecordDedup(savedMode, savedRec);
+  recordSelectKey = savedMode + ':' + savedRec.id;
+  // Auto-complete hb-3 (action habit) for today
+  if (who === state.name) {
+    const hbArr = state.habitLogs[today()] || [];
+    if (state.habits.some(h => h.id === 'hb-3') && !hbArr.includes('hb-3')) state.habitLogs[today()] = [...hbArr, 'hb-3'];
+  } else {
+    state.memberHabitLogs = state.memberHabitLogs || {};
+    state.memberHabitLogs[who] = state.memberHabitLogs[who] || {};
+    const mArr = state.memberHabitLogs[who][today()] || [];
+    if (state.habits.some(h => h.id === 'hb-3') && !mArr.includes('hb-3')) state.memberHabitLogs[who][today()] = [...mArr, 'hb-3'];
+  }
+  recomputeStudyTargetDoneHours();
+  newlyArchivedRecordKey = recordSelectKey;
+  const sportGoalHit = savedMode === 'sport' && total(mine(monthly())) >= state.goal;
+  const studyGoalHit = savedMode === 'study' && totalStudy(monthly(mineStudy())) >= state.studyGoal;
+  persistLocalOnly();
+  const returnFocusSelector = modalPreviousFocusSelector;
+  closeCheckin({ discard: true });
+  triggerArenaSprint(2600);
+  if (savedMode === 'study') {
+    triggerElectricSweep(2600);
+    triggerLightningSurge(2000);
+  } else {
+    triggerFlameSurge(sportGoalHit ? 2400 : 1900, sportGoalHit);
+    triggerLightningSurge(1200);
+  }
+  navigate(view);
+  triggerCheckinFeedback({
+    mode: savedMode,
+    value: savedMode === 'study' ? String(studyMinutesOf(savedRec)) : savedRec.km.toFixed(2),
+    unit: savedMode === 'study' ? '分钟' : 'km',
+    title: savedMode === 'study' ? (savedRec.subject || '学习打卡') : ('配速 ' + pace(savedRec) + ' /km'),
+    person: who,
+    goalHit: sportGoalHit || studyGoalHit,
+    recordKey: newlyArchivedRecordKey,
+    syncStatus: savedRec.syncStatus,
+    syncError: savedRec.syncError || '',
+    operationId: savedRec.operationId || '',
+    returnFocusSelector
+  });
+  celebrate();
+}
+
+$('#modal-root').addEventListener('input', e => {
+  if (!draft) return;
+  const t = e.target;
+  if (t.id === 'hours-input' && draft.mode === 'study') {
+    const h = Number(t.value);
+    if (Number.isFinite(h) && h >= 1 / 60 && h <= 16) {
+      setDraftStudySeconds(h * 3600);
+      updateStudyDurationPreview('hours');
+      persistCheckinDraft(draft, step);
+    }
+  } else if (t.id === 'distance-input' && draft.mode === 'sport') {
+    const n = Number(t.value);
+    if (Number.isFinite(n) && n >= 0.1 && n <= 300) {
+      draft.km = Math.round(n * 100) / 100;
+      $$('[data-modal="distance-set"]').forEach(el => el.classList.toggle('selected', Number(el.dataset.value) === draft.km));
+      persistCheckinDraft(draft, step);
+    }
+  } else if (t.id === 'minutes-input') {
+    const n = Number(t.value);
+    if (draft.mode === 'study' && Number.isFinite(n) && n >= 1 && n <= 960) {
+      setDraftStudySeconds(Math.round(n) * 60);
+      updateStudyDurationPreview('minutes');
+      persistCheckinDraft(draft, step);
+    } else if (draft.mode === 'sport' && Number.isFinite(n) && n >= 1 && n <= 1440) {
+      draft.minutes = Math.round(n);
+      draft.seconds = draft.minutes * 60;
+      persistCheckinDraft(draft, step);
+    }
+  } else if (t.id === 'start-time') {
+    if (t.value) { draft.time = t.value; persistCheckinDraft(draft, step); }
+  } else if (t.id === 'run-note') {
+    draft.note = t.value;
+    persistCheckinDraft(draft, step);
+  }
+});
 
 $('#modal-root').addEventListener('click', async e => {
   const b = e.target.closest('[data-modal]'); if (!b) return;
   const a = b.dataset.modal, v = b.dataset.value;
-  if (a === 'close') closeCheckin();
-  if (a === 'switch-mode') {
-    draft.mode = v; draft.feel = null; draft.tags = [];
-    if (v === 'study' && draft.minutes === 30) draft.minutes = 90;
-    if (v === 'sport' && draft.minutes === 90) draft.minutes = 30;
+  if (a === 'close') { closeCheckin(); return; }
+  if (a === 'discard-draft') {
+    const curMode = draft ? draft.mode : 'sport';
+    clearSavedDraft(curMode);
+    step = 0;
+    draft = createFreshDraft(curMode);
     drawModal();
+    toast('已丢弃草稿，重新开始填写');
+    return;
+  }
+  if (a === 'switch-mode') {
+    if (!draft || draft.mode === v) return;
+    syncDraftFromDom();
+    persistCheckinDraft(draft, step);
+    const savedOther = getSavedDraft(v);
+    if (savedOther) {
+      draft = { ...createFreshDraft(v, savedOther.targetId, savedOther.person), ...savedOther, mode: v, saving: false, restoredFromDraft: true };
+      step = Math.max(0, Math.min(4, Number(savedOther.step) || 0));
+      if (step === 4 && draft.feel === null) step = 3;
+      if (savedOther.photoInIdb && !draft.photo) {
+        const k = draftStorageKey(v);
+        const rop = draft.operationId;
+        draftPhotoIdbGet(k).then(du => {
+          if (!draft || draft.operationId !== rop) return;
+          if (du) { draft.photo = du; draft.photoRestoreWarning = false; }
+          else { draft.photoRestoreWarning = true; }
+          drawModal();
+        });
+      }
+    } else {
+      draft = createFreshDraft(v, draft.targetId, draft.person);
+      step = Math.min(step, 1);
+    }
+    drawModal();
+    return;
   }
   if (a === 'switch-person') {
+    syncDraftFromDom();
     draft.person = v;
+    persistCheckinDraft(draft, step);
     drawModal();
+    return;
   }
   if (a === 'back') {
     if (!step) { closeCheckin(); return; }
-    if (step === 1) {
-      if (draft.mode === 'study') { const h = Number($('#hours-input').value); if (h >= .2 && h <= 16) draft.hours = h; }
-      else { const n = Number($('#distance-input').value); if (n >= .1 && n <= 300) draft.km = n; }
-    }
-    if (step === 2) { draft.minutes = Math.max(1, Math.min(1440, Number($('#minutes-input').value) || 30)); draft.time = $('#start-time').value || draft.time; }
-    if (step === 3) draft.note = $('#run-note').value;
-    step--; drawModal();
+    syncDraftFromDom();
+    step--;
+    persistCheckinDraft(draft, step);
+    drawModal();
+    return;
   }
-  if (a === 'next') { if (!readStep()) return; step++; drawModal(); }
-  if (a === 'album') $('#photo-file').click();
-  if (a === 'camera') $('#camera-file').click();
+  if (a === 'next') {
+    if (!readStep()) return;
+    step++;
+    persistCheckinDraft(draft, step);
+    drawModal();
+    return;
+  }
+  if (a === 'album') { $('#photo-file').click(); return; }
+  if (a === 'camera') { $('#camera-file').click(); return; }
   if (a === 'distance-add' || a === 'distance-set') {
-    draft.km = a === 'distance-set' ? Number(v) : Math.max(.1, Math.min(300, Math.round(((Number($('#distance-input').value) || 0) + Number(v)) * 100) / 100));
+    draft.km = a === 'distance-set' ? Number(v) : Math.max(0.1, Math.min(300, Math.round(((Number($('#distance-input').value) || 0) + Number(v)) * 100) / 100));
     $('#distance-input').value = draft.km.toFixed(2);
     $$('[data-modal="distance-set"]').forEach(el => el.classList.toggle('selected', Number(el.dataset.value) === draft.km));
+    persistCheckinDraft(draft, step);
+    return;
   }
   if (a === 'hours-add' || a === 'hours-set') {
-    draft.hours = a === 'hours-set' ? Number(v) : Math.max(.2, Math.min(16, Math.round(((Number($('#hours-input').value) || 0) + Number(v)) * 10) / 10));
-    draft.minutes = Math.round(draft.hours * 60);
-    $('#hours-input').value = draft.hours.toFixed(1);
-    $$('[data-modal="hours-set"]').forEach(el => el.classList.toggle('selected', Number(el.dataset.value) === draft.hours));
+    const seconds = Number(v) * 3600;
+    setDraftStudySeconds(a === 'hours-set' ? seconds : draft.seconds + seconds);
+    $('#hours-input').value = draftStudyHoursInputValue();
+    updateStudyDurationPreview('hours');
+    persistCheckinDraft(draft, step);
+    return;
   }
-  if (a === 'minutes-add') { $('#minutes-input').value = Math.max(1, Math.min(1440, (Number($('#minutes-input').value) || 0) + Number(v))); }
+  if (a === 'minutes-add' || a === 'minutes-set') {
+    const maxM = draft.mode === 'study' ? 960 : 1440;
+    const nextM = a === 'minutes-set' ? Number(v) : Math.max(1, Math.min(maxM, (Number($('#minutes-input').value) || 0) + Number(v)));
+    $('#minutes-input').value = nextM;
+    if (draft.mode === 'study') {
+      setDraftStudySeconds(Math.round(nextM) * 60);
+      updateStudyDurationPreview('minutes');
+    } else {
+      draft.minutes = Math.round(nextM);
+      draft.seconds = draft.minutes * 60;
+    }
+    persistCheckinDraft(draft, step);
+    return;
+  }
   if (a === 'feel') {
     draft.feel = Number(v);
     $$('.feel-option').forEach(el => { const active = Number(el.dataset.value) === draft.feel; el.classList.toggle('selected', active); el.setAttribute('aria-pressed', active); });
-    $('[data-modal="next"]').disabled = false;
+    const nextBtn = $('[data-modal="next"]');
+    if (nextBtn) nextBtn.disabled = false;
+    persistCheckinDraft(draft, step);
+    return;
   }
-  if (a === 'tag') { draft.tags = draft.tags.includes(v) ? draft.tags.filter(t => t !== v) : [...draft.tags, v]; b.classList.toggle('selected', draft.tags.includes(v)); }
-  if (a === 'save') {
-    if (draft.saving) return;
-    draft.saving = true;
-    b.disabled = true;
-    const who = draft.person || state.name;
-    let savedRec = null;
-    if (draft.mode === 'study') {
-      const tObj = state.studyTargets.find(t => t.id === draft.targetId);
-      savedRec = { id: Date.now(), person: who, date: today(), time: draft.time, hours: draft.hours, minutes: draft.minutes, seconds: Math.round(draft.minutes * 60), source: 'manual', operationId: draft.operationId, focus: draft.feel, targetId: draft.targetId, subject: tObj?.title || '自主学习', note: draft.note, tags: draft.tags, photo: draft.photo, likes: 0, liked: false };
-    } else {
-      savedRec = { id: Date.now(), person: who, date: today(), time: draft.time, km: draft.km, minutes: draft.minutes, source: 'manual', operationId: draft.operationId, feel: draft.feel, note: draft.note, tags: draft.tags, photo: draft.photo, likes: 0, liked: false };
-    }
+  if (a === 'tag') {
+    draft.tags = draft.tags.includes(v) ? draft.tags.filter(t => t !== v) : [...draft.tags, v];
+    b.classList.toggle('selected', draft.tags.includes(v));
+    persistCheckinDraft(draft, step);
+    return;
+  }
+  if (a === 'save-local-pending') {
+    if (!draft || draft.saving) return;
     const savedMode = draft.mode;
-    if (isServerOnline) {
-      const endpoint = savedMode === 'study' ? '/records/study' : '/records/sport';
-      const res = await serverFetch(endpoint, 'POST', savedRec);
-      if (!res.ok) {
-        draft.saving = false;
-        b.disabled = false;
-        toast('保存失败：' + (res.error || '服务器未响应，草稿已保留'));
-        return;
+    const endpoint = savedMode === 'study' ? '/records/study' : '/records/sport';
+    const savedRec = buildCheckinRecord('pending', draft.saveError);
+    enqueuePendingOp({ operationId: savedRec.operationId, kind: savedMode, recordId: savedRec.id, endpoint, method: 'POST', payload: savedRec, status: 'pending', lastError: draft.saveError || '' });
+    finalizeCheckinSave(savedMode, savedRec, savedRec.person);
+    return;
+  }
+  if (a === 'save') {
+    if (!draft || draft.saving || inFlightOpIds.has(draft.operationId)) return;
+    if (draft.photoUploading) { toast('照片仍在上传中，请稍候完成后再保存。'); return; }
+    draft.saving = true;
+    draft.saveState = isServerOnline ? 'pending' : 'local';
+    draft.saveError = '';
+    const opId = draft.operationId;
+    inFlightOpIds.add(opId);
+    drawModal();
+    const savedMode = draft.mode;
+    const endpoint = savedMode === 'study' ? '/records/study' : '/records/sport';
+    const savedRec = buildCheckinRecord(draft.saveState);
+    const who = savedRec.person;
+    try {
+      if (isServerOnline) {
+        const res = await serverFetch(endpoint, 'POST', { ...savedRec, room: currentRoomCode });
+        if (!draft || draft.operationId !== opId) return;
+        if (!res.ok) {
+          draft.saving = false;
+          draft.saveState = 'failed';
+          draft.saveError = res.error || '服务器未响应';
+          persistCheckinDraft(draft, step);
+          drawModal();
+          return;
+        }
+        if (res.record) Object.assign(savedRec, savedMode === 'study' ? normalizeStudyRecord(res.record) : res.record);
+        savedRec.syncStatus = 'synced';
+        savedRec.syncError = '';
+      } else {
+        savedRec.syncStatus = 'local';
+        savedRec.syncError = '';
+        enqueuePendingOp({ operationId: opId, kind: savedMode, recordId: savedRec.id, endpoint, method: 'POST', payload: savedRec, status: 'pending', lastError: '' });
       }
-      if (res.record) Object.assign(savedRec, res.record);
+      finalizeCheckinSave(savedMode, savedRec, who);
+    } finally {
+      inFlightOpIds.delete(opId);
     }
-    if (savedMode === 'study') {
-      state.studyRecords.unshift(savedRec);
-      recordSelectKey = 'study:' + savedRec.id;
-    } else {
-      state.records.unshift(savedRec);
-      recordSelectKey = 'sport:' + savedRec.id;
-    }
-    // Auto-complete hb-3 (action habit) for today
-    if (who === state.name) {
-      const hbArr = state.habitLogs[today()] || [];
-      if (state.habits.some(h => h.id === 'hb-3') && !hbArr.includes('hb-3')) state.habitLogs[today()] = [...hbArr, 'hb-3'];
-    } else {
-      state.memberHabitLogs = state.memberHabitLogs || {};
-      state.memberHabitLogs[who] = state.memberHabitLogs[who] || {};
-      const mArr = state.memberHabitLogs[who][today()] || [];
-      if (state.habits.some(h => h.id === 'hb-3') && !mArr.includes('hb-3')) state.memberHabitLogs[who][today()] = [...mArr, 'hb-3'];
-    }
-    recomputeStudyTargetDoneHours();
-    newlyArchivedRecordKey = recordSelectKey;
-    const sportGoalHit = savedMode === 'sport' && total(mine(monthly())) >= state.goal;
-    const studyGoalHit = savedMode === 'study' && totalStudy(monthly(mineStudy())) >= state.studyGoal;
-    persistLocalOnly();
-    closeCheckin();
-    triggerArenaSprint(2600);
-    if (savedMode === 'study') {
-      triggerElectricSweep(2600);
-      triggerLightningSurge(2000);
-    } else {
-      triggerFlameSurge(sportGoalHit ? 2400 : 1900, sportGoalHit);
-      triggerLightningSurge(1200);
-    }
-    navigate(view);
-    triggerCheckinFeedback({
-      mode: savedMode,
-      value: savedMode === 'study' ? savedRec.hours.toFixed(1) : savedRec.km.toFixed(2),
-      unit: savedMode === 'study' ? 'H' : 'KM',
-      title: savedMode === 'study' ? (savedRec.subject || '深度学习') : (pace(savedRec) + ' 配速'),
-      person: who,
-      goalHit: sportGoalHit || studyGoalHit,
-      recordKey: newlyArchivedRecordKey
-    });
-    celebrate();
-    toast(who + ' ' + (savedMode === 'study' ? '学习' : '运动') + '打卡成功！');
   }
 });
 
 $('#modal-root').addEventListener('change', async e => {
+  if (!draft) return;
+  if (e.target.id === 'study-target-select') {
+    draft.targetId = e.target.value;
+    persistCheckinDraft(draft, step);
+    return;
+  }
   if (!['photo-file', 'camera-file'].includes(e.target.id)) return;
   const file = e.target.files[0]; if (!file) return;
   if (!file.type.startsWith('image/')) { toast('请选择图片文件。'); return; }
+  const uploadOpId = draft.operationId;
+  draft.photoUploading = true;
+  draft.photoRestoreWarning = false;
+  drawModal();
   if (isServerOnline) {
     try {
       const fd = new FormData();
       fd.append('file', file);
       const upRes = await serverFetch('/uploads', 'POST', fd);
+      if (!draft || draft.operationId !== uploadOpId) return;
       if (upRes && upRes.url) {
         draft.photo = upRes.url;
+        draft.photoStorage = 'server';
+        draft.photoUploading = false;
+        persistCheckinDraft(draft, step);
         drawModal();
         return;
       }
@@ -3500,11 +5040,33 @@ $('#modal-root').addEventListener('change', async e => {
     const bitmap = await createImageBitmap(file), scale = Math.min(1, 900 / Math.max(bitmap.width, bitmap.height)), c = document.createElement('canvas');
     c.width = Math.round(bitmap.width * scale); c.height = Math.round(bitmap.height * scale);
     c.getContext('2d').drawImage(bitmap, 0, 0, c.width, c.height);
-    draft.photo = c.toDataURL('image/jpeg', .75); bitmap.close(); drawModal();
-  } catch { toast('这张照片暂时无法读取，请试试 JPG 或 PNG。'); }
+    const dataUrl = c.toDataURL('image/jpeg', .75); bitmap.close();
+    if (!draft || draft.operationId !== uploadOpId) return;
+    draft.photo = dataUrl;
+    draft.photoStorage = isServerOnline ? 'local-fallback' : 'local';
+    draft.photoUploading = false;
+    persistCheckinDraft(draft, step);
+    drawModal();
+  } catch {
+    if (draft && draft.operationId === uploadOpId) {
+      draft.photoUploading = false;
+      drawModal();
+    }
+    toast('这张照片暂时无法读取，请试试 JPG 或 PNG。');
+  }
 });
 
 document.addEventListener('keydown', e => {
+  if (e.target instanceof Element && e.target.matches('[data-action="select-date-bar"]') && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    const bars = [...document.querySelectorAll('[data-action="select-date-bar"]')];
+    const idx = bars.indexOf(e.target);
+    if (idx >= 0) {
+      e.preventDefault();
+      const next = bars[e.key === 'ArrowRight' ? Math.min(bars.length - 1, idx + 1) : Math.max(0, idx - 1)];
+      if (next && next !== e.target) next.focus();
+    }
+    return;
+  }
   if (e.target instanceof Element && e.target.matches('[data-point],[data-chart-node],[data-chart-row],[data-action]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
   if (!draft) return;
   if (e.key === 'Escape') { e.preventDefault(); closeCheckin(); }
@@ -3524,7 +5086,7 @@ function celebrate() {
 
 /* ---------- DeepBook Button Text Stagger & Pixel-Dither Matrix Engine ---------- */
 function enhanceTextStagger() {
-  const btns = [...document.querySelectorAll('.checkin-cta strong, .dual-cta-half strong, .manifesto-film-btn, .track-add-btn, .track-mode-switch, .add-person, .add-target-btn, .ndc-btn.primary, .pomo-btn, .motion-toggle')];
+  const btns = [...document.querySelectorAll('.checkin-cta strong, .dual-cta-half strong, .track-add-btn, .track-mode-switch, .add-person, .add-target-btn, .ndc-btn.primary, .pomo-btn, .motion-toggle')];
   btns.forEach(el => {
     if (el.dataset.staggered === '1') return;
     const raw = (el.textContent || '').trim();
@@ -3549,6 +5111,8 @@ let pixelFrameId = 0;
 let pixelPhase = 2.35;
 let lightningSurgeUntil = 0;
 let flameSurgeUntil = 0;
+let stormSurgeUntil = 0;
+let frostSurgeUntil = 0;
 
 const FLAME_STATIC_PHASE = 2.35;
 const FLAME_PALETTE = [
@@ -3620,6 +5184,349 @@ function triggerFlameSurge(durationMs = 1150, mega = false) {
       const idx = Math.floor(Math.random() * st.embers.length);
       st.embers[idx] = createFlameEmber(false);
     }
+    drawPixelMatrix(c, pixelPhase);
+  });
+}
+
+
+const STORM_STATIC_PHASE = 2.95;
+const STORM_PALETTE = [
+  '#070912', // 0: Hollow Eye Abyss & Deep Crevice
+  '#0d1222', // 1: Deep Indigo Sky Base
+  '#151c33', // 2: Pressure Strata & Cloud Rim
+  '#1f2947', // 3: Far Anvil Deck
+  '#2c3759', // 4: Outer Trailing Ash-Violet Cloud
+  '#3d4970', // 5: Mid Churning Storm Cloud
+  '#52608c', // 6: Heavy Storm Slate Body
+  '#6d7dab', // 7: Spiral Arm Cloud Wall
+  '#90a1cc', // 8: Bright Silver Eyewall
+  '#b8c7e8', // 9: Windward Silver Highlight
+  '#dce7fa', // 10: Bright Cold Crest
+  '#f6faff'  // 11: Cold White Arc & Crest
+];
+
+
+function createStormParticle(modeOverride = null) {
+  const roll = Math.random();
+  const mode = modeOverride || (roll < 0.40 ? 'inward' : roll < 0.76 ? 'orbit' : 'fling');
+  const rNorm = mode === 'inward'
+    ? (0.42 + Math.random() * 0.62)
+    : mode === 'orbit'
+      ? (0.14 + Math.random() * 0.24)
+      : (0.24 + Math.random() * 0.36);
+  const shapeRoll = Math.random();
+  return {
+    mode,
+    rNorm,
+    theta: Math.random() * Math.PI * 2,
+    omegaBase: (1.25 + Math.random() * 1.55),
+    vrBase: mode === 'inward' ? -(0.16 + Math.random() * 0.16) : mode === 'fling' ? (0.32 + Math.random() * 0.32) : (Math.random() - 0.5) * 0.03,
+    shape: shapeRoll < 0.34 ? 'streak3' : shapeRoll < 0.68 ? 'streak2' : 'dot',
+    life: Math.random() * 0.4,
+    maxLife: 0.9 + Math.random() * 1.1,
+    seed: Math.random() * 10
+  };
+}
+
+function createStormRainDrop(initial = false) {
+  return {
+    xNorm: Math.random() * 1.15 - 0.08,
+    yNorm: initial ? Math.random() : (-0.10 - Math.random() * 0.25),
+    speed: 0.90 + Math.random() * 0.80,
+    len: 2 + Math.floor(Math.random() * 3),
+    depth: Math.random() < 0.42 ? 0 : 1
+  };
+}
+
+
+function generateStormBandArc(eyeCx, eyeCy, eyeR, maxR, w, h, startOffsetMs = 0, forcedTheta = null) {
+  const baseTheta = forcedTheta !== null ? forcedTheta : (-0.6 + Math.random() * Math.PI * 2.1);
+  const r1 = Math.max(eyeR * 1.12, eyeR * (1.15 + Math.random() * 1.45));
+  const spanTheta = (0.38 + Math.random() * 0.56) * (Math.random() < 0.5 ? 1 : -1);
+  const r2 = Math.min(0.88, r1 + (0.06 + Math.random() * 0.18) * (Math.random() < 0.72 ? 1 : -0.45));
+  const segCount = 6 + Math.floor(Math.random() * 4);
+  const pts = [];
+  for (let i = 0; i <= segCount; i++) {
+    const u = i / segCount;
+    const th = baseTheta + spanTheta * u + (i > 0 && i < segCount ? (Math.random() - 0.5) * 0.22 : 0);
+    const rr = (r1 + (r2 - r1) * u) * maxR + (i > 0 && i < segCount ? (Math.random() - 0.5) * 14 : 0);
+    pts.push({
+      x: Math.max(6, Math.min(w - 6, eyeCx + Math.cos(th) * rr)),
+      y: Math.max(6, Math.min(h - 6, eyeCy + Math.sin(th) * rr * 0.86))
+    });
+  }
+  const segs = [];
+  for (let i = 0; i < pts.length - 1; i++) segs.push({ ax: pts[i].x, ay: pts[i].y, bx: pts[i + 1].x, by: pts[i + 1].y, core: 1.0 });
+  if (Math.random() < 0.9 && pts.length >= 4) {
+    const origin = pts[1 + Math.floor(Math.random() * (pts.length - 3))];
+    let fx = origin.x, fy = origin.y;
+    const fAng = baseTheta + spanTheta * 0.45 + (Math.random() - 0.5) * 1.3;
+    for (let k = 0; k < 3; k++) {
+      const nx = Math.max(6, Math.min(w - 6, fx + Math.cos(fAng + (Math.random() - 0.5) * 0.95) * 13));
+      const ny = Math.max(6, Math.min(h - 6, fy + Math.sin(fAng + (Math.random() - 0.5) * 0.95) * 11));
+      segs.push({ ax: fx, ay: fy, bx: nx, by: ny, core: 0.74 });
+      fx = nx; fy = ny;
+    }
+  }
+  return {
+    segs,
+    startMs: performance.now() - startOffsetMs,
+    durMs: 280 + Math.random() * 140
+  };
+}
+
+
+const FROST_STATIC_PHASE = 1.65;
+const FROST_PALETTE = [
+  '#030816', // 0: Polar Abyss & 1px Crystal Edge Contour
+  '#07142e', // 1: Deep Arctic Night Sky
+  '#0d254f', // 2: Polar Ridge & Cold Shadow
+  '#143b78', // 3: Deep Glacier Facet
+  '#1d56a3', // 4: Mid Sapphire Ice
+  '#2977cc', // 5: Vivid Glacial Blue
+  '#3e9ee6', // 6: Sunlit Cyan Ice
+  '#62c4f5', // 7: Luminous Frost Cyan
+  '#8fe2ff', // 8: Bright Ice Bevel & Dendrite Edge
+  '#c4f3ff', // 9: Frosted Mint-White Highlight
+  '#e8fbff', // 10: Brilliant Snow Crest
+  '#ffffff'  // 11: Pure Specular Crystal & Blizzard Core
+];
+
+const FROST_BG_PINES = [
+  { x: 0.47, h: 16, crown: 7 },
+  { x: 0.54, h: 22, crown: 9 },
+  { x: 0.62, h: 18, crown: 7 },
+  { x: 0.70, h: 25, crown: 10 },
+  { x: 0.79, h: 20, crown: 8 },
+  { x: 0.87, h: 27, crown: 10 },
+  { x: 0.94, h: 21, crown: 8 }
+];
+
+function makeFrostRng(seed) {
+  let s = (seed >>> 0) || 1337;
+  return () => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function buildFrostScene(seed) {
+  const rng = makeFrostRng(seed);
+  const plates = [];
+  for (let i = 0; i < 16; i++) {
+    const onRightOrRim = i < 12;
+    const cx = onRightOrRim ? (rng() < 0.72 ? 0.44 + rng() * 0.58 : rng() * 0.44) : 0.08 + rng() * 0.36;
+    const cy = onRightOrRim ? (rng() < 0.52 ? 0.04 + rng() * 0.56 : 0.56 + rng() * 0.46) : 0.14 + rng() * 0.70;
+    const thick = (cx > 0.44 || cy < 0.16 || cy > 0.82) ? (0.58 + rng() * 0.42) : (0.20 + rng() * 0.24);
+    plates.push({ cx, cy, rx: 0.13 + rng() * 0.16, ry: 0.14 + rng() * 0.18, rot: rng() * Math.PI, thick, bias: rng() * 0.32, facetAng: rng() * Math.PI });
+  }
+  const dendrites = [];
+  const edgeSeeds = [
+    { x: 0.99, y: 0.88, ang: -2.42 }, { x: 0.99, y: 0.54, ang: -2.84 }, { x: 0.99, y: 0.16, ang: 2.52 },
+    { x: 0.82, y: 0.01, ang: 1.98 }, { x: 0.56, y: 0.01, ang: 1.64 }, { x: 0.24, y: 0.01, ang: 1.24 },
+    { x: 0.01, y: 0.12, ang: 0.42 }, { x: 0.01, y: 0.88, ang: -0.44 }, { x: 0.32, y: 0.99, ang: -1.38 },
+    { x: 0.62, y: 0.99, ang: -1.78 }, { x: 0.86, y: 0.99, ang: -2.08 }, { x: 0.99, y: 0.34, ang: 2.86 }
+  ];
+  for (let i = 0; i < edgeSeeds.length; i++) {
+    const es = edgeSeeds[i];
+    const baseLen = (es.x > 0.48 || es.y > 0.84 || es.y < 0.12) ? (0.24 + rng() * 0.20) : (0.14 + rng() * 0.10);
+    const ang = es.ang + (rng() - 0.5) * 0.24;
+    const twigs = [];
+    const subCount = 4 + Math.floor(rng() * 3);
+    for (let j = 0; j < subCount; j++) {
+      const tPos = 0.18 + (j / subCount) * 0.68;
+      const side = (j % 2 === 0 ? 1 : -1);
+      twigs.push({ tPos, dAng: side * (0.50 + rng() * 0.30), lenRatio: 0.38 + rng() * 0.30, microSide: -side * (0.44 + rng() * 0.22) });
+    }
+    dendrites.push({ x: es.x, y: es.y, ang, len: baseLen, delay: 0.08 + rng() * 0.20, speed: 0.88 + rng() * 0.44, twigs });
+  }
+  const clusters = [
+    { x: 0.74, y: 0.36, cxCompact: 0.84, cyCompact: 0.44, radius: 0.22 + rng() * 0.04, arms: 6, rot: rng() * 0.52, hero: true },
+    { x: 0.56, y: 0.23, cxCompact: 0.67, cyCompact: 0.28, radius: 0.13 + rng() * 0.03, arms: 6, rot: rng() * 0.52, hero: false },
+    { x: 0.89, y: 0.66, cxCompact: 0.93, cyCompact: 0.72, radius: 0.12 + rng() * 0.03, arms: 6, rot: rng() * 0.52, hero: false },
+    { x: 0.62, y: 0.76, cxCompact: 0.74, cyCompact: 0.78, radius: 0.10 + rng() * 0.03, arms: 6, rot: rng() * 0.52, hero: false }
+  ];
+  const icicles = [
+    { bx: 0.78, by: 1.01, ang: -1.62 + (rng() - 0.5) * 0.10, len: 0.72, w: 23, delay: 0.22 },
+    { bx: 0.88, by: 1.01, ang: -1.90 + (rng() - 0.5) * 0.12, len: 0.58, w: 18, delay: 0.28 },
+    { bx: 0.69, by: 1.01, ang: -1.36 + (rng() - 0.5) * 0.12, len: 0.46, w: 15, delay: 0.34 },
+    { bx: 0.58, by: 1.01, ang: -1.50 + (rng() - 0.5) * 0.14, len: 0.32, w: 12, delay: 0.38 },
+    { bx: 0.95, by: 1.01, ang: -2.14 + (rng() - 0.5) * 0.12, len: 0.44, w: 15, delay: 0.30 },
+    { bx: 1.01, by: 0.68, ang: -2.62 + (rng() - 0.5) * 0.12, len: 0.34, w: 13, delay: 0.26 },
+    { bx: 1.01, by: 0.26, ang: 2.66 + (rng() - 0.5) * 0.14, len: 0.28, w: 11, delay: 0.32 },
+    { bx: 0.93, by: -0.01, ang: 1.72 + (rng() - 0.5) * 0.10, len: 0.34, w: 13, delay: 0.26 },
+    { bx: 0.85, by: -0.01, ang: 1.54 + (rng() - 0.5) * 0.10, len: 0.23, w: 10, delay: 0.34 },
+    { bx: 0.75, by: -0.01, ang: 1.66 + (rng() - 0.5) * 0.12, len: 0.28, w: 11, delay: 0.38 },
+    { bx: 0.64, by: -0.01, ang: 1.46 + (rng() - 0.5) * 0.10, len: 0.17, w: 8, delay: 0.44 },
+    { bx: 0.34, by: -0.01, ang: 1.48 + (rng() - 0.5) * 0.10, len: 0.13, w: 7, delay: 0.46 },
+    { bx: 0.05, by: 1.01, ang: -1.16 + (rng() - 0.5) * 0.12, len: 0.22, w: 10, delay: 0.32 }
+  ];
+  const sparkles = [];
+  for (let i = 0; i < 18; i++) {
+    sparkles.push({
+      nx: 0.36 + rng() * 0.60,
+      ny: 0.10 + rng() * 0.82,
+      seed: rng() * Math.PI * 2,
+      speed: 2.6 + rng() * 3.0
+    });
+  }
+  const frontWaves = {
+    rightSpeed: 0.98 + rng() * 0.22,
+    bottomSpeed: 0.92 + rng() * 0.22,
+    topSpeed: 0.84 + rng() * 0.22,
+    leftSpeed: 0.64 + rng() * 0.20,
+    phaseA: rng() * 6.28,
+    phaseB: rng() * 6.28
+  };
+  return { seed, plates, dendrites, clusters, icicles, sparkles, frontWaves };
+}
+
+function createFrostSnowParticle(layer, initial = false) {
+  const speedBase = layer === 0 ? 0.40 : layer === 1 ? 1.38 : 2.25;
+  return {
+    layer,
+    xNorm: Math.random() * 1.36 - 0.18,
+    yNorm: initial ? Math.random() : (-0.06 - Math.random() * 0.22),
+    vxScale: 0.92 + Math.random() * 0.64,
+    vyScale: speedBase * (0.86 + Math.random() * 0.52),
+    len: layer === 1 ? (2 + Math.floor(Math.random() * 4)) : 1,
+    cross: layer === 2 && Math.random() < 0.42,
+    seed: Math.random() * Math.PI * 2
+  };
+}
+
+function createFrostShard(idx, total, ax, ay, kind) {
+  const ang = (idx / total) * Math.PI * 2 + (Math.random() - 0.5) * 0.32;
+  const isChunk = kind === 'chunk';
+  const spd = isChunk ? (0.46 + Math.random() * 0.76) : (0.72 + Math.random() * 0.98);
+  return {
+    kind,
+    xNorm: ax + (Math.random() - 0.5) * 0.04,
+    yNorm: ay + (Math.random() - 0.5) * 0.04,
+    vx: Math.cos(ang) * spd,
+    vy: Math.sin(ang) * spd * 0.75 - (isChunk ? 0.20 : 0.30),
+    life: 0,
+    maxLife: isChunk ? (0.76 + Math.random() * 0.40) : (0.56 + Math.random() * 0.38)
+  };
+}
+
+function evalFrostChoreography(gp) {
+  let cover = 0, wind = 1.50, sweep = 0, crystal = 0.26, bloom = 0, hesitate = 0;
+  if (gp < 0.15) {
+    const u = gp / 0.15, easeOut = 1 - Math.pow(1 - u, 2);
+    sweep = Math.sin(u * Math.PI); wind = 1.5 + 2.4 * easeOut; cover = 0.12 * easeOut; crystal = 0.24 + 0.16 * easeOut;
+  } else if (gp < 0.46) {
+    const u = (gp - 0.15) / 0.31, accel = u * u * (1.5 - 0.5 * u);
+    wind = 3.7 - 0.70 * u; cover = 0.12 + 0.48 * accel; crystal = 0.40 + 0.34 * accel; sweep = 0.28 * (1 - u);
+  } else if (gp < 0.65) {
+    if (gp < 0.56) {
+      const u = (gp - 0.46) / 0.10;
+      cover = 0.60 + 0.016 * Math.sin(u * Math.PI * 3); wind = 2.95 - 0.45 * u; crystal = 0.74 + 0.05 * u; hesitate = Math.sin(u * Math.PI);
+    } else {
+      const u = (gp - 0.56) / 0.09, snap = 1 - Math.pow(1 - u, 3);
+      cover = 0.60 + 0.32 * snap; wind = 2.5 + 1.25 * Math.sin(u * Math.PI); crystal = 0.79 + 0.18 * snap;
+    }
+  } else if (gp < 0.84) {
+    const u = (gp - 0.65) / 0.19, pulse = Math.sin(u * Math.PI);
+    cover = 0.92 + 0.06 * u; wind = 2.75 - 0.65 * u; crystal = 0.97 + 0.16 * pulse; bloom = pulse;
+  } else {
+    const u = (gp - 0.84) / 0.16, settle = 1 - Math.pow(1 - u, 2);
+    cover = 0.98 - 0.05 * settle; wind = 2.20 - 0.55 * settle; crystal = 1.0 - 0.03 * settle; bloom = 0.14 * (1 - settle);
+  }
+  return { cover, wind, sweep, crystal, bloom, hesitate };
+}
+
+function ensureFrostState(canvas) {
+  if (!canvas._frostState) {
+    const now = performance.now();
+    canvas._frostState = {
+      mode: 'freeze', freezeStartMs: now, freezeDurMs: 3100,
+      scene: buildFrostScene((Date.now() ^ Math.floor(Math.random() * 1e6)) & 0xffffff),
+      burstDone: false, shards: [], shockwave: 0,
+      snow: [
+        ...Array.from({ length: 108 }, () => createFrostSnowParticle(0, true)),
+        ...Array.from({ length: 196 }, () => createFrostSnowParticle(1, true)),
+        ...Array.from({ length: 54 }, () => createFrostSnowParticle(2, true))
+      ],
+      windSpeed: 1.6, freezeCover: 0.0, coldSweep: 0.0, crystalGrowth: 0.26,
+      burstBloom: 0.0, hesitatePulse: 0.0, glintOffset: -160, nextGlintMs: now + 650, lastTickMs: now
+    };
+  }
+  return canvas._frostState;
+}
+
+function triggerFrostSurge(durationMs = 3100) {
+  if (document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches)) return;
+  const now = performance.now();
+  const clamped = Math.min(4200, Math.max(2400, durationMs));
+  frostSurgeUntil = Math.max(frostSurgeUntil, now + clamped);
+  document.querySelectorAll('.pixel-matrix-canvas[data-pixel-theme="frost"]').forEach(c => {
+    const fst = ensureFrostState(c);
+    fst.scene = buildFrostScene((Date.now() ^ Math.floor(Math.random() * 1e6)) & 0xffffff);
+    fst.mode = 'freeze'; fst.freezeStartMs = now; fst.freezeDurMs = clamped; fst.burstDone = false; fst.shards = []; fst.shockwave = 0;
+    drawPixelMatrix(c, pixelPhase);
+  });
+}
+
+function frostDistToSegSq(px, py, ax, ay, bx, by) {
+  const vx = bx - ax, vy = by - ay, lenSq = vx * vx + vy * vy;
+  if (lenSq < 0.0001) return (px - ax) * (px - ax) + (py - ay) * (py - ay);
+  const t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / lenSq));
+  const qx = ax + t * vx, qy = ay + t * vy;
+  return (px - qx) * (px - qx) + (py - qy) * (py - qy);
+}
+
+function sampleFrostSpike(px, py, ax, ay, angle, maxLen, halfW) {
+  const cos = Math.cos(angle), sin = Math.sin(angle), dx = px - ax, dy = py - ay;
+  const along = dx * cos + dy * sin;
+  if (along < -2 || along > maxLen) return null;
+  const across = -dx * sin + dy * cos, u = Math.max(0, along / Math.max(1, maxLen));
+  const profile = u < 0.16 ? (0.82 + (u / 0.16) * 0.18) : Math.max(0, 1 - Math.pow((u - 0.16) / 0.84, 1.08));
+  const curW = Math.max(1.2, halfW * profile), absA = Math.abs(across);
+  if (absA > curW) return null;
+  const edgeRatio = absA / curW;
+  let facet = 0.52;
+  if (absA <= 1.75 || u > 0.88) facet = 0.90 + u * 0.10;
+  else if (across < 0) facet = 0.62 + edgeRatio * 0.28 + u * 0.10;
+  else facet = 0.20 + (1 - edgeRatio) * 0.28 + u * 0.08;
+  return { facet: Math.min(1, facet), isRim: (across < 0 && edgeRatio > 0.74) || u > 0.90 };
+}
+
+function ensureStormState(canvas) {
+  if (!canvas._stormState) {
+    const now = performance.now();
+    canvas._stormState = {
+      particles: Array.from({ length: 76 }, () => createStormParticle()),
+      rain: Array.from({ length: 78 }, () => createStormRainDrop(true)),
+      arcs: [],
+      nextArcMs: now + 280,
+      climaxStartMs: now - 300,
+      climaxDurMs: 3600,
+      nextClimaxMs: now + 5400,
+      lastTickMs: now,
+      flingBurstDone: false,
+      climaxArcDone: false
+    };
+  }
+  return canvas._stormState;
+}
+
+function triggerStormSurge(durationMs = 3600) {
+  if (document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches)) return;
+  const now = performance.now();
+  const clamped = Math.min(4200, Math.max(2400, durationMs));
+  stormSurgeUntil = Math.max(stormSurgeUntil, now + clamped);
+  const canvases = document.querySelectorAll('.pixel-matrix-canvas[data-pixel-theme="storm"]');
+  canvases.forEach(c => {
+    const st = ensureStormState(c);
+    st.climaxStartMs = now;
+    st.climaxDurMs = clamped;
+    st.nextClimaxMs = now + clamped + 2800;
+    st.flingBurstDone = false;
+    st.climaxArcDone = false;
+    const w = c.clientWidth || 360;
+    const h = c.clientHeight || 220;
+    st.arcs.push(generateStormBandArc(w * 0.65, h * 0.48, 0.14, Math.hypot(w * 0.60, h * 0.54), w, h, 42));
     drawPixelMatrix(c, pixelPhase);
   });
 }
@@ -4361,6 +6268,707 @@ function drawPixelMatrix(canvas, phase = 0) {
     return;
   }
 
+
+  if (theme === 'storm') {
+    const dpr = Math.min(window.devicePixelRatio || 1, window.innerWidth <= 540 ? 1.5 : 2);
+    const bw = Math.round(w * dpr);
+    const bh = Math.round(h * dpr);
+    if (canvas.width !== bw || canvas.height !== bh) {
+      canvas.width = bw;
+      canvas.height = bh;
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, w, h);
+
+    const cell = 4;
+    const drawSz = cell - 1;
+    const cols = Math.ceil(w / cell);
+    const rows = Math.ceil(h / cell);
+    const nowMs = performance.now();
+    const isMotionPaused = document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches);
+    const st = ensureStormState(canvas);
+    const t = isMotionPaused ? STORM_STATIC_PHASE : phase;
+
+    if (!isMotionPaused && st.climaxStartMs === 0 && nowMs >= st.nextClimaxMs) {
+      st.climaxStartMs = nowMs;
+      st.flingBurstDone = false;
+      st.climaxArcDone = false;
+      st.nextClimaxMs = nowMs + st.climaxDurMs + 2800;
+    }
+    let climaxP = -1;
+    if (!isMotionPaused && st.climaxStartMs > 0) {
+      const elapsedC = nowMs - st.climaxStartMs;
+      if (elapsedC >= st.climaxDurMs) {
+        st.climaxStartMs = 0;
+        st.flingBurstDone = false;
+        st.climaxArcDone = false;
+      } else {
+        climaxP = elapsedC / st.climaxDurMs;
+      }
+    }
+
+    let eyeScale = 1.0;
+    let spinBoost = 1.0;
+    let flingPulse = 0.0;
+    let compressBoost = 0.0;
+    let gustPower = 0.28 + 0.16 * Math.sin(t * 1.4);
+    if (isMotionPaused) {
+      gustPower = 0.28;
+    } else if (climaxP >= 0) {
+      if (climaxP < 0.22) {
+        const u = climaxP / 0.22;
+        const ease = 1 - Math.pow(1 - u, 2);
+        eyeScale = 1.0 - 0.48 * ease;
+        spinBoost = 1.0 + 0.72 * ease;
+        compressBoost = 0.22 * ease;
+        gustPower = 0.35 + 0.45 * ease;
+      } else if (climaxP < 0.50) {
+        const u = (climaxP - 0.22) / 0.28;
+        eyeScale = 0.52 + 0.08 * Math.sin(u * Math.PI);
+        spinBoost = 1.72 + 1.05 * Math.sin(u * Math.PI * 0.9);
+        compressBoost = 0.28;
+        gustPower = 0.85 + 0.35 * Math.sin(u * Math.PI * 3);
+        if (!st.climaxArcDone && u > 0.15) {
+          st.climaxArcDone = true;
+          st.arcs.push(generateStormBandArc(w * 0.65, h * 0.48, 0.10, Math.hypot(w * 0.60, h * 0.54), w, h, 35));
+        }
+      } else if (climaxP < 0.76) {
+        const u = (climaxP - 0.50) / 0.26;
+        flingPulse = Math.sin(u * Math.PI);
+        eyeScale = 0.58 + 0.54 * Math.pow(u, 0.72);
+        spinBoost = 2.45 - 0.75 * u;
+        compressBoost = 0.14 * (1 - u);
+        gustPower = 0.95 - 0.30 * u;
+        if (!st.flingBurstDone && u > 0.10) {
+          st.flingBurstDone = true;
+          for (let k = 0; k < 20 && k < st.particles.length; k++) {
+            const p = st.particles[(k * 3) % st.particles.length];
+            p.mode = 'fling';
+            p.rNorm = 0.22 + Math.random() * 0.16;
+            p.vrBase = 0.54 + Math.random() * 0.36;
+            p.life = 0;
+            p.maxLife = 0.85 + Math.random() * 0.45;
+          }
+        }
+      } else {
+        const u = (climaxP - 0.76) / 0.24;
+        const ease = 1 - Math.pow(1 - u, 2);
+        eyeScale = 1.12 - 0.12 * ease;
+        spinBoost = 1.70 - 0.70 * ease;
+        compressBoost = -0.04 * (1 - ease);
+        gustPower = 0.65 - 0.38 * ease;
+      }
+    }
+
+    const eyeCx = w * (0.65 + 0.015 * Math.sin(t * 0.8));
+    const eyeCy = h * (0.48 + 0.018 * Math.cos(t * 0.95));
+    const maxR = Math.hypot(w * 0.62, h * 0.55);
+    const eyeR = (0.132 + 0.008 * Math.sin(t * 1.4)) * eyeScale;
+
+    if (!isMotionPaused) {
+      if (nowMs >= st.nextArcMs) {
+        st.arcs.push(generateStormBandArc(eyeCx, eyeCy, eyeR, maxR, w, h, 25));
+        const inPeak = climaxP >= 0.18 && climaxP <= 0.64;
+        st.nextArcMs = nowMs + (inPeak ? (145 + Math.random() * 195) : (480 + Math.random() * 620));
+      }
+      st.arcs = st.arcs.filter(arc => (nowMs - arc.startMs) < arc.durMs);
+    } else {
+      st.arcs = [];
+    }
+
+    const activeArcSegs = [];
+    let globalSkyFlash = 0;
+    for (let ai = 0; ai < st.arcs.length; ai++) {
+      const arc = st.arcs[ai];
+      const ap = Math.max(0, Math.min(1, (nowMs - arc.startMs) / arc.durMs));
+      const flashInt = ap < 0.14 ? (ap / 0.14) : Math.pow(1 - (ap - 0.14) / 0.86, 1.65);
+      if (flashInt > 0.04) {
+        globalSkyFlash = Math.max(globalSkyFlash, flashInt);
+        for (let si = 0; si < arc.segs.length; si++) {
+          activeArcSegs.push({ ...arc.segs[si], flashInt });
+        }
+      }
+    }
+
+    const spinPhase = t * 1.28 * spinBoost;
+    const bandGrid = new Uint8Array(cols * rows);
+    const flashRadiusSq = 54 * 54;
+    const coreDistSq = Math.pow(cell * 0.65, 2);
+    const haloDistSq = Math.pow(cell * 1.80, 2);
+
+    const evalOuterDeck = (px, py) => {
+      const dx = px - eyeCx, dy = py - eyeCy;
+      const dist = Math.hypot(dx, dy);
+      const theta = Math.atan2(dy, dx);
+      const pull = 0.25 * Math.sin(theta * 2.0 - dist * 0.013 + spinPhase * 0.62);
+      const wave1 = 0.5 + 0.5 * Math.sin(px * 0.021 + py * 0.012 - t * 1.45 + pull * 2.5);
+      const wave2 = 0.5 + 0.5 * Math.cos(px * 0.036 - py * 0.026 + t * 1.05 - pull * 1.7);
+      const strata = Math.pow(0.56 * wave1 + 0.44 * wave2, 1.38);
+      const topAnvil = Math.max(0, 1.0 - (py / (h * 0.78))) * 0.30;
+      const trailShelf = px < eyeCx ? 0.16 * (0.5 + 0.5 * Math.sin(py * 0.044 + px * 0.015 - t * 1.15)) : 0;
+      return Math.min(1, strata * 0.62 + topAnvil + trailShelf + globalSkyFlash * 0.34);
+    };
+
+    const evalVortexField = (px, py) => {
+      const dx = px - eyeCx;
+      const dy = (py - eyeCy) * 1.12;
+      const dist = Math.hypot(dx, dy);
+      const rNorm = dist / Math.max(1, maxR);
+      const theta = Math.atan2(dy, dx);
+      const shearPull = 1.0 + 0.28 * Math.cos(theta - t * 0.55) + 0.14 * Math.sin(theta * 2 + t * 0.40);
+      const rEff = rNorm / shearPull;
+      if (rEff < eyeR * 0.85) return 0.0;
+
+      const wallRise = Math.min(1, Math.max(0, (rEff - eyeR * 0.85) / 0.075));
+      const logR = Math.log(Math.max(0.05, rEff));
+      const warp = 0.40 * Math.sin(theta * 2.0 + logR * 2.6 - t * 0.65) + 0.20 * Math.cos(rEff * 10.5 - t * 1.25);
+      const thW = theta + warp;
+      const armPrimary = 0.5 + 0.5 * Math.sin(thW * 2.0 - logR * 5.8 + spinPhase);
+      const armSecondary = 0.5 + 0.5 * Math.cos(thW * 3.0 - logR * 8.6 + spinPhase * 1.26 + 1.0);
+      const armDetail = 0.5 + 0.5 * Math.sin(thW * 5.0 - logR * 12.6 + spinPhase * 0.86 - 0.7);
+      const ridgeCore = Math.pow(0.56 * armPrimary + 0.28 * armSecondary + 0.16 * armDetail, 1.42);
+
+      const arcCutA = 0.5 + 0.5 * Math.sin(theta * 3.0 + logR * 3.4 - t * 0.92);
+      const arcCutB = 0.5 + 0.5 * Math.cos(theta * 4.0 - logR * 2.2 + t * 0.68);
+      const bandMask = Math.min(1, Math.max(0, (0.60 * arcCutA + 0.40 * arcCutB - 0.16) * 1.45));
+
+      const eyewallRing = Math.exp(-Math.pow((rEff - (eyeR * 1.14 + flingPulse * 0.10)) / 0.105, 2.0));
+      const outerDecay = Math.max(0, 1.0 - Math.pow(Math.max(0, (rEff - eyeR * 1.02) / 0.82), 1.32));
+
+      const wallMix = eyewallRing * (0.52 + 0.48 * ridgeCore) * (0.80 + 0.20 * bandMask);
+      const armMix = outerDecay * ridgeCore * (0.38 + 0.82 * bandMask) * (0.96 + compressBoost);
+      const d = wallRise * Math.min(1.0, Math.max(wallMix * 1.06, armMix * 1.14));
+      return d < 0.09 ? 0.0 : Math.min(0.995, d);
+    };
+
+    for (let y = 0; y < rows; y++) {
+      const py = y * cell + cell * 0.5;
+      for (let x = 0; x < cols; x++) {
+        const px = x * cell + cell * 0.5;
+        const bayer = (BAYER4[y & 3][x & 3] + 0.5) / 16;
+
+        const dxE = px - eyeCx, dyE = (py - eyeCy) * 1.12;
+        const rEffCheck = Math.hypot(dxE, dyE) / Math.max(1, maxR) / (1.0 + 0.28 * Math.cos(Math.atan2(dyE, dxE) - t * 0.55));
+        const inHollowEye = rEffCheck < eyeR * 0.86;
+
+        const vDens = evalVortexField(px, py);
+        const lenE = Math.max(8, Math.hypot(dxE, dyE));
+        const tx = -dyE / lenE, ty = dxE / lenE;
+        const vUp = vDens > 0.09 ? evalVortexField(px - tx * 9 - (dxE / lenE) * 4, py - ty * 9 - (dyE / lenE) * 4) : 0;
+        const windwardEdge = vDens > 0.09 ? Math.max(0, vDens - vUp) : 0;
+
+        const bgDens = evalOuterDeck(px, py);
+        const bgUp = evalOuterDeck(px - 8, py - 4);
+        const bgCrest = Math.max(0, bgDens - bgUp);
+
+        const hSeed = Math.sin(x * 13.71 + y * 61.37 + Math.floor(t * 5.0) * 17.3) * 43758.5453;
+        const cellNoise = (hSeed - Math.floor(hSeed) - 0.5) * 0.07;
+
+        let arcBoost = 0, arcCoreHit = false, arcHaloHit = false;
+        if (activeArcSegs.length > 0) {
+          let minD2 = flashRadiusSq, bestFlash = 0, bestCore = 1;
+          for (let s = 0; s < activeArcSegs.length; s++) {
+            const sg = activeArcSegs[s];
+            const d2 = distToSegSq(px, py, sg.ax, sg.ay, sg.bx, sg.by);
+            if (d2 < minD2) { minD2 = d2; bestFlash = sg.flashInt; bestCore = sg.core; }
+          }
+          if (minD2 <= coreDistSq * bestCore && bestFlash > 0.22) arcCoreHit = true;
+          else if (minD2 <= haloDistSq * bestCore && bestFlash > 0.20) arcHaloHit = true;
+          if (minD2 < flashRadiusSq) arcBoost = Math.pow(1 - Math.sqrt(minD2) / 54, 1.25) * bestFlash * 0.72;
+        }
+
+        let idx = 0;
+        if (arcCoreHit) idx = 11;
+        else if (arcHaloHit) idx = bayer > 0.35 ? 10 : 11;
+        else if (inHollowEye) idx = (rEffCheck > eyeR * 0.62 && bayer > 0.66) ? 1 : 0;
+        else if (vDens <= 0.02) {
+          const baroWave = 0.5 + 0.5 * Math.sin(px * 0.025 + py * 0.017 - t * 1.4 + globalSkyFlash * 1.8);
+          const bgVal = Math.max(0.03, Math.min(0.98, bgDens * 0.68 + bgCrest * 1.55 + baroWave * 0.14 + arcBoost * 0.90 + globalSkyFlash * 0.26));
+          const maxBgIdx = globalSkyFlash > 0.25 ? 7 : 5;
+          const scaledBg = 1 + bgVal * (maxBgIdx - 0.6);
+          const bBand = Math.floor(scaledBg);
+          idx = Math.min(maxBgIdx, Math.max(1, bBand + ((scaledBg - bBand) > (0.28 + bayer * 0.48) ? 1 : 0)));
+        } else {
+          const leftScrim = px < w * 0.30 ? (0.80 + 0.20 * (px / (w * 0.30))) : 1.0;
+          const eyewallBoost = Math.exp(-Math.pow((rEffCheck - eyeR * 1.15) / 0.14, 2)) * 0.18;
+          const val = Math.max(0.03, Math.min(0.998, ((vDens - 0.06) * 0.96 + windwardEdge * 2.85 + eyewallBoost + cellNoise + arcBoost + globalSkyFlash * 0.16) * leftScrim));
+          const scaled = 3.5 + val * 7.8;
+          const band = Math.floor(scaled);
+          idx = Math.min(11, Math.max(3, band + ((scaled - band) > (0.24 + bayer * 0.46) ? 1 : 0)));
+        }
+        bandGrid[y * cols + x] = idx;
+      }
+    }
+
+    for (let y = 0; y < rows; y++) {
+      const rowOff = y * cols;
+      for (let x = 0; x < cols; x++) {
+        let idx = bandGrid[rowOff + x];
+        if (idx <= 3) {
+          const up = y > 0 ? bandGrid[(y - 1) * cols + x] : 0;
+          const dn = y + 1 < rows ? bandGrid[(y + 1) * cols + x] : 0;
+          const lf = x > 0 ? bandGrid[rowOff + x - 1] : 0;
+          const rt = x + 1 < cols ? bandGrid[rowOff + x + 1] : 0;
+          if (up >= 6 || dn >= 6 || lf >= 6 || rt >= 6) idx = 2;
+        }
+        ctx.fillStyle = STORM_PALETTE[idx];
+        ctx.fillRect(x * cell, y * cell, drawSz, drawSz);
+      }
+    }
+
+    const dt = isMotionPaused ? 0 : Math.min(0.05, Math.max(0.001, (nowMs - st.lastTickMs) / 1000));
+    st.lastTickMs = nowMs;
+    const drawCell = (gx, gy, colorIdx) => {
+      if (gx < 0 || gx >= cols || gy < 0 || gy >= rows) return;
+      ctx.fillStyle = STORM_PALETTE[colorIdx];
+      ctx.fillRect(gx * cell, gy * cell, drawSz, drawSz);
+    };
+
+    const baseSlant = 0.46 + gustPower * 0.58;
+    for (let i = 0; i < st.rain.length; i++) {
+      const rn = st.rain[i];
+      if (!isMotionPaused) {
+        const px = rn.xNorm * w;
+        const dx = eyeCx - px;
+        const pullX = Math.max(-0.45, Math.min(0.85, dx / Math.max(80, w * 0.75))) * (0.35 + gustPower * 0.55);
+        rn.yNorm += rn.speed * (0.95 + gustPower * 0.65) * dt;
+        rn.xNorm += (rn.speed * baseSlant + pullX * 0.42) * dt;
+        if (rn.yNorm > 1.06 || rn.xNorm > 1.15 || rn.xNorm < -0.15) {
+          st.rain[i] = createStormRainDrop(false);
+          continue;
+        }
+      }
+      const rx = rn.xNorm * w, ry = rn.yNorm * h;
+      if (Math.hypot(rx - eyeCx, ry - eyeCy) < eyeR * maxR * 0.76) continue;
+      const localLean = baseSlant + ((eyeCx - rx) / Math.max(120, w)) * 0.25;
+      const litByArc = globalSkyFlash > 0.30;
+      const rainIdx = litByArc ? (rn.depth ? 11 : 9) : (rn.depth ? 9 : 6);
+      for (let seg = 0; seg < rn.len; seg++) {
+        const gx = Math.floor((rx - seg * cell * localLean * 0.9) / cell);
+        const gy = Math.floor((ry - seg * cell * 0.95) / cell);
+        drawCell(gx, gy, rainIdx);
+      }
+    }
+
+    const ptsPool = st.particles;
+    for (let i = 0; i < ptsPool.length; i++) {
+      const pt = ptsPool[i];
+      if (!isMotionPaused) {
+        const angVel = pt.omegaBase * spinBoost * (0.48 / Math.max(0.13, pt.rNorm + 0.07));
+        pt.theta += angVel * dt;
+        const radialMod = pt.mode === 'fling' ? (pt.vrBase + flingPulse * 0.42) : pt.mode === 'inward' ? (pt.vrBase * (1 + compressBoost)) : pt.vrBase;
+        pt.rNorm += radialMod * dt;
+        pt.life += dt;
+        if (pt.life >= pt.maxLife || pt.rNorm < eyeR * 0.88 || pt.rNorm > 1.08) {
+          ptsPool[i] = createStormParticle();
+          continue;
+        }
+      }
+      const px = eyeCx + Math.cos(pt.theta) * pt.rNorm * maxR;
+      const py = eyeCy + Math.sin(pt.theta) * pt.rNorm * maxR * 0.88;
+      if (px < 0 || px >= w || py < 0 || py >= h) continue;
+      const gx = Math.max(0, Math.min(cols - 1, Math.floor(px / cell)));
+      const gy = Math.max(0, Math.min(rows - 1, Math.floor(py / cell)));
+      drawCell(gx, gy, (pt.rNorm < eyeR * 1.95 || pt.mode === 'fling') ? 11 : 10);
+      if (pt.shape === 'streak2' || pt.shape === 'streak3') {
+        const trailCount = pt.shape === 'streak3' ? 2 : 1;
+        for (let tr = 1; tr <= trailCount; tr++) {
+          drawCell(
+            Math.max(0, Math.min(cols - 1, Math.floor((px + Math.sin(pt.theta) * 4 * tr) / cell))),
+            Math.max(0, Math.min(rows - 1, Math.floor((py - Math.cos(pt.theta) * 4 * tr) / cell))),
+            tr === 1 ? 8 : 6
+          );
+        }
+      }
+    }
+    return;
+  }
+
+  if (theme === 'frost') {
+    const dpr = Math.min(window.devicePixelRatio || 1, window.innerWidth <= 540 ? 1.5 : 2);
+    const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+    if (canvas.width !== bw || canvas.height !== bh) { canvas.width = bw; canvas.height = bh; }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, w, h);
+
+    const cell = w <= 360 ? 4 : 5, drawSz = cell - 1, cols = Math.ceil(w / cell), rows = Math.ceil(h / cell);
+    const nowMs = performance.now();
+    const isMotionPaused = document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches);
+    const fst = ensureFrostState(canvas);
+    const dt = isMotionPaused ? 0 : Math.min(0.05, Math.max(0.001, (nowMs - fst.lastTickMs) / 1000));
+    fst.lastTickMs = nowMs;
+    const t = isMotionPaused ? FROST_STATIC_PHASE : phase;
+    const mobile = w <= 560;
+    const isCompactHero = h <= 220;
+
+    if (isMotionPaused) {
+      fst.freezeCover = 0.94; fst.windSpeed = 1.65; fst.crystalGrowth = 0.98;
+      fst.coldSweep = 0.16; fst.burstBloom = 0.22; fst.hesitatePulse = 0.0; fst.shockwave = 0.0; fst.glintOffset = w * 0.62;
+    } else if (fst.mode === 'freeze') {
+      const elapsed = Math.max(0, nowMs - fst.freezeStartMs);
+      const gp = Math.min(1, elapsed / Math.max(1, fst.freezeDurMs));
+      const ch = evalFrostChoreography(gp);
+      fst.freezeCover = ch.cover; fst.windSpeed = ch.wind; fst.coldSweep = ch.sweep;
+      fst.crystalGrowth = ch.crystal; fst.burstBloom = ch.bloom; fst.hesitatePulse = ch.hesitate;
+
+      if (!fst.burstDone && gp >= 0.66) {
+        fst.burstDone = true;
+        fst.shockwave = 0.01;
+        const burstCount = mobile ? 26 : 48;
+        for (let ci = 0; ci < fst.scene.clusters.length; ci++) {
+          const cl = fst.scene.clusters[ci];
+          const clx = isCompactHero ? cl.cxCompact : cl.x, cly = isCompactHero ? cl.cyCompact : cl.y;
+          const perCluster = cl.hero ? Math.round(burstCount * 0.46) : Math.round(burstCount * 0.18);
+          for (let i = 0; i < perCluster; i++) {
+            fst.shards.push(createFrostShard(i, perCluster, clx, cly, (i % 2 === 0) ? 'chunk' : 'powder'));
+          }
+        }
+      }
+      if (fst.shockwave > 0) fst.shockwave = Math.min(1.0, fst.shockwave + dt * 1.85);
+      if (gp >= 1) { fst.mode = 'normal'; fst.shockwave = 0; }
+    } else {
+      const lerpR = Math.min(1, dt * 3.5);
+      const surgeBoost = nowMs < frostSurgeUntil ? 0.72 : 0.0;
+      fst.windSpeed += ((1.64 + surgeBoost + 0.28 * Math.sin(t * 1.55)) - fst.windSpeed) * lerpR;
+      fst.freezeCover += ((0.94 + 0.015 * Math.sin(t * 0.7)) - fst.freezeCover) * lerpR;
+      fst.crystalGrowth += ((0.98 + 0.025 * Math.sin(t * 1.1)) - fst.crystalGrowth) * lerpR;
+      fst.coldSweep += ((0.32 + 0.24 * Math.sin(t * 1.45)) - fst.coldSweep) * lerpR;
+      fst.burstBloom += (0.0 - fst.burstBloom) * lerpR;
+      fst.hesitatePulse = 0;
+      fst.shockwave = 0;
+    }
+
+    if (!isMotionPaused) {
+      if (nowMs >= fst.nextGlintMs) {
+        fst.glintOffset = -140;
+        fst.nextGlintMs = nowMs + (fst.mode === 'normal' ? 1750 : 1050);
+      } else {
+        fst.glintOffset += dt * 440;
+      }
+    }
+
+    const bandGrid = new Uint8Array(cols * rows), ownerGrid = new Uint8Array(cols * rows);
+    const { frontWaves: fw, plates, dendrites, clusters, icicles, sparkles } = fst.scene;
+    const cover = fst.freezeCover;
+    const minDim = Math.min(w, h);
+
+    // Precompute feathery rime dendrites (3 tiers)
+    const dendriteSegs = [];
+    for (let i = 0; i < dendrites.length; i++) {
+      const d = dendrites[i];
+      const prog = Math.max(0, Math.min(1, (cover - d.delay) * 1.48 * d.speed));
+      if (prog <= 0.02) continue;
+      const sx = d.x * w, sy = d.y * h, fullL = d.len * minDim * 1.22 * prog;
+      const ex = sx + Math.cos(d.ang) * fullL, ey = sy + Math.sin(d.ang) * fullL;
+      dendriteSegs.push({ ax: sx, ay: sy, bx: ex, by: ey, r2: 6.2, tier: 1 });
+      for (let j = 0; j < d.twigs.length; j++) {
+        const tw = d.twigs[j];
+        if (prog < tw.tPos) continue;
+        const subProg = Math.min(1, (prog - tw.tPos) / Math.max(0.15, 1 - tw.tPos));
+        const tx = sx + Math.cos(d.ang) * (fullL * tw.tPos), ty = sy + Math.sin(d.ang) * (fullL * tw.tPos);
+        const tLen = fullL * tw.lenRatio * subProg;
+        const tex = tx + Math.cos(d.ang + tw.dAng) * tLen, tey = ty + Math.sin(d.ang + tw.dAng) * tLen;
+        dendriteSegs.push({ ax: tx, ay: ty, bx: tex, by: tey, r2: 4.0, tier: 2 });
+        if (!mobile && subProg > 0.50) {
+          const mx = (tx + tex) * 0.5, my = (ty + tey) * 0.5, mLen = tLen * 0.45 * (subProg - 0.42);
+          dendriteSegs.push({ ax: mx, ay: my, bx: mx + Math.cos(d.ang + tw.dAng + tw.microSide) * mLen, by: my + Math.sin(d.ang + tw.dAng + tw.microSide) * mLen, r2: 2.6, tier: 3 });
+        }
+      }
+    }
+
+    // Precompute ornate 6-fold snow crystal rosettes with diamond nodes & chevron barbs
+    const clusterSegs = [];
+    const clusterNodes = [];
+    let heroCx = w * 0.74, heroCy = h * 0.36;
+    for (let ci = 0; ci < clusters.length; ci++) {
+      const cl = clusters[ci];
+      const localGrow = cover > 0.46 ? Math.min(1.20, (fst.crystalGrowth - 0.42) / 0.58 + fst.burstBloom * 0.28) : Math.max(0, (cover - 0.22) * 0.72);
+      if (localGrow <= 0.05) continue;
+      const cx = (isCompactHero ? cl.cxCompact : cl.x) * w, cy = (isCompactHero ? cl.cyCompact : cl.y) * h;
+      const rad = cl.radius * (isCompactHero ? Math.min(w * 0.55, h * 1.45) : minDim) * localGrow;
+      if (cl.hero) { heroCx = cx; heroCy = cy; }
+      const coreR = cl.hero ? Math.max(6.5, rad * 0.14) : Math.max(4.5, rad * 0.13);
+      clusterNodes.push({ cx, cy, coreR, rad, hero: cl.hero });
+      for (let a = 0; a < cl.arms; a++) {
+        const ang = cl.rot + (a / cl.arms) * Math.PI * 2 + (isMotionPaused ? 0 : Math.sin(t * 0.45 + ci) * 0.04);
+        const ax2 = cx + Math.cos(ang) * rad, ay2 = cy + Math.sin(ang) * rad;
+        clusterSegs.push({ cx, cy, ax: cx, ay: cy, bx: ax2, by: ay2, rad, hero: cl.hero, tier: 1 });
+        if (localGrow > 0.36) {
+          const b1 = rad * 0.40, b1x = cx + Math.cos(ang) * b1, b1y = cy + Math.sin(ang) * b1, l1 = rad * 0.34;
+          clusterSegs.push({ cx, cy, ax: b1x, ay: b1y, bx: b1x + Math.cos(ang + 0.92) * l1, by: b1y + Math.sin(ang + 0.92) * l1, rad, hero: cl.hero, tier: 2 });
+          clusterSegs.push({ cx, cy, ax: b1x, ay: b1y, bx: b1x + Math.cos(ang - 0.92) * l1, by: b1y + Math.sin(ang - 0.92) * l1, rad, hero: cl.hero, tier: 2 });
+        }
+        if (localGrow > 0.62) {
+          const b2 = rad * 0.70, b2x = cx + Math.cos(ang) * b2, b2y = cy + Math.sin(ang) * b2, l2 = rad * 0.24;
+          clusterSegs.push({ cx, cy, ax: b2x, ay: b2y, bx: b2x + Math.cos(ang + 0.92) * l2, by: b2y + Math.sin(ang + 0.92) * l2, rad, hero: cl.hero, tier: 3 });
+          clusterSegs.push({ cx, cy, ax: b2x, ay: b2y, bx: b2x + Math.cos(ang - 0.92) * l2, by: b2y + Math.sin(ang - 0.92) * l2, rad, hero: cl.hero, tier: 3 });
+        }
+      }
+    }
+
+    // Horizon glacial ridge height function (keeps left text zone clear, rises gracefully on right)
+    const evalRidgeY = (nx) => {
+      const base = isCompactHero ? 0.89 : 0.85;
+      const rightRise = Math.max(0, (nx - 0.38) / 0.62) * (isCompactHero ? 0.08 : 0.14);
+      const peakA = 0.045 * Math.abs(((nx * 5.2 + 0.3) % 2) - 1);
+      const peakB = 0.025 * Math.abs(((nx * 11.4 + 0.7) % 2) - 1);
+      return (base - rightRise - peakA - peakB) * h;
+    };
+
+    const shockR = fst.shockwave > 0 ? fst.shockwave * Math.hypot(w * 0.55, h * 0.55) : -1;
+
+    for (let y = 0; y < rows; y++) {
+      const py = y * cell + cell * 0.5, ny = py / h;
+      for (let x = 0; x < cols; x++) {
+        const px = x * cell + cell * 0.5, nx = px / w;
+        const bayer = (BAYER4[y & 3][x & 3] + 0.5) / 16;
+
+        // Stratum 1: Deep Polar Sky + Shimmering Aurora-Ice Wind Ribbons + Twinkling Stars
+        const skyWave1 = 0.5 + 0.5 * Math.sin(nx * 8.5 - ny * 4.2 - t * 1.65 * Math.max(0.8, fst.windSpeed * 0.72));
+        const skyWave2 = 0.5 + 0.5 * Math.cos(nx * 15.0 + ny * 6.5 - t * 2.25);
+        const auroraCurtain = Math.max(0, 1 - ny * 1.35) * (0.58 * skyWave1 + 0.42 * skyWave2) * (0.65 + 0.35 * nx);
+        const squallStrata = fst.coldSweep > 0.02 ? Math.max(0, Math.sin(px * 0.036 - py * 0.024 - t * 4.8)) * fst.coldSweep : 0;
+        const skyVal = (nx * 0.32 + (1 - ny) * 0.20) * 0.55 + auroraCurtain * 0.78 + squallStrata * 0.95;
+
+        let idx = skyVal > (0.86 + bayer * 0.30) ? 4 : skyVal > (0.56 + bayer * 0.34) ? 3 : skyVal > (0.28 + bayer * 0.36) ? 2 : 1;
+        if (squallStrata > (0.52 + bayer * 0.25)) idx = Math.max(idx, 7);
+
+        // Deterministic twinkling polar night stars in open upper sky
+        const starHash = ((x * 73856093) ^ (y * 19349663)) >>> 0;
+        if (ny < 0.58 && (starHash % 97) === 0) {
+          const twk = 0.5 + 0.5 * Math.sin(t * 3.1 + (starHash % 100));
+          if (twk > 0.52) idx = Math.max(idx, twk > 0.84 ? 9 : 7);
+        }
+
+        let owner = 0;
+        const inTextBox = isCompactHero
+          ? (nx < 0.70 && ny > 0.16 && ny < 0.88)
+          : (nx < 0.50 && ny > 0.14 && ny < 0.90);
+
+        // Stratum 2: Distant Jagged Glacial Ridge with Sunlit Snow Crest
+        const ridgeY = evalRidgeY(nx);
+        if (py >= ridgeY) {
+          const depth = py - ridgeY;
+          if (depth < cell * 1.65) {
+            idx = Math.max(idx, (nx > 0.42 && !inTextBox) ? (bayer > 0.35 ? 9 : 8) : (bayer > 0.4 ? 7 : 6));
+          } else if (depth < cell * 3.8) {
+            idx = Math.max(2, Math.min(idx, bayer > 0.45 ? 4 : 3));
+          } else {
+            idx = bayer > 0.55 ? 2 : 1;
+          }
+        }
+
+        // Stratum 3: Advancing Jagged Freeze Front + Faceted Translucent Ice Plates
+        const dMin = Math.min((1 - nx) / fw.rightSpeed, (1 - ny) / fw.bottomSpeed, ny / fw.topSpeed, nx / fw.leftSpeed);
+        const branchFingers = 0.085 * Math.sin(nx * 19 + fw.phaseA) + 0.072 * Math.cos(ny * 16 + fw.phaseB) + 0.052 * Math.sin((nx - ny) * 24);
+        const frontDelta = dMin - (cover * 0.64 + branchFingers);
+
+        if (frontDelta <= 0.028) {
+          let best1 = 999, best2 = 999, p1 = null;
+          for (let pi = 0; pi < plates.length; pi++) {
+            const p = plates[pi], dx = (nx - p.cx) / p.rx, dy = (ny - p.cy) / p.ry;
+            const cosR = Math.cos(p.rot), sinR = Math.sin(p.rot);
+            const d = Math.hypot(dx * cosR + dy * sinR, (-dx * sinR + dy * cosR) * 1.15) + p.bias * 0.15;
+            if (d < best1) { best2 = best1; best1 = d; p1 = p; } else if (d < best2) { best2 = d; }
+          }
+          if (frontDelta > -0.026 && frontDelta <= 0.024) {
+            if ((Math.sin(x * 0.85 + y * 0.72) > -0.28) || fst.hesitatePulse > 0.18) {
+              idx = inTextBox ? (bayer > 0.4 ? 8 : 7) : (bayer > 0.30 ? 11 : 9);
+              owner = 1;
+            }
+          } else if (frontDelta <= -0.026) {
+            owner = 1;
+            const seamGap = best2 - best1;
+            if (seamGap < 0.058) {
+              idx = seamGap < 0.022 ? 1 : (inTextBox ? 6 : (bayer > 0.30 ? 9 : 8));
+            } else if (p1) {
+              const effThick = p1.thick * (inTextBox ? 0.34 : 1.0);
+              const facetShine = 0.5 + 0.5 * Math.cos((nx - p1.cx) * Math.cos(p1.facetAng) * 8 + (ny - p1.cy) * Math.sin(p1.facetAng) * 8 - t * 1.35);
+              const interiorTone = effThick * 0.56 + facetShine * 0.28 + (1 - Math.min(1, best1)) * 0.18;
+              if (effThick < 0.42) {
+                idx = Math.max(idx, interiorTone > (0.34 + bayer * 0.34) ? 4 : 3);
+              } else {
+                const squallBoost = (!inTextBox && squallStrata > 0.26) ? 1 : 0;
+                const paneIdx = Math.min(8, (interiorTone > (0.70 + bayer * 0.26) ? 7 : interiorTone > (0.46 + bayer * 0.28) ? 6 : interiorTone > (0.26 + bayer * 0.28) ? 5 : 4) + squallBoost);
+                idx = Math.max(idx, paneIdx);
+              }
+            }
+          }
+        }
+
+        // Radial freeze-climax shockwave ring from hero crystal center
+        if (shockR > 0) {
+          const distHero = Math.hypot(px - heroCx, py - heroCy);
+          if (Math.abs(distHero - shockR) < cell * 2.2 && !inTextBox) {
+            idx = Math.max(idx, bayer > 0.35 ? 10 : 8);
+          }
+        }
+
+        // Stratum 4A: Feathery Rime Frost Dendrites
+        for (let di = 0; di < dendriteSegs.length; di++) {
+          const s = dendriteSegs[di];
+          if (px < Math.min(s.ax, s.bx) - 6 || px > Math.max(s.ax, s.bx) + 6 || py < Math.min(s.ay, s.by) - 6 || py > Math.max(s.ay, s.by) + 6) continue;
+          if (frostDistToSegSq(px, py, s.ax, s.ay, s.bx, s.by) <= s.r2) {
+            const frostIdx = s.tier === 1 ? (bayer > 0.35 ? 9 : 8) : s.tier === 2 ? 9 : 10;
+            if (!inTextBox || s.tier >= 2) idx = Math.max(idx, frostIdx);
+            owner = Math.max(owner, 1);
+          }
+        }
+
+        // Stratum 4B: Ornate 6-Fold Snow Crystal Rosettes (with diamond nodes & glowing core)
+        for (let ni = 0; ni < clusterNodes.length; ni++) {
+          const cn = clusterNodes[ni];
+          const dc = Math.hypot(px - cn.cx, py - cn.cy);
+          if (dc <= cn.coreR) {
+            idx = dc < cn.coreR * 0.52 ? 11 : 10;
+            owner = 2;
+          } else if (Math.abs(dc - cn.rad * 0.52) < (cn.hero ? 3.2 : 2.2) && Math.abs((px - cn.cx) * (py - cn.cy)) < cn.rad * cn.rad * 0.18) {
+            if (cn.hero && bayer > 0.38) { idx = Math.max(idx, 9); owner = 2; }
+          }
+        }
+        for (let si = 0; si < clusterSegs.length; si++) {
+          const sg = clusterSegs[si];
+          if (px < Math.min(sg.ax, sg.bx) - 10 || px > Math.max(sg.ax, sg.bx) + 10 || py < Math.min(sg.ay, sg.by) - 10 || py > Math.max(sg.ay, sg.by) + 10) continue;
+          const d2 = frostDistToSegSq(px, py, sg.ax, sg.ay, sg.bx, sg.by);
+          const armWidth = sg.tier === 1 ? (sg.hero ? 11.5 : 7.5) : sg.tier === 2 ? (sg.hero ? 7.0 : 4.5) : 3.8;
+          if (d2 <= armWidth) {
+            idx = d2 <= 2.6 ? 11 : (bayer > 0.30 ? 10 : 9);
+            owner = 2;
+          }
+        }
+
+        // Stratum 4C: 3D Faceted Glacier Spires & Hanging Rim Icicles
+        let bestSpike = null;
+        for (let ii = 0; ii < icicles.length; ii++) {
+          const ic = icicles[ii];
+          const localScale = Math.max(0, Math.min(1.15, (cover - ic.delay * 0.60) * 1.38)) * (0.76 + fst.crystalGrowth * 0.28);
+          if (localScale <= 0.08) continue;
+          const sp = sampleFrostSpike(px, py, ic.bx * w, ic.by * h, ic.ang, ic.len * Math.min(w * 0.82, h * 1.15) * localScale, ic.w * (0.88 + localScale * 0.16));
+          if (sp && (!bestSpike || sp.facet > bestSpike.facet)) bestSpike = sp;
+        }
+        if (bestSpike) {
+          const onGlint = Math.abs(px * 0.72 + py * 0.68 - fst.glintOffset) < 16 && bestSpike.facet > 0.42;
+          const val = Math.min(1, bestSpike.facet + fst.burstBloom * 0.22 + (onGlint ? 0.30 : 0));
+          const scaled = 3 + val * 8, band = Math.floor(scaled);
+          idx = Math.min(11, Math.max(3, band + ((scaled - band) > (0.32 + bayer * 0.40) ? 1 : 0)));
+          if (bestSpike.isRim) idx = Math.max(idx, onGlint ? 11 : 10);
+          owner = 2;
+        }
+
+        const k = y * cols + x;
+        bandGrid[k] = idx; ownerGrid[k] = owner;
+      }
+    }
+
+    // 1px dark contour separation pass around hero crystal spires & rosettes + grid draw
+    for (let y = 0; y < rows; y++) {
+      const rOff = y * cols;
+      for (let x = 0; x < cols; x++) {
+        const k = rOff + x;
+        let idx = bandGrid[k];
+        if (ownerGrid[k] < 2) {
+          const up = y > 0 ? ownerGrid[(y - 1) * cols + x] : 0, dn = y + 1 < rows ? ownerGrid[(y + 1) * cols + x] : 0;
+          const lf = x > 0 ? ownerGrid[k - 1] : 0, rt = x + 1 < cols ? ownerGrid[k + 1] : 0;
+          if (up === 2 || dn === 2 || lf === 2 || rt === 2) idx = 0;
+        }
+        ctx.fillStyle = FROST_PALETTE[idx];
+        ctx.fillRect(x * cell, y * cell, drawSz, drawSz);
+      }
+    }
+
+    const drawCell = (gx, gy, colorIdx) => {
+      if (gx < 0 || gx >= cols || gy < 0 || gy >= rows) return;
+      ctx.fillStyle = FROST_PALETTE[colorIdx];
+      ctx.fillRect(gx * cell, gy * cell, drawSz, drawSz);
+    };
+
+    // Reactive Wind-Bent Snow-Capped Polar Pines along the glacial horizon
+    const pineSway = 0.08 + Math.min(0.42, (fst.windSpeed - 1.1) * 0.14) + 0.05 * Math.sin(t * 2.4);
+    const pineStep = isCompactHero ? 2 : 1;
+    for (let pi = 0; pi < FROST_BG_PINES.length; pi += pineStep) {
+      const tr = FROST_BG_PINES[pi];
+      if (mobile && pi % 2 === 1) continue;
+      const basePx = tr.x * w, basePy = evalRidgeY(tr.x) + cell * 0.5;
+      const treeH = (isCompactHero ? tr.h * 0.52 : tr.h * 1.12);
+      const levels = Math.max(4, Math.floor(treeH / cell));
+      for (let lv = 0; lv < levels; lv++) {
+        const u = lv / levels;
+        const leanX = Math.pow(u, 1.35) * pineSway * treeH * 0.85;
+        const gx = Math.floor((basePx - leanX) / cell);
+        const gy = Math.floor((basePy - lv * cell) / cell);
+        const halfSpan = lv < 2 ? 0 : Math.max(0, Math.round((1 - u) * (tr.crown * 0.24)));
+        for (let dx = -halfSpan; dx <= halfSpan; dx++) {
+          const isSnowCap = (dx <= 0 && u > 0.25 && (lv % 2 === 1 || u > 0.72));
+          drawCell(gx + dx, gy, isSnowCap ? (u > 0.75 ? 9 : 8) : (dx === 0 ? 0 : 1));
+        }
+      }
+    }
+
+    // Stratum 5: High-Visibility 3-Layer Blizzard Snow & Cross-Star Pixel Flakes
+    const windSlope = 0.82 + fst.windSpeed * 0.38 + 0.18 * Math.sin(t * 1.9);
+    const snowCap = mobile ? 0.64 : 1.0;
+    for (let i = 0; i < fst.snow.length; i++) {
+      if ((i / fst.snow.length) > snowCap) continue;
+      const sn = fst.snow[i];
+      if (!isMotionPaused) {
+        const gust = 1.0 + 0.30 * Math.sin(t * 3.8 + sn.seed), spd = fst.windSpeed * gust;
+        sn.yNorm += sn.vyScale * spd * dt;
+        sn.xNorm += (sn.vyScale * windSlope * sn.vxScale * spd + 0.065 * Math.sin(t * 3.2 + sn.seed)) * dt;
+        if (sn.yNorm > 1.08 || sn.xNorm > 1.16 || sn.xNorm < -0.16) { fst.snow[i] = createFrostSnowParticle(sn.layer, false); continue; }
+      }
+      const rx = sn.xNorm * w, ry = sn.yNorm * h;
+      const inText = isCompactHero ? (sn.xNorm < 0.70 && sn.yNorm > 0.16 && sn.yNorm < 0.88) : (sn.xNorm < 0.48 && sn.yNorm > 0.14 && sn.yNorm < 0.88);
+      if (inText && sn.layer >= 1 && i % 3 !== 0) continue;
+      const gx = Math.floor(rx / cell), gy = Math.floor(ry / cell);
+      if (sn.layer === 0) {
+        drawCell(gx, gy, inText ? 5 : 8);
+      } else if (sn.layer === 1) {
+        const cH = inText ? 7 : (fst.windSpeed > 1.7 ? 11 : 10), cT = inText ? 5 : 8;
+        for (let seg = 0; seg < sn.len; seg++) {
+          drawCell(Math.floor((rx - seg * cell * windSlope * 0.78) / cell), Math.floor((ry - seg * cell * 0.78) / cell), seg === 0 ? cH : cT);
+        }
+      } else if (sn.cross && !inText) {
+        drawCell(gx, gy, 11);
+        drawCell(gx - 1, gy, 9); drawCell(gx + 1, gy, 9);
+        drawCell(gx, gy - 1, 10); drawCell(gx, gy + 1, 8);
+      } else {
+        drawCell(gx, gy, 11); drawCell(gx + 1, gy, 10); drawCell(gx, gy + 1, 9); drawCell(gx + 1, gy + 1, 8);
+      }
+    }
+
+    // Ambient Twinkling 5-Cell Crystal Sparkles
+    for (let si = 0; si < sparkles.length; si++) {
+      const sp = sparkles[si];
+      const tw = Math.sin(t * sp.speed + sp.seed);
+      if (tw < 0.64) continue;
+      const gx = Math.floor(sp.nx * cols), gy = Math.floor(sp.ny * rows);
+      drawCell(gx, gy, 11);
+      if (tw > 0.82) {
+        drawCell(gx - 1, gy, 9); drawCell(gx + 1, gy, 9);
+        drawCell(gx, gy - 1, 10); drawCell(gx, gy + 1, 10);
+      }
+    }
+
+    // Stratum 6: Ballistic Shatter Shards & Diamond Dust
+    for (let i = fst.shards.length - 1; i >= 0; i--) {
+      const sh = fst.shards[i];
+      if (!isMotionPaused) {
+        sh.xNorm += sh.vx * dt; sh.yNorm += sh.vy * dt;
+        sh.vy += (sh.kind === 'chunk' ? 1.55 : 0.95) * dt; sh.vx *= Math.pow(0.32, dt); sh.life += dt;
+        if (sh.life >= sh.maxLife || sh.yNorm > 1.06) { fst.shards.splice(i, 1); continue; }
+      }
+      const gx = Math.floor(sh.xNorm * cols), gy = Math.floor(sh.yNorm * rows);
+      const lifeRatio = sh.life / sh.maxLife, cIdx = lifeRatio < 0.35 ? 11 : lifeRatio < 0.72 ? 9 : 7;
+      if (sh.kind === 'chunk') {
+        drawCell(gx, gy, cIdx);
+        if (lifeRatio < 0.75) { drawCell(gx + 1, gy, Math.max(5, cIdx - 1)); drawCell(gx, gy + 1, Math.max(4, cIdx - 2)); }
+      } else drawCell(gx, gy, cIdx);
+    }
+    return;
+  }
+
   if (canvas.width !== w || canvas.height !== h) {
     canvas.width = w;
     canvas.height = h;
@@ -4606,6 +7214,26 @@ function drawComboParticlesCanvas(canvas, nowMs) {
   ctx.globalAlpha = 1;
 }
 
+function updateFeedbackSyncStatus() {
+  const retry = $('.fb-retry-btn');
+  if (!retry) return;
+  const operation = roomPendingOps().find(op => op.operationId === retry.dataset.value);
+  const status = syncStatusMeta(operation ? operation.status : 'synced');
+  const pill = $('.fb-card .ck-sync-pill');
+  const detail = $('.fb-card .fb-sync-detail');
+  if (!pill || !detail) return;
+  pill.className = 'ck-sync-pill is-' + status.key;
+  pill.textContent = status.label;
+  detail.className = 'fb-sync-detail is-' + status.key;
+  detail.textContent = operation?.lastError || status.detail;
+  const stage = $('#fb-stage-tag');
+  if (stage?.textContent.startsWith('保存状态')) stage.textContent = '保存状态：' + status.label;
+  if (!operation) {
+    if (document.activeElement === retry) $('.fb-go-wall')?.focus();
+    retry.remove();
+  }
+}
+
 function triggerCheckinFeedback(opts) {
   const root = $('#feedback-root');
   if (!root) return;
@@ -4620,16 +7248,30 @@ function triggerCheckinFeedback(opts) {
   const cTier = comboTier(comboDays);
   const stampLabel = opts.goalHit ? 'GOAL CLEARED' : (isStudy ? 'CIRCUIT CHARGED' : 'RUN VERIFIED');
 
+  const syncMeta = syncStatusMeta(opts.syncStatus || (isServerOnline ? 'synced' : 'local'));
+  const needsRetry = syncMeta.key === 'failed' || syncMeta.key === 'local' || syncMeta.key === 'pending';
+  const syncGuidance = syncMeta.key === 'synced'
+    ? '已同步至服务器，可在记录页查看。'
+    : syncMeta.key === 'failed'
+      ? ('同步失败：' + (opts.syncError || '服务器未响应') + '。记录已保留在本机，可点击「重试同步」。')
+      : syncMeta.key === 'pending'
+        ? '记录已存本机，正在等待同步，可点击「重试同步」。'
+        : '离线已保存在本机浏览器，恢复网络后点击「重试同步」即可上传。';
+
   const prevFbFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const prevFbSelector = opts.returnFocusSelector || buildStableFocusSelector(prevFbFocus);
   root.innerHTML = '<div class="fb-backdrop">'
-    + '<article class="fb-card ' + (isStudy ? 'is-study' : 'is-sport') + '" role="status">'
+    + '<article class="fb-card ' + (isStudy ? 'is-study' : 'is-sport') + '" role="' + (syncMeta.key === 'failed' ? 'alert' : 'status') + '">'
     + '<canvas class="fb-particle-canvas" aria-hidden="true"></canvas>'
-    + '<div class="fb-top"><span class="slash-chip">' + (isStudy ? '⚡ STUDY COMPLETE' : '🔥 RUN COMPLETE') + '</span><button type="button" class="fb-close" aria-label="关闭反馈"><span aria-hidden="true">×</span></button></div>'
-    + '<div class="fb-stage-tag" id="fb-stage-tag">01 // 成绩数字跳入</div>'
+    + '<div class="fb-top"><span class="slash-chip">' + (isStudy ? '学习已记录' : '运动已记录') + '</span><span class="ck-sync-pill is-' + syncMeta.key + '">' + syncMeta.label + '</span><button type="button" class="fb-close" aria-label="关闭反馈"><span aria-hidden="true">×</span></button></div>'
+    + '<div class="fb-stage-tag" id="fb-stage-tag">' + (isPaused ? ('保存状态：' + syncMeta.label) : '01 // 成绩数字跳入') + '</div>'
     + '<div class="fb-score-wrap"><strong id="fb-score-num">' + (isPaused ? opts.value : (0).toFixed(decimals)) + '</strong><em>' + esc(opts.unit) + '</em></div>'
-    + '<div class="fb-sub">' + esc(opts.person) + ' · ' + esc(opts.title) + ' · <b>COMBO ×' + comboDays + ' (' + cTier.code + ')</b></div>'
+    + '<div class="fb-sub">' + esc(opts.person) + ' · ' + esc(opts.title) + ' · <b>COMBO ×' + comboDays + '</b></div>'
+    + '<div class="fb-sync-detail is-' + syncMeta.key + '">' + esc(syncGuidance) + '</div>'
     + '<div class="fb-stamp" id="fb-stamp">' + stampLabel + ' ✓</div>'
-    + '<div class="fb-actions"><button type="button" class="fb-go-wall" data-action="open-record" data-value="' + esc(opts.recordKey || '') + '">查看战绩卡墙 →</button></div>'
+    + '<div class="fb-actions">'
+    + (needsRetry && opts.operationId ? '<button type="button" class="fb-retry-btn" data-action="retry-sync" data-value="' + esc(opts.operationId) + '">重试同步</button>' : '')
+    + '<button type="button" class="fb-go-wall" data-action="open-record" data-value="' + esc(opts.recordKey || '') + '">查看记录 →</button></div>'
     + '</article></div>';
 
   const card = $('.fb-card', root);
@@ -4652,8 +7294,12 @@ function triggerCheckinFeedback(opts) {
     if (feedbackClearTimer) { clearTimeout(feedbackClearTimer); feedbackClearTimer = 0; }
     if (feedbackAnimId) { cancelAnimationFrame(feedbackAnimId); feedbackAnimId = 0; }
     root.innerHTML = '';
-    if (prevFbFocus && prevFbFocus.isConnected && prevFbFocus !== document.body) {
+    if (opts.returnFocusSelector) {
+      restoreFocusBySelector(prevFbSelector);
+    } else if (prevFbFocus && prevFbFocus.isConnected && prevFbFocus !== document.body) {
       prevFbFocus.focus({ preventScroll: true });
+    } else if (prevFbSelector) {
+      restoreFocusBySelector(prevFbSelector);
     }
   };
   document.addEventListener('keydown', onFbKeydown);
@@ -4663,11 +7309,13 @@ function triggerCheckinFeedback(opts) {
     closeBtn.focus({ preventScroll: true });
   }
   if (wallBtn) wallBtn.addEventListener('click', dismiss);
+  const retryBtn = $('.fb-retry-btn', root);
+  if (retryBtn) retryBtn.addEventListener('click', dismiss);
 
   if (isPaused) {
-    if (stageEl) stageEl.textContent = '04 // 战绩已收入档案墙';
+    if (stageEl) stageEl.textContent = '保存状态：' + syncMeta.label;
     if (stampEl) stampEl.classList.add('is-stamped');
-    feedbackClearTimer = setTimeout(dismiss, 2200);
+    if (!needsRetry) feedbackClearTimer = setTimeout(dismiss, 4200);
     return;
   }
 
@@ -4737,6 +7385,8 @@ function initPixelMatrices() {
       c.className = 'pixel-matrix-canvas';
       c.dataset.pixelTheme = hero.classList.contains('poster-flame') ? 'flame'
         : hero.classList.contains('poster-lightning') ? 'lightning'
+        : hero.classList.contains('poster-storm') ? 'storm'
+        : hero.classList.contains('poster-frost') ? 'frost'
         : hero.classList.contains('poster-orange') ? 'orange'
         : hero.classList.contains('poster-black') ? 'black'
         : 'blue';
@@ -4773,10 +7423,14 @@ function startPixelLoop() {
     const hasSprint = nowLoop < arenaSprintUntil;
     const hasActiveLightning = nowLoop < lightningSurgeUntil || canvases.some(c => c._lightningState && c._lightningState.active);
     const hasActiveFlameSurge = nowLoop < flameSurgeUntil;
+    const hasStorm = canvases.some(c => c.dataset.pixelTheme === 'storm');
+    const hasFrost = canvases.some(c => c.dataset.pixelTheme === 'frost');
+    const hasActiveStormSurge = nowLoop < stormSurgeUntil || canvases.some(c => c._stormState && c._stormState.arcs.length > 0);
+    const hasActiveFrostSurge = nowLoop < frostSurgeUntil || canvases.some(c => c._frostState && c._frostState.mode === 'freeze');
     const hasFlame = canvases.some(c => c.dataset.pixelTheme === 'flame');
-    const minInterval = (hasActiveLightning || hasSprint) ? 16 : hasActiveFlameSurge ? 24 : (hasFlame || arenaCanvases.length) ? 33 : 55;
+    const minInterval = (hasActiveLightning || hasSprint || hasActiveStormSurge || hasActiveFrostSurge) ? 16 : (hasActiveFlameSurge || hasStorm || hasFrost) ? 22 : (hasFlame || arenaCanvases.length) ? 33 : 55;
     if (ts - lastDraw >= minInterval) {
-      pixelPhase += hasActiveLightning ? 0.035 : hasFlame ? 0.075 : 0.11;
+      pixelPhase += hasActiveLightning ? 0.035 : hasFrost ? 0.092 : (hasFlame || hasStorm) ? 0.072 : 0.11;
       canvases.forEach(c => { const r = c.getBoundingClientRect(); if (r.width && r.height && r.bottom >= -40 && r.top <= window.innerHeight + 40) drawPixelMatrix(c, pixelPhase); });
       arenaCanvases.forEach(c => { const r = c.getBoundingClientRect(); if (r.width && r.height && r.bottom >= -40 && r.top <= window.innerHeight + 40) drawArenaCanvas(c, nowLoop); });
       comboCanvases.forEach(c => { const r = c.getBoundingClientRect(); if (r.width && r.height && r.bottom >= -40 && r.top <= window.innerHeight + 40) drawComboParticlesCanvas(c, nowLoop); });
@@ -4829,6 +7483,25 @@ if (checkinParam === 'snap' || checkinParam === 'sport') {
   openCheckin('study');
 }
 
+// Online/Offline recovery listeners (guarded against embedded/demo iframe)
+if (!embedded && !demo && typeof window !== 'undefined') {
+  window.addEventListener('offline', () => {
+    isServerOnline = false;
+    if (sseSource) { try { sseSource.close(); } catch {} sseSource = null; }
+    render(true);
+  });
+  window.addEventListener('online', async () => {
+    const ok = await checkServerHealth();
+    isServerOnline = !!ok;
+    if (isServerOnline) {
+      await flushPendingOps();
+      updateFeedbackSyncStatus();
+      initSSE();
+    }
+    render(true);
+  });
+}
+
 // Startup server health check & state sync (guarded against embedded/demo iframe)
 if (!embedded && !demo && typeof checkServerHealth === 'function') {
   checkServerHealth().then(async online => {
@@ -4838,7 +7511,7 @@ if (!embedded && !demo && typeof checkServerHealth === 'function') {
       await flushPendingOps();
       const remoteState = await serverFetch('/state');
       if (remoteState && remoteState.ok) {
-        state = hydrateState(remoteState);
+        state = mergeRemoteState(remoteState);
         persistLocalOnly();
         render(true);
       }

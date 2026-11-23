@@ -1,7 +1,11 @@
 ﻿const fs = require('fs');
 const path = require('path');
+const os = require('node:os');
+const { DatabaseSync } = require('node:sqlite');
+const { once } = require('node:events');
 
 async function runVerification() {
+  const testDir = fs.mkdtempSync(path.join(os.tmpdir(), 'running-verification-'));
   const results = {
     testSuite: "RUN & STUDY LOG · 全功能后端服务与前端联调真实性验收",
     timestamp: new Date().toISOString(),
@@ -9,8 +13,8 @@ async function runVerification() {
       node: process.version,
       platform: process.platform,
       engine: "Node.js v24 + SQLite (node:sqlite DatabaseSync)",
-      databasePath: path.resolve(__dirname, 'data/running.sqlite'),
-      uploadsPath: path.resolve(__dirname, 'uploads')
+      databasePath: path.join(testDir, 'running.sqlite'),
+      uploadsPath: path.join(testDir, 'uploads')
     },
     tests: [],
     summary: { total: 0, passed: 0, failed: 0 }
@@ -62,14 +66,14 @@ async function runVerification() {
     '用户通过设置导入本地备份时，在在线模式下主动调用 POST /api/import 同步全量数据至 SQLite');
 
   // Start Server
-  process.env.PORT = '3000';
+  process.env.PORT = '0';
   process.env.HOST = '127.0.0.1';
-  process.env.DB_PATH = './data/running.sqlite';
-  process.env.UPLOAD_DIR = './uploads';
-  const { app, server } = require('./src/server.js');
-  await new Promise(r => setTimeout(r, 600));
-
-  const BASE = 'http://127.0.0.1:3000';
+  process.env.DEFAULT_ROOM_CODE = 'default';
+  process.env.DB_PATH = results.environment.databasePath;
+  process.env.UPLOAD_DIR = results.environment.uploadsPath;
+  const { server } = require('./src/server.js');
+  await once(server, 'listening');
+  const BASE = 'http://127.0.0.1:' + server.address().port;
 
   try {
     // 2. Health check
@@ -287,20 +291,88 @@ async function runVerification() {
       `成功导出备份并在后端重新导入全量恢复，包含 ${expJson.records.length} 条运动记录与 ${expJson.studyRecords.length} 条学习记录`);
 
 
+    // Study duration fields and target totals come from the same seconds.
+    const studyPath = BASE + '/api/records/study';
+    const durationHeaders = { 'Content-Type': 'application/json' };
+    const durationTarget = 'st-duration-verify';
+    const targetResponse = await fetch(BASE + '/api/study-targets', {
+      method: 'POST', headers: durationHeaders,
+      body: JSON.stringify({ room: 'default', id: durationTarget, title: '时长测试', doneHours: 0.25 })
+    });
+    const durationRecords = [];
+    for (const duration of [{ seconds: 1500, minutes: 90, hours: 1.5 }, { minutes: 25, hours: 1.5 }]) {
+      const res = await fetch(studyPath, {
+        method: 'POST', headers: durationHeaders,
+        body: JSON.stringify({ room: 'default', targetId: durationTarget, ...duration })
+      });
+      durationRecords.push((await res.json()).record);
+    }
+    const actualDuration = r => r?.seconds === 1500 && r.minutes === 25 && r.hours === 0.42;
+    const durationState = async () => (await (await fetch(BASE + '/api/state?room=default')).json()).studyTargets.find(t => t.id === durationTarget);
+    const targetWithBoth = await durationState();
+    const durationEdit = await fetch(studyPath + '/' + durationRecords[0].id, {
+      method: 'PATCH', headers: durationHeaders,
+      body: JSON.stringify({ room: 'default', note: '只修改备注' })
+    });
+    const editedDuration = (await durationEdit.json()).record;
+    const targetAfterEdit = await durationState();
+    await fetch(studyPath + '/' + durationRecords[1].id + '?room=default', { method: 'DELETE' });
+    const targetWithOne = await durationState();
+    await fetch(studyPath + '/' + durationRecords[0].id + '?room=default', { method: 'DELETE' });
+    const targetWithoutRecords = await durationState();
+    record('API-21', '学习记录以秒为准并在汇总后舍入', '学习模块',
+      targetResponse.ok && durationRecords.every(actualDuration) && actualDuration(editedDuration) &&
+      targetWithBoth?.doneHours === 1.08 && targetAfterEdit?.doneHours === 1.08 &&
+      targetWithOne?.doneHours === 0.67 && targetWithoutRecords?.doneHours === 0.25,
+      '两条 25 分钟合计 0.83h，叠加 0.25h 基础进度后为 1.08h；仅改备注保持时长，删除逐步回退');
+    await fetch(BASE + '/api/study-targets/' + durationTarget + '?room=default', { method: 'DELETE' });
+
     // 14b. M1/M4 Regression: operationId idempotency
     const idemOpId = 'op-verify-idem-' + Date.now();
     const idemBody = {
       room: 'default', id: 9910, person: '帅哥', date: '2026-11-14', time: '07:00',
       km: 3.5, minutes: 20, feel: 3, note: '幂等测试', tags: [], operationId: idemOpId
     };
-    const rIdem1 = await (await fetch(`${BASE}/api/records/sport`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(idemBody) })).json();
-    const rIdem2 = await (await fetch(`${BASE}/api/records/sport`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(idemBody) })).json();
-    const stAfterIdem = await (await fetch(`${BASE}/api/state?room=default`)).json();
-    const idemMatches = stAfterIdem.records.filter(r => r.id === rIdem1.record.id);
-    await fetch(`${BASE}/api/records/sport/${rIdem1.record.id}?room=default`, { method: 'DELETE' });
-    record('API-15', 'operationId 幂等防重验证', '可靠性',
-      rIdem1.success && rIdem2.success && rIdem2.deduplicated === true && idemMatches.length === 1,
-      '同一 operationId 连续提交两次仅生成 1 条记录并触发 deduplicated=true');
+    const submit = (route, method, body) => fetch(BASE + route, {
+      method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body)
+    });
+    const sportRoute = '/api/records/sport';
+    function roomVersion() {
+      const db = new DatabaseSync(process.env.DB_PATH, { readOnly: true });
+      try {
+        return db.prepare('SELECT version FROM rooms WHERE code = ?').get('default').version;
+      } finally {
+        db.close();
+      }
+    }
+    const versionBefore = roomVersion();
+    const beforeIdem = await (await fetch(BASE + '/api/state?room=default')).json();
+    const replies = await Promise.all(Array.from({ length: 8 }, () =>
+      submit(sportRoute, 'POST', idemBody).then(response => response.json())
+    ));
+    const original = replies.find(reply => reply.deduplicated !== true);
+    const afterIdem = await (await fetch(BASE + '/api/state?room=default')).json();
+    const sportId = original.record.id;
+    const editRoute = sportRoute + '/' + sportId;
+    record('API-15', 'operationId 并发与补传防重验证', '可靠性',
+      replies.every(reply => reply.success && reply.record.id === sportId && reply.version === original.version) &&
+      replies.filter(reply => reply.deduplicated === true).length === 7 &&
+      afterIdem.records.length === beforeIdem.records.length + 1 &&
+      original.version === versionBefore + 1 && roomVersion() === original.version,
+      '同一 operationId 并发提交 8 次，新增一条记录并只更新一次版本');
+
+    const minSportBody = { ...idemBody, id: 9914, operationId: idemOpId + '-minimum' };
+    const invalidCreate = await submit(sportRoute, 'POST', { ...minSportBody, km: 0.09 });
+    const invalidEdit = await submit(editRoute, 'PATCH', { room: 'default', km: 0.09 });
+    const minCreate = await submit(sportRoute, 'POST', { ...minSportBody, km: 0.1 });
+    const minEdit = await submit(editRoute, 'PATCH', { room: 'default', km: 0.1 });
+    const minCreated = await minCreate.json();
+    const minEdited = await minEdit.json();
+    record('API-19', '运动新建和编辑使用同一距离下限 (0.1 km)', '记录校验',
+      invalidCreate.status === 400 && invalidEdit.status === 400 &&
+      minCreated.record?.km === 0.1 && minEdited.record?.km === 0.1,
+      '新建和编辑均拒绝 0.09 km 并接受 0.1 km');
+    await fetch(BASE + sportRoute + '/9914?room=default', { method: 'DELETE' });
 
     // 14c. M1/M4 Regression: Pomodoro <60s rejection & >=60s precision + sessionId idempotency
     const shortPomoRes = await fetch(`${BASE}/api/records/study`, {
@@ -310,13 +382,13 @@ async function runVerification() {
     const validSid = 'pomo-valid-' + Date.now();
     const validPomoBody = {
       room: 'default', id: 9912, person: '帅哥', date: '2026-11-14', time: '10:00',
-      source: 'pomodoro', seconds: 1500, targetId: 'st-1', subject: '番茄实测', sessionId: validSid, operationId: validSid
+      source: 'pomodoro', seconds: 1500, minutes: 60, hours: 1.5, targetId: 'st-1', subject: '番茄实测', sessionId: validSid, operationId: validSid
     };
     const pValid1 = await (await fetch(`${BASE}/api/records/study`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(validPomoBody) })).json();
     const pValid2 = await (await fetch(`${BASE}/api/records/study`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(validPomoBody) })).json();
     await fetch(`${BASE}/api/records/study/${pValid1.record.id}?room=default`, { method: 'DELETE' });
     record('API-16', '番茄钟 <60秒拦截(400) 与 >=60秒精确秒级入库防重', '番茄专注',
-      shortPomoRes.status === 400 && pValid1.success && pValid1.record.seconds === 1500 && pValid1.record.minutes === 25 && pValid2.deduplicated === true,
+      shortPomoRes.status === 400 && pValid1.success && pValid1.record.seconds === 1500 && pValid1.record.minutes === 25 && pValid1.record.hours === 0.42 && pValid2.deduplicated === true,
       '45秒番茄钟返回 400 拒绝，1500秒番茄钟准确折算 25分钟/0.42h 且重复 sessionId 防重生效');
 
     // 14d. M1/M4 Regression: PATCH /api/records/:kind/:id + target doneHours recalculation
@@ -328,13 +400,13 @@ async function runVerification() {
     const st1BeforePatch = stMidPatch.studyTargets.find(t => t.id === 'st-1').doneHours;
     const patchStdRes = await (await fetch(`${BASE}/api/records/study/${createdPatchStd.record.id}`, {
       method: 'PATCH', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ room: 'default', minutes: 120, hours: 2.0, note: '编辑后备注' })
+      body: JSON.stringify({ room: 'default', seconds: 7200, minutes: 90, hours: 1.5, note: '编辑后备注' })
     })).json();
     const stAfterPatch = await (await fetch(`${BASE}/api/state?room=default`)).json();
     const st1AfterPatch = stAfterPatch.studyTargets.find(t => t.id === 'st-1').doneHours;
     await fetch(`${BASE}/api/records/study/${createdPatchStd.record.id}?room=default`, { method: 'DELETE' });
     record('API-17', 'PATCH /api/records/:kind/:id 记录编辑与目标小时联动重算', '记录编辑',
-      patchStdRes.success && patchStdRes.record.hours === 2.0 && patchStdRes.record.note === '编辑后备注' && Math.abs((st1AfterPatch - st1BeforePatch) - 1.0) < 0.05,
+      patchStdRes.success && patchStdRes.record.seconds === 7200 && patchStdRes.record.minutes === 120 && patchStdRes.record.hours === 2.0 && patchStdRes.record.note === '编辑后备注' && Math.abs((st1AfterPatch - st1BeforePatch) - 1.0) < 0.05,
       `学习记录从 1.0h 编辑为 2.0h 后，关联目标 st-1 doneHours 从 ${st1BeforePatch}h 联动更新至 ${st1AfterPatch}h`);
 
     // 14e. M1/M4 Regression: PATCH /api/study-targets/:id, PATCH /api/habits/:id, PUT /api/habits/order
@@ -372,9 +444,8 @@ async function runVerification() {
     // 15. Server Restart Persistence Verification (Key Requirement)
     console.log('[TEST] 重启服务以验证 SQLite 离线持久化数据恢复...');
     await new Promise(r => server.close(r));
-    await new Promise(r => setTimeout(r, 400));
 
-    // Clear require cache so server starts up fresh on port 3000
+    // Clear require cache to reopen the same temporary database.
     delete require.cache[require.resolve('./src/server.js')];
     delete require.cache[require.resolve('./src/db.js')];
     delete require.cache[require.resolve('./src/repository.js')];
@@ -382,14 +453,26 @@ async function runVerification() {
 
     // Restart server on same database
     const { server: server2 } = require('./src/server.js');
-    await new Promise(r => setTimeout(r, 800));
+    await once(server2, 'listening');
+    const restartBase = 'http://127.0.0.1:' + server2.address().port;
 
-    const restartHealth = await (await fetch(`${BASE}/api/health`)).json();
-    const restartState = await (await fetch(`${BASE}/api/state?room=default`)).json();
+    const restartHealth = await (await fetch(`${restartBase}/api/health`)).json();
+    const restartState = await (await fetch(`${restartBase}/api/state?room=default`)).json();
 
     record('API-14', '后端重启后数据完整性与 SQLite 恢复验证', '真持久化',
       restartHealth.status === 'ok' && restartState.goal === 288 && restartState.studyGoal === 150 && restartState.soloPurged === true,
       '重启后端进程后重新建立连接，修改后的计划目标与历史配置从 SQLite 无缝完整恢复');
+
+    const retryVersionBefore = roomVersion();
+    const replay = await (await fetch(restartBase + sportRoute, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(idemBody)
+    })).json();
+    const stateAfterReplay = await (await fetch(restartBase + '/api/state?room=default')).json();
+    record('API-20', '服务重启后离线补传仍按原编号去重', '可靠性',
+      replay.success && replay.deduplicated === true && replay.record.id === sportId &&
+      replay.version === original.version && roomVersion() === retryVersionBefore &&
+      stateAfterReplay.records.length === restartState.records.length,
+      '重启后重试相同 operationId，返回原记录和版本且无额外写入');
 
     await new Promise(r => server2.close(r));
   } catch (err) {
@@ -398,16 +481,17 @@ async function runVerification() {
   }
 
   // Save report to server-verification.json
-  const outPath = path.resolve(__dirname, '../server-verification.json');
+  const outPath = path.join(testDir, 'server-verification.json');
   fs.writeFileSync(outPath, JSON.stringify(results, null, 2), 'utf8');
   console.log('===================================================');
   console.log(`  验收完成: 全部 ${results.summary.total} 项检查, ${results.summary.passed} 项通过, ${results.summary.failed} 项失败`);
   console.log(`  报告已写入: ${outPath}`);
   console.log('===================================================');
+  return results.summary.failed;
 }
 
-runVerification().then(() => {
-  process.exit(0);
+runVerification().then(failed => {
+  process.exit(failed ? 1 : 0);
 }).catch(err => {
   console.error(err);
   process.exit(1);

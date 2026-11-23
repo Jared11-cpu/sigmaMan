@@ -14,6 +14,44 @@ function roundHours(n) {
   return Math.round(n * 100) / 100;
 }
 
+function sportMetrics(kmInput, minutesInput) {
+  const km = Number(kmInput);
+  const minutes = Number(minutesInput);
+  if (!Number.isFinite(km) || km < 0.1 || km > 300) throw badRequest('跑步距离须在 0.1–300 km 之间');
+  if (!Number.isFinite(minutes) || minutes < 1 || minutes > 1440) throw badRequest('跑步时长须在 1–1440 分钟之间');
+  return { km: Math.round(km * 100) / 100, minutes: Math.round(minutes) };
+}
+
+function savedStudySeconds(data) {
+  for (const [value, factor] of [[data.seconds, 1], [data.minutes, 60], [data.hours, 3600]]) {
+    const number = Number(value);
+    if (Number.isFinite(number) && number > 0) return Math.round(number * factor);
+  }
+  return 0;
+}
+
+function studyMetrics(seconds) {
+  const minutes = seconds > 0 ? Math.max(1, Math.round(seconds / 60)) : 0;
+  return { seconds, minutes, hours: roundHours(seconds / 3600) };
+}
+
+function studyDuration(data, existing) {
+  if (existing && data.seconds === undefined && data.minutes === undefined && data.hours === undefined) {
+    return studyMetrics(savedStudySeconds(existing));
+  }
+
+  let rawSeconds;
+  if (data.seconds !== undefined) rawSeconds = Number(data.seconds);
+  else if (data.minutes !== undefined) rawSeconds = Number(data.minutes) * 60;
+  else rawSeconds = Number(data.hours) * 3600;
+
+  if (!Number.isFinite(rawSeconds) || rawSeconds < 60 || rawSeconds > 16 * 3600) {
+    if (data.source === 'pomodoro' && rawSeconds < 60) throw badRequest('专注不足 60 秒，暂不记入学习记录');
+    throw badRequest('学习时长须在 1 分钟至 16 小时之间');
+  }
+  return studyMetrics(Math.round(rawSeconds));
+}
+
 class RunningRepository {
   constructor(db) {
     this.db = db;
@@ -58,21 +96,30 @@ class RunningRepository {
     `).run(roomCode, String(opId), JSON.stringify(resultObj), new Date().toISOString());
   }
 
-  getState(roomCode = 'default', requestingPerson = null) {
-    const room = this.ensureRoom(roomCode);
-    const viewer = requestingPerson || room.name;
-
-    const targets = this.db.prepare('SELECT * FROM study_targets WHERE room_code = ? ORDER BY sort_order ASC, id ASC').all(roomCode).map(t => ({
+  getStudyTargets(roomCode, person) {
+    const records = this.db.prepare('SELECT target_id, seconds, minutes, hours FROM records_study WHERE room_code = ? AND person = ?').all(roomCode, person);
+    const secondsByTarget = new Map();
+    for (const record of records) {
+      secondsByTarget.set(record.target_id, (secondsByTarget.get(record.target_id) || 0) + savedStudySeconds(record));
+    }
+    return this.db.prepare('SELECT * FROM study_targets WHERE room_code = ? ORDER BY sort_order ASC, id ASC').all(roomCode).map(t => ({
       id: t.id,
       title: t.title,
       category: t.category,
       targetHours: t.target_hours,
-      doneHours: t.done_hours,
+      doneHours: Math.max(0, roundHours((t.base_hours || 0) + (secondsByTarget.get(t.id) || 0) / 3600)),
       baseHours: t.base_hours || 0,
       color: t.color,
       deadline: t.deadline,
       archived: Boolean(t.archived)
     }));
+  }
+
+  getState(roomCode = 'default', requestingPerson = null) {
+    const room = this.ensureRoom(roomCode);
+    const viewer = requestingPerson || room.name;
+
+    const targets = this.getStudyTargets(roomCode, room.name);
 
     const habits = this.db.prepare('SELECT * FROM habits WHERE room_code = ? ORDER BY sort_order ASC, id ASC').all(roomCode).map(h => ({
       id: h.id,
@@ -107,24 +154,24 @@ class RunningRepository {
       liked: sportLikes.has(r.id)
     }));
 
-    const studyRecords = this.db.prepare('SELECT * FROM records_study WHERE room_code = ? ORDER BY date DESC, time DESC, id DESC').all(roomCode).map(r => ({
-      id: r.id,
-      person: r.person,
-      date: r.date,
-      time: r.time,
-      hours: r.hours,
-      minutes: r.minutes,
-      seconds: r.seconds || (r.minutes * 60),
-      focus: r.focus,
-      targetId: r.target_id,
-      subject: r.subject,
-      note: r.note,
-      tags: JSON.parse(r.tags || '[]'),
-      photo: r.photo,
-      source: r.source || 'manual',
-      likes: r.likes,
-      liked: studyLikes.has(r.id)
-    }));
+    const studyRecords = this.db.prepare('SELECT * FROM records_study WHERE room_code = ? ORDER BY date DESC, time DESC, id DESC').all(roomCode).map(r => {
+      return {
+        id: r.id,
+        person: r.person,
+        date: r.date,
+        time: r.time,
+        ...studyMetrics(savedStudySeconds(r)),
+        focus: r.focus,
+        targetId: r.target_id,
+        subject: r.subject,
+        note: r.note,
+        tags: JSON.parse(r.tags || '[]'),
+        photo: r.photo,
+        source: r.source || 'manual',
+        likes: r.likes,
+        liked: studyLikes.has(r.id)
+      };
+    });
 
     const habitLogs = {};
     const memberHabitLogs = {};
@@ -186,30 +233,26 @@ class RunningRepository {
   addSportRecord(roomCode, data) {
     const room = this.ensureRoom(roomCode);
     const opId = data.operationId || data.idempotencyKey;
-    const prev = this.getProcessedOp(roomCode, opId);
-    if (prev) return { ...prev, deduplicated: true };
-
-    const kmNum = Number(data.km);
-    const minNum = Number(data.minutes);
-    if (!Number.isFinite(kmNum) || kmNum < 0.05 || kmNum > 300) throw badRequest('跑步距离须在 0.05–300 km 之间');
-    if (!Number.isFinite(minNum) || minNum < 1 || minNum > 1440) throw badRequest('跑步时长须在 1–1440 分钟之间');
-    const date = data.date || today();
-    if (!isValidDateStr(date)) throw badRequest('日期格式须为 YYYY-MM-DD');
-
-    const id = Number(data.id) || Date.now();
-    const time = String(data.time || '06:10').slice(0, 5);
-    const km = Math.round(kmNum * 100) / 100;
-    const minutes = Math.round(minNum);
-    const feel = Math.max(0, Math.min(4, Number(data.feel ?? 3)));
-    const person = String(data.person || room.name || '帅哥').trim();
-    if (!person) throw badRequest('打卡人不能为空');
-    const note = String(data.note || '').trim().slice(0, 300);
-    const tags = JSON.stringify(Array.isArray(data.tags) ? data.tags : []);
-    const photo = String(data.photo || '');
-    const source = String(data.source || 'manual');
-    const nowIso = new Date().toISOString();
 
     return this.runTx(() => {
+      const prev = this.getProcessedOp(roomCode, opId);
+      if (prev) return { ...prev, deduplicated: true };
+
+      const { km, minutes } = sportMetrics(data.km, data.minutes);
+      const date = data.date || today();
+      if (!isValidDateStr(date)) throw badRequest('日期格式须为 YYYY-MM-DD');
+
+      const id = Number(data.id) || Date.now();
+      const time = String(data.time || '06:10').slice(0, 5);
+      const feel = Math.max(0, Math.min(4, Number(data.feel ?? 3)));
+      const person = String(data.person || room.name || '帅哥').trim();
+      if (!person) throw badRequest('打卡人不能为空');
+      const note = String(data.note || '').trim().slice(0, 300);
+      const tags = JSON.stringify(Array.isArray(data.tags) ? data.tags : []);
+      const photo = String(data.photo || '');
+      const source = String(data.source || 'manual');
+      const nowIso = new Date().toISOString();
+
       const existingById = this.db.prepare('SELECT id FROM records_sport WHERE room_code = ? AND id = ?').get(roomCode, id);
       const finalId = existingById ? Date.now() + Math.floor(Math.random() * 1000) : id;
       this.db.prepare(`
@@ -230,16 +273,16 @@ class RunningRepository {
     const existing = this.db.prepare('SELECT * FROM records_sport WHERE room_code = ? AND id = ?').get(roomCode, recId);
     if (!existing) throw badRequest('未找到该运动记录');
 
-    const km = data.km !== undefined ? Math.round(Number(data.km) * 100) / 100 : existing.km;
-    const minutes = data.minutes !== undefined ? Math.round(Number(data.minutes)) : existing.minutes;
+    const { km, minutes } = sportMetrics(
+      data.km === undefined ? existing.km : data.km,
+      data.minutes === undefined ? existing.minutes : data.minutes
+    );
     const date = data.date !== undefined ? String(data.date) : existing.date;
     const time = data.time !== undefined ? String(data.time).slice(0, 5) : existing.time;
     const feel = data.feel !== undefined ? Math.max(0, Math.min(4, Number(data.feel))) : existing.feel;
     const note = data.note !== undefined ? String(data.note).trim().slice(0, 300) : existing.note;
     const tags = data.tags !== undefined ? JSON.stringify(Array.isArray(data.tags) ? data.tags : []) : existing.tags;
 
-    if (!Number.isFinite(km) || km < 0.05 || km > 300) throw badRequest('跑步距离须在 0.05–300 km 之间');
-    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 1440) throw badRequest('时长须在 1–1440 分钟之间');
     if (!isValidDateStr(date)) throw badRequest('日期格式不正确');
 
     return this.runTx(() => {
@@ -271,61 +314,35 @@ class RunningRepository {
   addStudyRecord(roomCode, data) {
     const room = this.ensureRoom(roomCode);
     const opId = data.operationId || data.sessionId || data.idempotencyKey;
-    const prev = this.getProcessedOp(roomCode, opId);
-    if (prev) return { ...prev, deduplicated: true };
-
-    const source = String(data.source || 'manual');
-    const secInput = data.seconds !== undefined ? Math.round(Number(data.seconds)) : null;
-    if (source === 'pomodoro' && secInput !== null && secInput < 60) {
-      throw badRequest('专注不足 60 秒，暂不记入学习记录');
-    }
-
-    let minutes = data.minutes !== undefined ? Math.round(Number(data.minutes)) : null;
-    let hours = data.hours !== undefined ? Number(data.hours) : null;
-    if (secInput !== null && Number.isFinite(secInput) && secInput >= 60) {
-      minutes = Math.max(1, Math.round(secInput / 60));
-      hours = roundHours(secInput / 3600);
-    } else if (hours !== null && Number.isFinite(hours)) {
-      hours = roundHours(hours);
-      if (!minutes || !Number.isFinite(minutes)) minutes = Math.max(1, Math.round(hours * 60));
-    } else if (minutes !== null && Number.isFinite(minutes)) {
-      hours = roundHours(minutes / 60);
-    }
-    const seconds = secInput !== null && Number.isFinite(secInput) ? secInput : (minutes * 60);
-
-    if (!Number.isFinite(hours) || hours < 0.01 || hours > 16) throw badRequest('学习时长须在 1 分钟至 16 小时之间');
-    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 960) throw badRequest('学习分钟数须在 1–960 分钟之间');
-
-    const date = data.date || today();
-    if (!isValidDateStr(date)) throw badRequest('日期格式须为 YYYY-MM-DD');
-
-    const id = Number(data.id) || Date.now();
-    const time = String(data.time || '09:00').slice(0, 5);
-    const focus = Math.max(0, Math.min(4, Number(data.focus ?? 3)));
-    const targetId = String(data.targetId || 'st-1');
-    const subject = String(data.subject || '自主学习').trim() || '自主学习';
-    const person = String(data.person || room.name || '帅哥').trim();
-    if (!person) throw badRequest('打卡人不能为空');
-    const note = String(data.note || '').trim().slice(0, 300);
-    const tags = JSON.stringify(Array.isArray(data.tags) ? data.tags : []);
-    const photo = String(data.photo || '');
-    const nowIso = new Date().toISOString();
 
     return this.runTx(() => {
+      const prev = this.getProcessedOp(roomCode, opId);
+      if (prev) return { ...prev, deduplicated: true };
+
+      const source = String(data.source || 'manual');
+      const { seconds, minutes, hours } = studyDuration(data);
+
+      const date = data.date || today();
+      if (!isValidDateStr(date)) throw badRequest('日期格式须为 YYYY-MM-DD');
+
+      const id = Number(data.id) || Date.now();
+      const time = String(data.time || '09:00').slice(0, 5);
+      const focus = Math.max(0, Math.min(4, Number(data.focus ?? 3)));
+      const targetId = String(data.targetId || 'st-1');
+      const subject = String(data.subject || '自主学习').trim() || '自主学习';
+      const person = String(data.person || room.name || '帅哥').trim();
+      if (!person) throw badRequest('打卡人不能为空');
+      const note = String(data.note || '').trim().slice(0, 300);
+      const tags = JSON.stringify(Array.isArray(data.tags) ? data.tags : []);
+      const photo = String(data.photo || '');
+      const nowIso = new Date().toISOString();
+
       const existingById = this.db.prepare('SELECT id FROM records_study WHERE room_code = ? AND id = ?').get(roomCode, id);
       const finalId = existingById ? Date.now() + Math.floor(Math.random() * 1000) : id;
       this.db.prepare(`
         INSERT INTO records_study (id, room_code, person, date, time, hours, minutes, seconds, focus, target_id, subject, note, tags, photo, source, likes, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
       `).run(finalId, roomCode, person, date, time, hours, minutes, seconds, focus, targetId, subject, note, tags, photo, source, nowIso);
-
-      if (person === room.name) {
-        this.db.prepare(`
-          UPDATE study_targets
-          SET done_hours = ROUND(done_hours + ?, 2)
-          WHERE room_code = ? AND id = ?
-        `).run(hours, roomCode, targetId);
-      }
 
       this.linkHabitAction(roomCode, person, date);
       const version = this.bumpVersion(roomCode);
@@ -336,14 +353,12 @@ class RunningRepository {
   }
 
   updateStudyRecord(roomCode, id, data) {
-    const room = this.ensureRoom(roomCode);
+    this.ensureRoom(roomCode);
     const recId = Number(id);
     const existing = this.db.prepare('SELECT * FROM records_study WHERE room_code = ? AND id = ?').get(roomCode, recId);
     if (!existing) throw badRequest('未找到该学习记录');
 
-    const minutes = data.minutes !== undefined ? Math.round(Number(data.minutes)) : existing.minutes;
-    const hours = data.hours !== undefined ? roundHours(Number(data.hours)) : (data.minutes !== undefined ? roundHours(minutes / 60) : existing.hours);
-    const seconds = data.seconds !== undefined ? Math.round(Number(data.seconds)) : (data.minutes !== undefined ? minutes * 60 : existing.seconds);
+    const { seconds, minutes, hours } = studyDuration(data, existing);
     const date = data.date !== undefined ? String(data.date) : existing.date;
     const time = data.time !== undefined ? String(data.time).slice(0, 5) : existing.time;
     const focus = data.focus !== undefined ? Math.max(0, Math.min(4, Number(data.focus))) : existing.focus;
@@ -352,18 +367,9 @@ class RunningRepository {
     const note = data.note !== undefined ? String(data.note).trim().slice(0, 300) : existing.note;
     const tags = data.tags !== undefined ? JSON.stringify(Array.isArray(data.tags) ? data.tags : []) : existing.tags;
 
-    if (!Number.isFinite(hours) || hours < 0.01 || hours > 16) throw badRequest('学习时长须在 1 分钟至 16 小时之间');
-    if (!Number.isFinite(minutes) || minutes < 1 || minutes > 960) throw badRequest('学习分钟数须在 1–960 分钟之间');
     if (!isValidDateStr(date)) throw badRequest('日期格式不正确');
 
     return this.runTx(() => {
-      if (existing.person === room.name) {
-        this.db.prepare('UPDATE study_targets SET done_hours = MAX(0, ROUND(done_hours - ?, 2)) WHERE room_code = ? AND id = ?')
-          .run(existing.hours, roomCode, existing.target_id);
-        this.db.prepare('UPDATE study_targets SET done_hours = ROUND(done_hours + ?, 2) WHERE room_code = ? AND id = ?')
-          .run(hours, roomCode, targetId);
-      }
-
       this.db.prepare(`
         UPDATE records_study
         SET date = ?, time = ?, hours = ?, minutes = ?, seconds = ?, focus = ?, target_id = ?, subject = ?, note = ?, tags = ?
@@ -382,16 +388,8 @@ class RunningRepository {
   }
 
   deleteStudyRecord(roomCode, id) {
-    const room = this.ensureRoom(roomCode);
+    this.ensureRoom(roomCode);
     return this.runTx(() => {
-      const rec = this.db.prepare('SELECT target_id, hours, person FROM records_study WHERE room_code = ? AND id = ?').get(roomCode, Number(id));
-      if (rec && rec.person === room.name) {
-        this.db.prepare(`
-          UPDATE study_targets
-          SET done_hours = MAX(0, ROUND(done_hours - ?, 2))
-          WHERE room_code = ? AND id = ?
-        `).run(rec.hours, roomCode, rec.target_id);
-      }
       this.db.prepare('DELETE FROM records_study WHERE room_code = ? AND id = ?').run(roomCode, Number(id));
       this.db.prepare('DELETE FROM record_likes WHERE room_code = ? AND kind = ? AND record_id = ?').run(roomCode, 'study', Number(id));
       const version = this.bumpVersion(roomCode);
@@ -445,6 +443,7 @@ class RunningRepository {
   }
 
   updateStudyTarget(roomCode, id, data) {
+    const room = this.ensureRoom(roomCode);
     const existing = this.db.prepare('SELECT * FROM study_targets WHERE room_code = ? AND id = ?').get(roomCode, id);
     if (!existing) throw badRequest('未找到该学习目标');
     const title = data.title !== undefined ? String(data.title).trim() : existing.title;
@@ -461,10 +460,7 @@ class RunningRepository {
     `).run(title, category, targetHours, deadline, archived, roomCode, id);
     const version = this.bumpVersion(roomCode);
     return {
-      target: {
-        id, title, category, targetHours, doneHours: existing.done_hours,
-        baseHours: existing.base_hours || 0, color: existing.color, deadline, archived: Boolean(archived)
-      },
+      target: this.getStudyTargets(roomCode, room.name).find(t => t.id === id),
       version
     };
   }
@@ -641,7 +637,6 @@ class RunningRepository {
       this.db.prepare('DELETE FROM records_sport WHERE room_code = ?').run(roomCode);
       this.db.prepare('DELETE FROM records_study WHERE room_code = ?').run(roomCode);
       this.db.prepare('DELETE FROM record_likes WHERE room_code = ?').run(roomCode);
-      this.db.prepare('UPDATE study_targets SET done_hours = 0 WHERE room_code = ?').run(roomCode);
       const version = this.bumpVersion(roomCode);
       return { version };
     });
@@ -687,13 +682,6 @@ class RunningRepository {
       this.db.prepare('DELETE FROM habit_logs WHERE room_code = ?').run(roomCode);
       this.db.prepare('DELETE FROM record_likes WHERE room_code = ?').run(roomCode);
 
-      if (Array.isArray(raw.studyTargets)) {
-        const ins = this.db.prepare('INSERT INTO study_targets (id, room_code, title, category, target_hours, done_hours, base_hours, color, deadline, archived, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
-        raw.studyTargets.forEach((t, i) => {
-          ins.run(t.id || 'st-' + (i + 1), roomCode, t.title || '学习目标', t.category || '自选', Number(t.targetHours) || 30, Number(t.doneHours) || 0, Number(t.baseHours || 0), t.color || '#203f91', t.deadline || '本月', t.archived ? 1 : 0, i + 1);
-        });
-      }
-
       if (Array.isArray(raw.habits)) {
         const ins = this.db.prepare('INSERT INTO habits (id, room_code, title, tag, icon, archived, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)');
         raw.habits.forEach((h, i) => {
@@ -710,13 +698,28 @@ class RunningRepository {
         });
       }
 
+      const secondsByTarget = new Map();
       if (Array.isArray(raw.studyRecords)) {
         const ins = this.db.prepare('INSERT INTO records_study (id, room_code, person, date, time, hours, minutes, seconds, focus, target_id, subject, note, tags, photo, source, likes, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
         raw.studyRecords.forEach(s => {
           const sid = Number(s.id);
           if (!Number.isFinite(sid)) throw badRequest('学习记录 ID 无效');
-          const mins = Number(s.minutes) || 90;
-          ins.run(sid, roomCode, s.person || name, s.date || today(), s.time || '09:00', Number(s.hours) || 1.5, mins, Number(s.seconds) || (mins * 60), Number(s.focus ?? 3), s.targetId || 'st-1', s.subject || '自习', s.note || '', JSON.stringify(s.tags || []), s.photo || '', s.source || 'manual', Number(s.likes || 0), nowIso);
+          const { seconds, minutes, hours } = studyMetrics(savedStudySeconds(s) || 90 * 60);
+          const person = s.person || name;
+          const targetId = s.targetId || 'st-1';
+          ins.run(sid, roomCode, person, s.date || today(), s.time || '09:00', hours, minutes, seconds, Number(s.focus ?? 3), targetId, s.subject || '自习', s.note || '', JSON.stringify(s.tags || []), s.photo || '', s.source || 'manual', Number(s.likes || 0), nowIso);
+          if (person === name) secondsByTarget.set(targetId, (secondsByTarget.get(targetId) || 0) + seconds);
+        });
+      }
+
+      if (Array.isArray(raw.studyTargets)) {
+        const ins = this.db.prepare('INSERT INTO study_targets (id, room_code, title, category, target_hours, done_hours, base_hours, color, deadline, archived, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+        raw.studyTargets.forEach((t, i) => {
+          const id = t.id || 'st-' + (i + 1);
+          const linkedHours = (secondsByTarget.get(id) || 0) / 3600;
+          const baseHours = Number.isFinite(t.baseHours) ? t.baseHours : Math.max(0, roundHours((Number(t.doneHours) || 0) - linkedHours));
+          const doneHours = Math.max(0, roundHours(baseHours + linkedHours));
+          ins.run(id, roomCode, t.title || '学习目标', t.category || '自选', Number(t.targetHours) || 30, doneHours, baseHours, t.color || '#203f91', t.deadline || '本月', t.archived ? 1 : 0, i + 1);
         });
       }
 
