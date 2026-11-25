@@ -320,6 +320,13 @@ function icon(name, cls = '') {
 
 const hasLocalStorage = (() => {
   try { const k = '__rl_chk'; localStorage.setItem(k, '1'); localStorage.removeItem(k); return true; } catch { return false; }
+
+// Register PWA Service Worker for offline static shell (never intercepts /api/*)
+if (!embedded && !demo && typeof navigator !== 'undefined' && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
 })();
 
 /* ---------- Dual-Mode Server Sync Client (Online REST+SSE + PendingOps + Structured Errors) ---------- */
@@ -337,8 +344,18 @@ function nextOpId(prefix = 'op') { return prefix + '-' + Date.now() + '-' + Math
 function roomPendingOps(room = currentRoomCode) {
   return pendingOps.filter(x => (x.roomCode || 'default') === room);
 }
+const recentSelfOpIds = new Set();
+function markSelfOpId(opId) {
+  if (!opId) return;
+  recentSelfOpIds.add(opId);
+  if (recentSelfOpIds.size > 150) {
+    const first = recentSelfOpIds.values().next().value;
+    recentSelfOpIds.delete(first);
+  }
+}
 function enqueuePendingOp(op) {
   if (!op || !op.operationId) return;
+  markSelfOpId(op.operationId);
   const normalized = {
     roomCode: currentRoomCode,
     status: 'pending',
@@ -347,10 +364,32 @@ function enqueuePendingOp(op) {
     updatedAt: Date.now(),
     ...op
   };
-  const idx = pendingOps.findIndex(x => x.operationId === normalized.operationId);
+  const idx = pendingOps.findIndex(x =>
+    x.operationId === normalized.operationId ||
+    (normalized.coalesceKey && x.coalesceKey === normalized.coalesceKey && (x.roomCode || 'default') === (normalized.roomCode || 'default') && !inFlightOpIds.has(x.operationId))
+  );
   if (idx >= 0) pendingOps[idx] = { ...pendingOps[idx], ...normalized, updatedAt: Date.now() };
   else pendingOps.push(normalized);
   savePendingOps();
+}
+async function queueOrSendWriteOp(op) {
+  enqueuePendingOp(op);
+  if (isServerOnline) {
+    return await flushPendingOps(op.operationId);
+  }
+  return { synced: 0, failed: 0, queued: true };
+}
+function queueSavedCheckin(kind, record) {
+  enqueuePendingOp({ operationId: record.operationId, kind, recordId: record.id,
+    roomCode: record.checkinRoom, endpoint: '/records/' + kind, method: 'POST', payload: record });
+}
+if (!demo) {
+  for (const [kind, records] of [['sport', state.records], ['study', state.studyRecords]]) {
+    for (const record of records) {
+      if (record.checkinRoom === currentRoomCode && record.syncStatus !== 'synced' && record.operationId &&
+          !pendingOps.some(op => op.operationId === record.operationId)) queueSavedCheckin(kind, record);
+    }
+  }
 }
 function removePendingOp(opId) { pendingOps = pendingOps.filter(x => x.operationId !== opId); savePendingOps(); }
 function syncStatusMeta(status) {
@@ -403,8 +442,8 @@ function updateLocalRecordSyncStatus(kind, opId, recId, status, errMsg = '', ser
   target.syncError = errMsg || '';
   if (opId && !target.operationId) target.operationId = opId;
 }
-function insertLocalRecordDedup(kind, rec) {
-  const arr = kind === 'study' ? state.studyRecords : state.records;
+function insertLocalRecordDedup(kind, rec, data = state) {
+  const arr = kind === 'study' ? data.studyRecords : data.records;
   const normalized = kind === 'study' ? normalizeStudyRecord(rec) : rec;
   const existingIdx = arr.findIndex(r => (normalized.operationId && r.operationId === normalized.operationId) || r.id === normalized.id);
   if (existingIdx >= 0) {
@@ -427,10 +466,14 @@ async function flushPendingOps(onlyOpId = null) {
     savePendingOps();
     updateLocalRecordSyncStatus(op.kind, op.operationId, op.recordId, 'pending', '');
     try {
-      const payload = { ...op.payload, room: op.roomCode || currentRoomCode, operationId: op.operationId };
+      markSelfOpId(op.operationId);
+      const payload = { ...(op.payload || {}), room: op.roomCode || currentRoomCode, operationId: op.operationId };
       const res = await serverFetch(op.endpoint, op.method || 'POST', payload);
       if (res && res.ok) {
-        updateLocalRecordSyncStatus(op.kind, op.operationId, op.recordId, 'synced', '', res.record || null);
+        if (op.kind === 'sport' || op.kind === 'study') {
+          updateLocalRecordSyncStatus(op.kind, op.operationId, op.recordId, 'synced', '', res.record || null);
+        }
+        if (typeof res.version === 'number') state.dataVersion = res.version;
         removePendingOp(op.operationId);
         lastSyncError = '';
         synced++;
@@ -603,6 +646,7 @@ function persistCheckinDraft(d = draft, s = step) {
     mode: d.mode,
     step: Math.max(0, Math.min(4, Number(s) || 0)),
     person: d.person,
+    date: d.date,
     km: d.km,
     seconds: d.mode === 'study' ? studySecondsOf(d) : Math.max(60, Math.round((d.minutes || 30) * 60)),
     minutes: d.mode === 'study' ? studyMinutesOf(d) : d.minutes,
@@ -615,6 +659,7 @@ function persistCheckinDraft(d = draft, s = step) {
     photoInIdb: isDataPhoto,
     photoStorage: d.photoStorage || '',
     operationId: d.operationId,
+    extrasOpen: d.extrasOpen,
     time: d.time,
     savedAt: Date.now()
   };
@@ -667,8 +712,8 @@ function photoTicketLabel(d) {
 }
 
 async function checkServerHealth() {
-  if (location.hostname === 'jared11-cpu.github.io') return false;
   if (embedded || demo) return false;
+  if (location.hostname.endsWith('.github.io')) return false;
   if (typeof location !== 'undefined' && (location.protocol === 'file:' || location.origin === 'null' || window.mausbot)) return false;
   try {
     const res = await fetch('/api/health?roomCode=' + encodeURIComponent(currentRoomCode), { cache: 'no-cache' });
@@ -727,10 +772,27 @@ function initSSE() {
   if (sseSource) sseSource.close();
   try {
     sseSource = new EventSource('/api/events?roomCode=' + encodeURIComponent(currentRoomCode));
-    sseSource.addEventListener('state_change', async () => {
+    sseSource.addEventListener('state_change', async ev => {
+      let evt = null;
+      try { evt = ev && ev.data ? JSON.parse(ev.data) : null; } catch {}
+      if (evt && evt.operationId && (recentSelfOpIds.has(evt.operationId) || inFlightOpIds.has(evt.operationId))) {
+        if (typeof evt.rev === 'number') state.dataVersion = Math.max(state.dataVersion || 1, evt.rev);
+        return;
+      }
       if (hasActiveEditingState() || roomPendingOps().length > 0) {
         toast('收到远端数据更新，保存当前编辑后自动同步');
         return;
+      }
+      const sinceRev = Number(state.dataVersion) || 0;
+      const diffRes = await serverFetch('/changes?room=' + encodeURIComponent(currentRoomCode) + '&since=' + sinceRev);
+      if (diffRes && diffRes.ok) {
+        if (!diffRes.hasChanges) return;
+        if (diffRes.state) {
+          state = mergeRemoteState(diffRes.state);
+          persistLocalOnly();
+          render(true);
+          return;
+        }
       }
       const remoteState = await serverFetch('/state');
       if (remoteState && remoteState.ok) {
@@ -767,21 +829,34 @@ async function syncLocalToCloud() {
   }
 }
 
-function persistLocalOnly() {
-  if (demo || !hasLocalStorage) return;
-  try { localStorage.setItem(STORE, JSON.stringify(state)); } catch { toast('浏览器存储空间不足，请先导出备份。'); }
+function persistLocalOnly(data = state) {
+  if (demo) return true;
+  try {
+    localStorage.setItem(STORE, JSON.stringify(data));
+    return true;
+  } catch {
+    toast('本机存储不可用或空间不足。');
+    return false;
+  }
 }
 
 function persist(syncPlans = false) {
   persistLocalOnly();
-  if (syncPlans && isServerOnline) {
-    serverFetch('/plans', 'PATCH', {
-      goal: state.goal,
-      days: state.days,
-      studyGoal: state.studyGoal,
-      studyDays: state.studyDays,
-      sportDatePlan: state.sportDatePlan,
-      studyDatePlan: state.studyDatePlan
+  if (syncPlans) {
+    queueOrSendWriteOp({
+      operationId: nextOpId('plan'),
+      coalesceKey: 'plans',
+      kind: 'plans',
+      endpoint: '/plans',
+      method: 'PATCH',
+      payload: {
+        goal: state.goal,
+        days: state.days,
+        studyGoal: state.studyGoal,
+        studyDays: state.studyDays,
+        sportDatePlan: state.sportDatePlan,
+        studyDatePlan: state.studyDatePlan
+      }
     });
   }
 }
@@ -1327,15 +1402,62 @@ function track() {
 }
 
 function homeTodayPanel() {
+  const dk = today();
   const rs = todaySportSummary(), ss = todayStudySummary();
   const totalCount = rs.count + ss.count;
   const focusMeta = getStudyFocusEntryMeta();
   const entryBars = ckEntryBarsMarkup(['sport', 'study']);
+  const members = allMembers();
+  const habits = activeHabits();
+  const hb = habitRateForDate(dk);
+  const doneHabitIds = state.habitLogs[dk] || [];
+  const todayItems = allUnifiedRecords('all', true).filter(r => beijingDateOf(r) === dk);
+
+  const habitsHtml = habits.length
+    ? '<div class="today-sub-block today-habits-block">'
+      + '<div class="today-sub-head"><span class="today-sub-title">今日自律 <em>' + hb.done + '/' + hb.total + '</em></span>'
+      + '<button type="button" class="today-sub-link" data-action="go-view" data-value="people">管理 <span aria-hidden="true">→</span></button></div>'
+      + '<div class="today-habits-grid">'
+      + habits.map(h => {
+        const isDone = doneHabitIds.includes(h.id);
+        return '<button type="button" class="today-habit-btn ' + (isDone ? 'is-done' : '') + '" data-action="toggle-habit" data-value="' + esc(h.id) + '" aria-pressed="' + isDone + '">'
+          + '<span class="today-habit-check" aria-hidden="true">' + (isDone ? '✓' : '') + '</span>'
+          + '<span class="today-habit-label">' + esc(h.title) + '</span></button>';
+      }).join('')
+      + '</div></div>'
+    : '';
+
+  const feedRowsHtml = todayItems.length
+    ? '<div class="today-feed-list">' + todayItems.slice(0, 4).map(item => {
+      const isStudy = item._kind === 'study';
+      const val = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
+      const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || (item.tags && item.tags[0]) || '');
+      const metaText = [item.time, detail].filter(Boolean).join(' · ');
+      const syncKey = recordSyncStateKey(item);
+      const syncMeta = syncStatusMeta(syncKey);
+      return '<button type="button" class="today-feed-row ' + (isStudy ? 'is-study' : 'is-sport') + '" data-action="open-receipt-modal" data-value="' + esc(item._key) + '" data-focus-key="homefeed:' + esc(item._key) + '">'
+        + '<span class="today-feed-tag">' + (isStudy ? '学习' : '运动') + '</span>'
+        + '<strong>' + val + '</strong>'
+        + (metaText ? '<span class="today-feed-meta">' + esc(metaText) + '</span>' : '')
+        + (syncKey !== 'synced' ? '<span class="today-feed-sync is-' + syncMeta.key + '">' + syncMeta.label + '</span>' : '')
+        + '<span class="today-feed-arrow" aria-hidden="true">›</span></button>';
+    }).join('') + '</div>'
+    : '<p class="today-empty-hint">今天还没有运动或学习记录，点击上方按钮即可打卡。</p>';
+
+  const feedHtml = '<div class="today-sub-block today-feed-block">'
+    + '<div class="today-sub-head"><span class="today-sub-title">今日明细</span>'
+    + (todayItems.length > 4 ? '<button type="button" class="today-sub-link" data-action="go-today-records">全部 ' + todayItems.length + ' 条 <span aria-hidden="true">→</span></button>' : '')
+    + '</div>'
+    + feedRowsHtml
+    + '</div>';
+
   return '<section class="home-today-panel" aria-labelledby="home-today-heading">'
     + '<div class="today-panel-head">'
     + '<div class="today-head-title"><h2 id="home-today-heading">今天</h2><span class="today-total-count" aria-label="今日打卡共 ' + totalCount + ' 次">' + totalCount + ' 次打卡</span></div>'
+    + '<div class="today-head-actions">'
+    + '<button type="button" class="today-records-btn is-subtle" data-action="add-person" title="添加同行伙伴">' + (members.length === 1 ? '＋ 加人物' : '＋ 加人物 (' + members.length + '人)') + '</button>'
     + '<button type="button" class="today-records-btn" data-action="go-today-records" data-focus-key="home:today-records">查看今日记录 <span aria-hidden="true">→</span></button>'
-    + '</div>'
+    + '</div></div>'
     + '<div class="today-tracks">'
     + '<div class="today-track-row is-sport">'
     + '<div class="today-track-metric"><span class="today-track-name">运动</span><strong>' + rs.km.toFixed(1) + ' <em>km</em></strong><span class="today-track-count">' + rs.count + ' 次</span></div>'
@@ -1351,6 +1473,8 @@ function homeTodayPanel() {
     + '</div>'
     + (focusMeta.stateText ? '<div class="today-focus-note" id="home-focus-note" role="status">专注计时：' + esc(findTargetTitle(pomodoroTargetId)) + ' · ' + esc(focusMeta.stateText) + '</div>' : '')
     + entryBars
+    + habitsHtml
+    + feedHtml
     + '</section>';
 }
 
@@ -1371,7 +1495,7 @@ function home() {
   const solo = board.length === 1;
 
   return '<div class="home">'
-    + quoteMarkup() + track() + homeTodayPanel()
+    + quoteMarkup() + homeTodayPanel()
     + '<section class="home-metrics home-metrics-4" aria-label="运动学习自律与核心进度">'
     + '<button class="metric-tile" data-action="go-view" data-value="plan"><div class="metric-top"><small>本月运动 / RUN</small><em class="metric-rank">' + (solo ? ('目标 ' + sPct + '%') : ('#' + mySportRank + (mySportRank === 1 ? ' 领跑' : ' 差' + sportLeadDelta + 'k'))) + '</em></div><strong>' + mt.toFixed(1) + '<em> KM</em></strong>' + PixelProgressBar.renderHtml({ progress: sPct, height: 12, width: '100%', bare: true, variant: 'orange', className: 'metric-ppb', ariaLabel: '本月运动目标进度' }) + '</button>'
     + '<button class="metric-tile" data-action="go-view" data-value="study"><div class="metric-top"><small>本月学习 / STUDY</small><em class="metric-rank is-blue">' + (solo ? ('目标 ' + stPct + '%') : ('#' + myStudyRank + (myStudyRank === 1 ? ' 领跑' : ' 差' + studyLeadDelta + 'h'))) + '</em></div><strong>' + stH.toFixed(1) + '<em> H</em></strong>' + PixelProgressBar.renderHtml({ progress: stPct, height: 12, width: '100%', bare: true, variant: 'blue', className: 'metric-ppb', ariaLabel: '本月学习目标进度' }) + '</button>'
@@ -2821,7 +2945,7 @@ function openExternalRecord(key, triggerSelector = '') {
     changes.push('时间：近 30 天 → 全部历史（含 ' + td + '）');
   }
 
-  recordSelectedDate = '';
+  recordSelectedDate = td;
   selectedBarDate = td;
   recordSelectKey = key;
   externalFilterNotice = changes.length
@@ -2842,25 +2966,26 @@ function recordsTrendChart(dataset) {
   const showSport = recordKindFilter === 'all' || recordKindFilter === 'sport';
   const showStudy = recordKindFilter === 'all' || recordKindFilter === 'study';
 
-  const days = Array.from({ length: numDays }, (_, i) => {
-    const dk = dateShift(i - (numDays - 1));
+  function summarizeDay(dk) {
     const items = dataset.inRangeList.filter(r => r._bjDate === dk);
     const runs = items.filter(r => r._kind === 'sport');
     const st = items.filter(r => r._kind === 'study');
     const km = Math.round(runs.reduce((s, r) => s + (Number(r.km) || 0), 0) * 100) / 100;
-    const min = st.reduce((s, r) => s + studyMinutesOf(r), 0);
-    const hr = Math.round((min / 60) * 10) / 10;
+    const seconds = totalStudySeconds(st);
+    const min = Math.round(seconds / 60);
+    const hr = Math.round((seconds / 3600) * 10) / 10;
     const hb = habitRateForDate(dk);
-    return { dk, km, min, hr, runs, st, items, hb };
-  });
+    return { dk, km, seconds, min, hr, runs, st, items, hb };
+  }
+  const days = Array.from({ length: numDays }, (_, index) => summarizeDay(dateShift(index - numDays + 1)));
 
-  let runKm = 0, runMin = 0;
+  let runKm = 0, runSeconds = 0;
   days.forEach(d => {
     runKm = Math.round((runKm + d.km) * 100) / 100;
-    runMin += d.min;
+    runSeconds += d.seconds;
     d.cumKm = runKm;
-    d.cumMin = runMin;
-    d.cumHr = Math.round((runMin / 60) * 10) / 10;
+    d.cumMin = Math.round(runSeconds / 60);
+    d.cumHr = Math.round((runSeconds / 3600) * 10) / 10;
   });
 
   const maxKmRaw = isCum ? (days[numDays - 1]?.cumKm || 0) : Math.max(0, ...days.map(v => v.km));
@@ -2869,7 +2994,8 @@ function recordsTrendChart(dataset) {
   const maxMin = Math.max(60, Math.ceil((maxMinRaw * 1.12 || 60) / 30) * 30);
 
   const activeDate = recordSelectedDate || (days.some(d => d.dk === selectedBarDate) ? selectedBarDate : days[numDays - 1].dk);
-  const selDay = days.find(d => d.dk === activeDate) || days[numDays - 1];
+  const chartDay = days.find(day => day.dk === activeDate);
+  const selDay = chartDay || summarizeDay(activeDate);
 
   const plotLeft = 48, plotRight = 492, plotTop = 30, plotBottom = 142;
   const plotW = plotRight - plotLeft, plotH = plotBottom - plotTop;
@@ -3026,12 +3152,12 @@ function recordsTrendChart(dataset) {
   const inspectorHtml = '<div class="day-inspector" data-inspector-date="' + selDay.dk + '">'
     + '<div class="day-inspector-head">'
     + '<strong>[ ' + selDay.dk + ' · 当日匹配 ' + selDay.items.length + ' 条 ]</strong>'
-    + '<span>' + (recordSelectedDate ? '已筛选该日列表' : '点击柱列/按回车按日筛选') + '</span>'
+    + '<span>' + (!chartDay ? '所选日期超出图表范围' : recordSelectedDate ? '已筛选该日列表' : '点击柱列/按回车按日筛选') + '</span>'
     + '</div>'
     + '<div class="day-inspector-stats">'
     + (showSport ? '<span>运动：<b>' + selDay.km.toFixed(2) + ' km</b>（' + selDay.runs.length + ' 次）</span>' : '')
     + (showStudy ? '<span>学习：<b>' + selDay.min + ' 分钟</b> / ' + selDay.hr + ' h（' + selDay.st.length + ' 场）</span>' : '')
-    + (isCum ? '<span>至当日累计：<b>' + (showSport ? selDay.cumKm.toFixed(1) + ' km' : '') + (showSport && showStudy ? ' · ' : '') + (showStudy ? selDay.cumMin + ' 分钟' : '') + '</b></span>' : '')
+    + (isCum && chartDay ? '<span>至当日累计：<b>' + (showSport ? selDay.cumKm.toFixed(1) + ' km' : '') + (showSport && showStudy ? ' · ' : '') + (showStudy ? selDay.cumMin + ' 分钟' : '') + '</b></span>' : '')
     + backRangeBtn
     + '</div>'
     + '<div class="day-inspector-items" aria-label="' + selDay.dk + ' 全部匹配记录小票入口">'
@@ -3043,9 +3169,12 @@ function recordsTrendChart(dataset) {
     + (showStudy ? '<span><i style="background:#203f91"></i>学习 MIN（右轴）</span>' : '')
     + (recordRangeFilter === 'all' ? '<span>主图展示近 30 天 · 卡墙含历史小票</span>' : '');
 
+  const outOfRangeBanner = !chartDay
+    ? '<div class="chart-out-of-range-banner" role="status"><strong>所选日期超出图表范围</strong><span>主图保留近 ' + numDays + ' 天，下方已显示 ' + esc(selDay.dk) + ' 的当日摘要与卡墙筛选。</span></div>'
+    : '';
   const cardTitle = (is30d ? '30-DAY' : '7-DAY') + ' DUAL-AXIS // ' + (isCum ? 'CUMULATIVE' : 'DAILY');
   const cardHint = (recordPersonFilter === 'mine' ? esc(state.name) + '（我）' : '全员') + ' · ' + rangeLabel + ' · ' + (isCum ? '区间累计折线' : '每日柱状图');
-  return blueprintChartCard(cardTitle, cardHint, svg + inspectorHtml, '', legendHtml);
+  return blueprintChartCard(cardTitle, cardHint, outOfRangeBanner + svg + inspectorHtml, '', legendHtml);
 }
 
 function moreAnalyticsChart(dataset) {
@@ -3072,8 +3201,10 @@ function buildReceiptCardMarkup(r, seqIndex, totalInList) {
   const recRetryBtn = recNeedsRetry
     ? '<button type="button" class="ck-btn ck-btn-retry" data-action="retry-sync" data-value="' + esc(r.operationId || '') + '">重试同步</button>'
     : '';
+  const rStudySec = r._kind === 'study' ? studySecondsOf(r) : 0;
   const rStudyHrs = r._kind === 'study' ? studyHoursOf(r) : 0;
   const rStudyMin = r._kind === 'study' ? studyMinutesOf(r) : 0;
+  const rStudyExact = rStudySec % 60 ? (Math.floor(rStudySec / 60) + '分' + pad(rStudySec % 60) + '秒') : (rStudyMin + ' 分钟');
   const displaySeq = Math.max(1, totalInList - seqIndex);
   const stampNo = pad(displaySeq).padStart(3, '0');
   const syncErrMsg = r.syncError || recPendingOp?.lastError || '';
@@ -3085,7 +3216,7 @@ function buildReceiptCardMarkup(r, seqIndex, totalInList) {
       + '<div class="record-hero-km is-study"><strong>' + rStudyMin + ' <em>MIN</em></strong><span>' + esc(r.person) + ' · ' + rStudyHrs.toFixed(1) + ' h · ' + (studyFocusLevels[r.focus]?.[0] || '🧠') + ' ' + (studyFocusLevels[r.focus]?.[1] || '专注') + '</span></div>'
       + '<div class="record-subject-line">' + icon('book') + ' <strong>' + esc(r.subject || findTargetTitle(r.targetId)) + '</strong></div>'
       + '<div class="record-tags"><span class="badge-tag is-study-tag">学习档案</span>' + (r.tags || []).map(t => '<span>' + esc(t) + '</span>').join('') + '</div>'
-      + '<div class="record-numbers"><div><strong>' + rStudyMin + '</strong><small>MIN / 分钟</small></div><div><strong>' + rStudyHrs.toFixed(1) + '</strong><small>HOURS / 小时</small></div><div><strong>#' + displaySeq + '</strong><small>LOG / 序号</small></div></div>'
+      + '<div class="record-numbers"><div><strong>' + rStudyMin + '</strong><small>MIN / 分钟</small></div><div><strong>' + rStudyExact + '</strong><small>EXACT / ' + rStudySec + ' 秒</small></div><div><strong>#' + displaySeq + '</strong><small>LOG / 序号</small></div></div>'
       + '<p class="record-note">“' + esc(r.note || '专注一小时，胜过焦虑一整天。') + '”</p>'
       + (r.photo ? '<img class="record-photo" src="' + r.photo + '" alt="学习笔记照片">' : '')
       + '<div class="record-actions"><button type="button" class="like-btn ' + (r.liked ? 'liked' : '') + '" data-action="like-unified" data-value="' + r._key + '" aria-pressed="' + !!r.liked + '">' + icon('heart') + ' ' + (r.likes || '赞一个') + '</button>' + recRetryBtn + '<button type="button" id="receipt-edit-btn" class="edit-btn" data-action="edit-unified" data-value="' + r._key + '">编辑</button><button type="button" class="delete-btn" data-action="delete-unified" data-value="' + r._key + '">删除这条</button></div>'
@@ -3201,8 +3332,8 @@ function recordsPage() {
   const sportRuns = inRangeList.filter(x => x._kind === 'sport');
   const studyItems = inRangeList.filter(x => x._kind === 'study');
   const sKm = sportRuns.reduce((s, x) => s + (Number(x.km) || 0), 0);
-  const stMin = studyItems.reduce((s, x) => s + studyMinutesOf(x), 0);
-  const stH = Math.round((stMin / 60) * 10) / 10;
+  const stMin = totalStudyMinutes(studyItems);
+  const stH = Math.round((totalStudySeconds(studyItems) / 3600) * 10) / 10;
   let paceStr = "--'--\"";
   if (sportRuns.length && sKm > 0) {
     const totMin = sportRuns.reduce((s, x) => s + (Number(x.minutes) || 0), 0);
@@ -3242,7 +3373,7 @@ function recordsPage() {
         + '" aria-label="' + esc([date, time, type, value, item.person, statusMeta.label, errMsg].filter(Boolean).join('，')) + '">'
         + '<span class="record-row-type">' + type + '</span><strong>' + value + '</strong>'
         + '<span class="record-row-meta">' + esc([time, item.person].filter(Boolean).join(' · ')) + '</span>'
-        + '<span class="record-row-sync is-' + statusMeta.key + '">' + statusMeta.label + '</span>'
+        + '<span class="record-row-sync is-' + statusMeta.key + (statusMeta.key === 'synced' ? ' is-synced-quiet' : '') + '">' + statusMeta.label + '</span>'
         + '<span class="record-row-arrow" aria-hidden="true">›</span></button>'
         + (needsRetry ? '<div class="record-row-sync-bar" role="' + (status === 'failed' ? 'alert' : 'status') + '">'
           + '<span>' + (errMsg ? ('原因：' + esc(errMsg)) : esc(statusMeta.detail)) + '</span>'
@@ -3256,7 +3387,7 @@ function recordsPage() {
     ? '<div class="external-filter-notice" role="status" aria-live="polite"><span>' + icon('spark') + ' ' + esc(externalFilterNotice) + '</span><button type="button" class="btn-xs" data-action="reset-filter-default">恢复默认筛选</button></div>'
     : '';
 
-  const filterPanelHtml = '<section class="records-filter-panel" aria-label="记录筛选">'
+  const filterPanelHtml = '<section class="records-filter-panel" id="records-shared-filters" aria-label="记录筛选">'
     + externalNoticeHtml
     + '<div class="filter-row">'
     + '<div class="filter-group"><span class="filter-label">类型</span><div class="mini-subtabs" role="group" aria-label="按类型筛选">'
@@ -3302,9 +3433,12 @@ function recordsPage() {
       : '')
     + '</section>';
 
+  const dispSportKm = displayList.filter(x => x._kind === 'sport').reduce((s, x) => s + (Number(x.km) || 0), 0);
+  const dispStudyMin = totalStudyMinutes(displayList.filter(x => x._kind === 'study'));
+  const wallSummaryMetrics = '<span class="wall-kpi-inline">运动 ' + dispSportKm.toFixed(1) + ' km · 学习 ' + dispStudyMin + ' 分钟</span>';
   const wallScopeBarHtml = recordSelectedDate
-    ? '<div class="wall-active-filter-bar is-date-focused" role="status"><span>已选日期：<b>' + esc(recordSelectedDate) + (recordSelectedDate === todayDk ? '（今天）' : '') + '</b> · 共 ' + displayList.length + ' 条</span></div>'
-    : '<div class="wall-active-filter-bar"><span>当前范围：<b>' + personText + '</b> · <b>' + kindText + '</b> · <b>' + rangeText + '</b>（共 ' + displayList.length + ' 条）</span></div>';
+    ? '<div class="wall-active-filter-bar is-date-focused" role="status"><span>已选日期：<b>' + esc(recordSelectedDate) + (recordSelectedDate === todayDk ? '（今天）' : '') + '</b> · 共 ' + displayList.length + ' 条</span>' + wallSummaryMetrics + '</div>'
+    : '<div class="wall-active-filter-bar"><span>当前范围：<b>' + personText + '</b> · <b>' + kindText + '</b> · <b>' + rangeText + '</b>（共 ' + displayList.length + ' 条）</span>' + wallSummaryMetrics + '</div>';
 
   const anyTodayRecForPerson = allUnifiedRecords('all', recordPersonFilter === 'mine').some(x => beijingDateOf(x) === todayDk);
   const isTodayEmpty = recordSelectedDate === todayDk && !anyTodayRecForPerson;
@@ -3315,24 +3449,51 @@ function recordsPage() {
       + '<button type="button" class="btn-back-range" data-action="reset-filter-default">恢复默认筛选</button>'
       + '</div></div>';
 
-  return '<div class="records-layout"><div class="records-left">'
+  return filterPanelHtml + '<div class="records-layout"><div class="records-left">'
     + '<section class="poster-hero poster-frost poster-compact" data-wm="LOG">'
-    + '<div class="poster-meta"><span>' + personText + ' · ' + kindText + ' · ' + rangeText + '</span><span>活跃 ' + activeDays + ' 天 · 共 ' + inRangeList.length + ' 条</span></div>'
-    + '<div class="poster-kpis poster-kpis-4">'
+    + '<div class="poster-meta" id="records-poster-meta"><span>' + personText + ' · ' + kindText + ' · ' + rangeText + '</span><span>活跃 ' + activeDays + ' 天 · 共 ' + inRangeList.length + ' 条</span></div>'
+    + '<div class="poster-kpis poster-kpis-4" id="records-poster-kpis">'
     + '<div><small>区间跑量</small><strong>' + sKm.toFixed(1) + '<em>KM</em></strong></div>'
     + '<div><small>区间学习</small><strong>' + stMin + '<em>MIN</em></strong><span class="kpi-sub">(' + stH + 'H)</span></div>'
     + '<div><small>区间条数</small><strong>' + inRangeList.length + '<em>条</em></strong></div>'
     + '<div><small>区间均配速</small><strong>' + paceStr + '</strong></div>'
     + '</div></section>'
+    + '<div id="records-left-dynamic">'
     + chartModeBarHtml
     + '<div class="data-chart blueprint-chart records-main-chart">' + recordsTrendChart(dataset) + '</div>'
     + moreAnalyticsHtml
-    + '</div><div class="records-right">'
+    + '</div>'
+    + '</div><div class="records-right" id="records-right-dynamic">'
     + heading('记录', '<span class="pager"><button type="button" data-action="record-prev" aria-label="上一条记录" ' + (curIdx <= 0 ? 'disabled' : '') + '>‹</button><span>' + (r ? curIdx + 1 : 0) + ' / ' + displayList.length + '</span><button type="button" data-action="record-next" aria-label="下一条记录" ' + (curIdx >= displayList.length - 1 || !displayList.length ? 'disabled' : '') + '>›</button></span>', 'spark')
-    + filterPanelHtml
     + wallScopeBarHtml
     + (displayList.length ? '<div class="record-wall-grid records-wall-scoped" aria-label="按日期分组的记录">' + wallCards + '</div>' : emptyWallHtml)
     + '</div></div>';
+}
+
+function updateRecordsPageInPlace() {
+  const filters = $('#records-shared-filters');
+  const leftDyn = $('#records-left-dynamic');
+  const rightDyn = $('#records-right-dynamic');
+  const metaEl = $('#records-poster-meta');
+  const kpisEl = $('#records-poster-kpis');
+  if (view !== 'records' || !filters || !leftDyn || !rightDyn || !metaEl || !kpisEl) {
+    render(true);
+    return;
+  }
+  const tmp = document.createElement('div');
+  tmp.innerHTML = recordsPage();
+  const newFilters = tmp.querySelector('#records-shared-filters');
+  const newMeta = tmp.querySelector('#records-poster-meta');
+  const newKpis = tmp.querySelector('#records-poster-kpis');
+  const newLeft = tmp.querySelector('#records-left-dynamic');
+  const newRight = tmp.querySelector('#records-right-dynamic');
+  if (newFilters) filters.innerHTML = newFilters.innerHTML;
+  if (newMeta) metaEl.innerHTML = newMeta.innerHTML;
+  if (newKpis) kpisEl.innerHTML = newKpis.innerHTML;
+  if (newLeft) leftDyn.innerHTML = newLeft.innerHTML;
+  if (newRight) rightDyn.innerHTML = newRight.innerHTML;
+  refreshReceiptDialog();
+  syncRecordsHashUrl();
 }
 
 /* ---------- View 8: Discipline & Multi-Person Co-Check-in ---------- */
@@ -3456,20 +3617,68 @@ function render(preserveScroll = false) {
   if (view === 'records') refreshReceiptDialog();
 }
 function nextQuote() { quoteIndex = (quoteIndex + 1) % quotes.length; const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); initPixelMatrices(); }
-function navigate(v) {
+function buildRecordsHash() {
+  const q = new URLSearchParams();
+  if (recordKindFilter !== 'all') q.set('kind', recordKindFilter);
+  if (recordPersonFilter !== 'mine') q.set('person', recordPersonFilter);
+  if (recordRangeFilter !== '7d') q.set('range', recordRangeFilter);
+  if (recordTrendMode !== 'daily') q.set('trend', recordTrendMode);
+  if (recordSelectedDate) q.set('date', recordSelectedDate);
+  const qs = q.toString();
+  return '#records' + (qs ? '?' + qs : '');
+}
+function syncRecordsHashUrl(usePush = false) {
+  if (typeof location === 'undefined' || view !== 'records') return;
+  const targetHash = buildRecordsHash();
+  if (location.hash !== targetHash) {
+    try {
+      if (usePush) history.pushState(null, '', targetHash);
+      else history.replaceState(null, '', targetHash);
+    } catch {}
+  }
+}
+function applyRecordsHashQuery(hashStr) {
+  if (!hashStr || !hashStr.includes('?')) return false;
+  const qs = hashStr.split('?')[1] || '';
+  const q = new URLSearchParams(qs);
+  let changed = false;
+  if (q.has('kind') && ['all', 'sport', 'study'].includes(q.get('kind'))) { recordKindFilter = q.get('kind'); changed = true; }
+  if (q.has('person') && ['mine', 'all'].includes(q.get('person'))) { recordPersonFilter = q.get('person'); changed = true; }
+  if (q.has('range') && ['7d', '30d', 'all'].includes(q.get('range'))) { recordRangeFilter = q.get('range'); changed = true; }
+  if (q.has('trend') && ['daily', 'cum'].includes(q.get('trend'))) { recordTrendMode = q.get('trend'); changed = true; }
+  if (q.has('date') && /^\d{4}-\d{2}-\d{2}$/.test(q.get('date'))) {
+    recordSelectedDate = q.get('date');
+    selectedBarDate = recordSelectedDate;
+    changed = true;
+  }
+  return changed;
+}
+applyRecordsHashQuery(typeof location !== 'undefined' ? location.hash : '');
+
+function navigate(v, fromPop = false) {
   if (!VALID_VIEWS.includes(v)) v = 'home';
   if (v !== 'records') closeReceiptDialog();
+  const prevView = view;
   view = v;
-  if (typeof location !== 'undefined' && location.hash !== '#' + v) {
-    try { history.replaceState(null, '', '#' + v); } catch { location.hash = v; }
+  const targetHash = v === 'records' ? buildRecordsHash() : ('#' + v);
+  if (!fromPop && typeof location !== 'undefined' && location.hash !== targetHash) {
+    try {
+      if (prevView !== v) history.pushState(null, '', targetHash);
+      else history.replaceState(null, '', targetHash);
+    } catch { location.hash = v; }
   }
   render(false);
   $('#page').scrollTop = 0;
   $('#page').focus({ preventScroll: true });
 }
 window.addEventListener('hashchange', () => {
-  const hv = location.hash.replace(/^#/, '').split('?')[0];
-  if (VALID_VIEWS.includes(hv) && hv !== view) navigate(hv);
+  const rawHash = location.hash.replace(/^#/, '');
+  const hv = rawHash.split('?')[0];
+  if (hv === 'records') applyRecordsHashQuery(location.hash);
+  if (VALID_VIEWS.includes(hv)) {
+    if (hv !== view) navigate(hv, true);
+    else if (hv === 'records') updateRecordsPageInPlace();
+  }
 });
 
 function buildStableFocusSelector(el) {
@@ -3524,7 +3733,7 @@ $('#rename').onclick = () => openEditor('你的个人昵称', '<label for="name-
   state.studyRecords.forEach(r => { if (r.person === state.name) r.person = name; });
   const oldName = state.name;
   state.name = name; persist(); render(true); toast('新名字，新起点。');
-  if (isServerOnline) serverFetch('/rename', 'POST', { oldName, newName: name });
+  queueOrSendWriteOp({ operationId: nextOpId('rename'), coalesceKey: 'rename', kind: 'rename', endpoint: '/rename', method: 'POST', payload: { oldName, newName: name } });
 });
 
 function openPixelProgressDemoModal() {
@@ -3628,7 +3837,7 @@ document.addEventListener('change', async e => {
     externalFilterNotice = '';
     if (!val) {
       recordSelectedDate = '';
-      render(true);
+      updateRecordsPageInPlace();
       restoreFocusBySelector('#records-date-jump');
       return;
     }
@@ -3641,7 +3850,7 @@ document.addEventListener('change', async e => {
     } else if (recordRangeFilter === '30d' && val < min30) {
       recordRangeFilter = 'all';
     }
-    render(true);
+    updateRecordsPageInPlace();
     restoreFocusBySelector('#records-date-jump');
     return;
   }
@@ -3798,13 +4007,27 @@ function openRecordEditModal(key) {
     }
 
     const oldDate = beijingDateOf(rec);
+    const editOpId = nextOpId('edit');
+    const fullPatch = { ...patchPayload, person: state.name, operationId: editOpId };
+    if (rec.version) fullPatch.baseVersion = rec.version;
     if (isServerOnline) {
-      const res = await serverFetch('/records/' + kind + '/' + id, 'PATCH', patchPayload);
-      if (!res.ok) { toast(res.error || '编辑失败'); return false; }
-      const merged = res.record || patchPayload;
-      Object.assign(rec, isStudy ? normalizeStudyRecord(merged) : merged, { syncStatus: 'synced', syncError: '' });
+      markSelfOpId(editOpId);
+      const res = await serverFetch('/records/' + kind + '/' + id, 'PATCH', fullPatch);
+      if (!res.ok) {
+        if (res.status === 0 || res.offline) {
+          Object.assign(rec, isStudy ? normalizeStudyRecord(patchPayload) : patchPayload, { operationId: editOpId, syncStatus: 'failed', syncError: res.error || '无法连接到服务器' });
+          enqueuePendingOp({ operationId: editOpId, coalesceKey: 'edit:' + kind + ':' + id, kind, recordId: rec.id, endpoint: '/records/' + kind + '/' + id, method: 'PATCH', payload: fullPatch, status: 'failed', lastError: rec.syncError });
+        } else {
+          toast(res.error || '编辑失败');
+          return false;
+        }
+      } else {
+        const merged = res.record || patchPayload;
+        Object.assign(rec, isStudy ? normalizeStudyRecord(merged) : merged, { syncStatus: 'synced', syncError: '' });
+      }
     } else {
-      Object.assign(rec, isStudy ? normalizeStudyRecord(patchPayload) : patchPayload, { syncStatus: 'local' });
+      Object.assign(rec, isStudy ? normalizeStudyRecord(patchPayload) : patchPayload, { operationId: editOpId, syncStatus: 'local', syncError: '' });
+      enqueuePendingOp({ operationId: editOpId, coalesceKey: 'edit:' + kind + ':' + id, kind, recordId: rec.id, endpoint: '/records/' + kind + '/' + id, method: 'PATCH', payload: fullPatch, status: 'pending', lastError: '' });
     }
     if (oldDate !== dateVal) {
       selectedBarDate = dateVal;
@@ -4009,19 +4232,19 @@ document.addEventListener('click', async e => {
   if (a === 'rank-chart-mode') { rankChartMode = v === '学习专注对比' ? 'study' : 'sport'; selectedNodeKey = ''; render(true); return; }
 
   if (a === 'chart-type') { chartType = v; selectedChartNote = ''; render(true); return; }
-  if (a === 'more-chart-type') { recordsMoreChartType = v; selectedChartNote = ''; selectedBucket = null; render(true); restoreFocusBySelector('[data-action="more-chart-type"][data-value="' + v + '"]'); return; }
-  if (a === 'toggle-more-analytics') { recordsMoreOpen = !recordsMoreOpen; render(true); restoreFocusBySelector('[data-action="toggle-more-analytics"]'); return; }
+  if (a === 'more-chart-type') { recordsMoreChartType = v; selectedChartNote = ''; selectedBucket = null; updateRecordsPageInPlace(); restoreFocusBySelector('[data-action="more-chart-type"][data-value="' + v + '"]'); return; }
+  if (a === 'toggle-more-analytics') { recordsMoreOpen = !recordsMoreOpen; updateRecordsPageInPlace(); restoreFocusBySelector('[data-action="toggle-more-analytics"]'); return; }
   if (a === 'record-kind' || a === 'set-record-kind') {
     recordKindFilter = (v === '运动' || v === 'sport') ? 'sport' : (v === '学习' || v === 'study') ? 'study' : 'all';
     selectedChartNote = ''; selectedBucket = null; externalFilterNotice = '';
-    render(true);
+    updateRecordsPageInPlace();
     restoreFocusBySelector('[data-action="set-record-kind"][data-value="' + recordKindFilter + '"]');
     return;
   }
   if (a === 'set-record-person') {
     recordPersonFilter = v === 'all' ? 'all' : 'mine';
     selectedChartNote = ''; selectedBucket = null; externalFilterNotice = '';
-    render(true);
+    updateRecordsPageInPlace();
     restoreFocusBySelector('[data-action="set-record-person"][data-value="' + recordPersonFilter + '"]');
     return;
   }
@@ -4032,26 +4255,26 @@ document.addEventListener('click', async e => {
       if (recordSelectedDate < rMin) recordSelectedDate = '';
     }
     selectedChartNote = ''; selectedBucket = null; externalFilterNotice = '';
-    render(true);
+    updateRecordsPageInPlace();
     restoreFocusBySelector('[data-action="set-record-range"][data-value="' + recordRangeFilter + '"]');
     return;
   }
   if (a === 'set-record-trend') {
     recordTrendMode = v === 'cum' ? 'cum' : 'daily';
-    render(true);
+    updateRecordsPageInPlace();
     restoreFocusBySelector('[data-action="set-record-trend"][data-value="' + recordTrendMode + '"]');
     return;
   }
   if (a === 'select-date-bar') {
     recordSelectedDate = v;
     selectedBarDate = v;
-    render(true);
+    updateRecordsPageInPlace();
     restoreFocusBySelector('[data-action="select-date-bar"][data-value="' + v + '"]');
     return;
   }
   if (a === 'clear-date-filter') {
     recordSelectedDate = '';
-    render(true);
+    updateRecordsPageInPlace();
     restoreFocusBySelector('#records-date-jump');
     return;
   }
@@ -4347,14 +4570,14 @@ document.addEventListener('click', async e => {
     const arr = state.habitLogs[dk] || [];
     state.habitLogs[dk] = arr.includes(hid) ? arr.filter(id => id !== hid) : [...arr, hid];
     persistLocalOnly(); render(true);
-    if (isServerOnline) serverFetch('/habit-logs', 'PUT', { person: state.name, date: dk, habitIds: state.habitLogs[dk] });
+    queueOrSendWriteOp({ operationId: nextOpId('hblog'), coalesceKey: 'hblog:' + state.name + ':' + dk, kind: 'habit-log', endpoint: '/habit-logs', method: 'PUT', payload: { person: state.name, date: dk, habitIds: state.habitLogs[dk] } });
     return;
   }
   if (a === 'toggle-habit') {
     const arr = state.habitLogs[today()] || [];
     state.habitLogs[today()] = arr.includes(v) ? arr.filter(id => id !== v) : [...arr, v];
     persistLocalOnly(); render(true);
-    if (isServerOnline) serverFetch('/habit-logs', 'PUT', { person: state.name, date: today(), habitIds: state.habitLogs[today()] });
+    queueOrSendWriteOp({ operationId: nextOpId('hblog'), coalesceKey: 'hblog:' + state.name + ':' + today(), kind: 'habit-log', endpoint: '/habit-logs', method: 'PUT', payload: { person: state.name, date: today(), habitIds: state.habitLogs[today()] } });
     return;
   }
   if (a === 'add-habit') {
@@ -4441,7 +4664,7 @@ document.addEventListener('click', async e => {
       item.liked = !item.liked;
       item.likes = Math.max(0, (item.likes || 0) + (item.liked ? 1 : -1));
       persist(); render(true);
-      if (isServerOnline) serverFetch('/records/' + kind + '/' + id + '/like', 'POST', { person: state.name });
+      queueOrSendWriteOp({ operationId: nextOpId('like'), coalesceKey: 'like:' + kind + ':' + id, kind: 'like', endpoint: '/records/' + kind + '/' + id + '/like', method: 'POST', payload: { person: state.name } });
     }
     return;
   }
@@ -4449,9 +4672,14 @@ document.addEventListener('click', async e => {
   if (a === 'delete-unified') {
     const [kind, idStr] = v.split(':'), id = Number(idStr);
     openEditor('删除这条打卡记录？', '<p>确认删除选中的' + (kind === 'study' ? '学习（将同步扣减关联目标小时）' : '运动') + '记录？统计图表将同步更新。</p>', async () => {
+      const delOpId = nextOpId('del');
       if (isServerOnline) {
-        const res = await serverFetch('/records/' + kind + '/' + id, 'DELETE');
-        if (!res.ok) { toast(res.error || '删除失败'); return false; }
+        markSelfOpId(delOpId);
+        const res = await serverFetch('/records/' + kind + '/' + id, 'DELETE', { person: state.name, operationId: delOpId });
+        if (!res.ok && res.status !== 0) { toast(res.error || '删除失败'); return false; }
+        if (!res.ok) enqueuePendingOp({ operationId: delOpId, kind: 'delete', endpoint: '/records/' + kind + '/' + id, method: 'DELETE', payload: { person: state.name }, status: 'failed', lastError: res.error || '网络异常' });
+      } else {
+        enqueuePendingOp({ operationId: delOpId, kind: 'delete', endpoint: '/records/' + kind + '/' + id, method: 'DELETE', payload: { person: state.name }, status: 'pending', lastError: '' });
       }
       if (kind === 'study') state.studyRecords = state.studyRecords.filter(x => x.id !== id);
       else state.records = state.records.filter(x => x.id !== id);
@@ -4466,14 +4694,14 @@ document.addEventListener('click', async e => {
     if (chartPersonFilter === v) chartPersonFilter = 'all';
     if (!state.members.length) { dualChartMode = 'personal-dual'; if (progressTab === '多人竞速曲线') progressTab = '双轨线性表'; }
     persist(); render(true); toast('已移除伙伴 ' + v);
-    if (isServerOnline) serverFetch('/members/' + encodeURIComponent(v), 'DELETE');
+    queueOrSendWriteOp({ operationId: nextOpId('memdel'), coalesceKey: 'mem:' + v, kind: 'member', endpoint: '/members/' + encodeURIComponent(v), method: 'DELETE', payload: {} });
     return;
   }
   if (a === 'add-person') openEditor('邀请一位自律同行伙伴', '<label for="person-name">伙伴名字</label><input id="person-name" maxlength="12" placeholder="怎么称呼 TA？" required><p class="hint">添加后即可在排行榜、进度PK、多人折线图与打卡弹窗中共同打卡。</p>', () => {
     const n = $('#person-name').value.trim();
     if (!n || allMembers().includes(n)) { toast('请输入一个不重复的伙伴名字。'); return false; }
     state.members.push(n); if (progressTab === '双轨线性表') progressTab = '多人竞速曲线'; persist(); render(true); toast('伙伴 ' + n + ' 已加入竞技名单！');
-    if (isServerOnline) serverFetch('/members', 'POST', { name: n });
+    queueOrSendWriteOp({ operationId: nextOpId('memadd'), coalesceKey: 'mem:' + n, kind: 'member', endpoint: '/members', method: 'POST', payload: { name: n } });
   });
 });
 
@@ -4484,10 +4712,11 @@ function createFreshDraft(mode = 'sport', targetId = null, personName = state.na
   return {
     mode,
     person: validPerson,
+    date: today(),
     km: 5,
     ...(mode === 'study' ? { seconds: 90 * 60 } : { seconds: 30 * 60, minutes: 30, hours: 0.5 }),
     targetId: tid,
-    feel: null,
+    feel: 3,
     tags: [],
     note: '',
     photo: '',
@@ -4511,6 +4740,7 @@ function openCheckin(mode = 'sport', targetId = null, personName = state.name, o
     draft = {
       ...createFreshDraft(mode, targetId || saved.targetId, personName || saved.person),
       ...saved,
+      feel: saved.feel ?? 3,
       mode,
       person: allMembers().includes(saved.person) ? saved.person : state.name,
       targetId: targetId || saved.targetId || state.studyTargets[0]?.id || 'st-1',
@@ -4520,7 +4750,7 @@ function openCheckin(mode = 'sport', targetId = null, personName = state.name, o
       restoredFromDraft: true
     };
     step = Math.max(0, Math.min(4, Number(saved.step) || 0));
-    if (step === 4 && draft.feel === null) step = 3;
+    step = step === 4 ? 4 : 0;
     if (saved.photoInIdb && !draft.photo) {
       const key = draftStorageKey(mode);
       const restoreOpId = draft.operationId;
@@ -4543,47 +4773,31 @@ function openCheckin(mode = 'sport', targetId = null, personName = state.name, o
 }
 
 function syncDraftFromDom() {
-  if (!draft) return;
-  if (step === 1) {
-    if (draft.mode === 'study') {
-      const hEl = $('#hours-input');
-      if (hEl) {
-        const h = Number(hEl.value);
-        if (Number.isFinite(h) && h >= 1 / 60 && h <= 16 && h !== draftStudyHoursInputValue()) setDraftStudySeconds(h * 3600);
-      }
-      const tEl = $('#study-target-select');
-      if (tEl && tEl.value) draft.targetId = tEl.value;
-    } else {
-      const dEl = $('#distance-input');
-      if (dEl) {
-        const n = Number(dEl.value);
-        if (Number.isFinite(n) && n >= 0.1 && n <= 300) draft.km = Math.round(n * 100) / 100;
-      }
-    }
+  if (!draft || step === 4) return;
+  const date = $('#checkin-date');
+  if (date?.validity.valid && date.value) draft.date = date.value;
+  const time = $('#start-time');
+  if (time?.value) draft.time = time.value;
+  const distance = $('#distance-input');
+  if (distance?.validity.valid && distance.value) draft.km = Number(distance.value);
+  const duration = $('#minutes-input');
+  if (duration?.validity.valid && duration.value) {
+    const minutes = Number(duration.value);
+    if (draft.mode === 'sport') { draft.minutes = minutes; draft.seconds = minutes * 60; }
+    else if (minutes !== studyMinutesOf(draft)) setDraftStudySeconds(minutes * 60);
   }
-  if (step === 2) {
-    const mEl = $('#minutes-input');
-    if (mEl) {
-      const n = Number(mEl.value);
-      if (draft.mode === 'study') {
-        if (Number.isFinite(n) && n >= 1 && n <= 960 && n !== studyMinutesOf(draft)) setDraftStudySeconds(Math.round(n) * 60);
-      } else if (Number.isFinite(n) && n >= 1 && n <= 1440) {
-        draft.minutes = Math.round(n);
-        draft.seconds = draft.minutes * 60;
-      }
-    }
-    const stEl = $('#start-time');
-    if (stEl && stEl.value) draft.time = stEl.value;
-  }
-  if (step === 3) {
-    const nEl = $('#run-note');
-    if (nEl) draft.note = nEl.value.trim();
-  }
+  const note = $('#run-note');
+  if (note) draft.note = note.value.trim();
+  const target = $('#study-target-select');
+  if (target?.value) draft.targetId = target.value;
+  const extras = $('#checkin-extras');
+  if (extras) draft.extrasOpen = extras.open;
 }
 
 function closeCheckin(opts = {}) {
   const discard = Boolean(opts && opts.discard);
   const prevMode = draft ? draft.mode : null;
+  if (draft?.saving && !discard) return;
   if (draft) {
     if (discard) {
       clearSavedDraft(draft.mode);
@@ -4604,37 +4818,19 @@ function closeCheckin(opts = {}) {
 }
 
 function readStep() {
-  if (step === 1) {
-    if (draft.mode === 'study') {
-      const h = Number($('#hours-input').value);
-      if (!Number.isFinite(h) || h < 1 / 60 || h > 16) { toast('学习时长须在 1 分钟至 16 小时之间。'); return false; }
-      if (h !== draftStudyHoursInputValue()) setDraftStudySeconds(h * 3600);
-      draft.targetId = $('#study-target-select')?.value || draft.targetId;
-    } else {
-      const n = Number($('#distance-input').value);
-      if (!Number.isFinite(n) || n < 0.1 || n > 300) { toast('跑步距离请填 0.1–300 km。'); return false; }
-      draft.km = Math.round(n * 100) / 100;
-    }
+  for (const field of $$('.ck-core input, .ck-core select')) {
+    if (!field.reportValidity()) return false;
   }
-  if (step === 2) {
-    const n = Number($('#minutes-input').value);
-    if (draft.mode === 'study') {
-      if (!Number.isFinite(n) || n < 1 || n > 960) { toast('学习时长请填 1–960 分钟。'); return false; }
-      // Keep exact seconds when the minute field only shows a rounded conversion.
-      if (n !== studyMinutesOf(draft)) setDraftStudySeconds(Math.round(n) * 60);
-    } else {
-      if (!Number.isFinite(n) || n < 1 || n > 1440) { toast('时长请填 1–1440 分钟。'); return false; }
-      draft.minutes = Math.round(n);
-      draft.seconds = draft.minutes * 60;
-    }
-    draft.time = $('#start-time').value || draft.time;
-  }
-  if (step === 3) {
-    draft.note = $('#run-note').value.trim();
-    if (draft.feel === null) { toast(draft.mode === 'study' ? '选一个今天的学习专注度吧。' : '选一个今天的跑步感觉吧。'); return false; }
-  }
-  persistCheckinDraft(draft, step);
+  syncDraftFromDom();
   return true;
+}
+
+function updateCheckinPace() {
+  const output = $('#checkin-pace');
+  if (!output) return;
+  const distance = $('#distance-input'), minutes = $('#minutes-input');
+  output.textContent = distance.validity.valid && minutes.validity.valid
+    ? pace({ km: Number(distance.value), minutes: Number(minutes.value) }) + ' /km' : '—';
 }
 
 function stepMarkup() {
@@ -4650,71 +4846,48 @@ function stepMarkup() {
     + allMembers().map(m => '<button type="button" class="mp-pill ' + (draft.person === m ? 'active' : '') + '" style="--mclr:' + memberColor(m) + '" data-modal="switch-person" data-value="' + esc(m) + '">' + esc(m) + (m === state.name ? ' (我)' : '') + '</button>').join('')
     + '</div>';
 
-  if (step === 0) {
-    const pHint = photoStorageHint(draft);
-    const pCls = draft.photoUploading ? 'is-pending' : (draft.photo && (draft.photo.startsWith('/uploads/') || (draft.photo.startsWith('http://') || draft.photo.startsWith('https://')))) ? 'is-synced' : (draft.photoStorage === 'local-fallback' || draft.photoRestoreWarning) ? 'is-warn' : 'is-local';
-    return modeBar + '<h3>照片</h3>'
-      + '<label class="photo-drop ' + (draft.photo ? 'has-photo' : '') + '" for="photo-file">' + (draft.photo ? '<img src="' + draft.photo + '" alt="已选打卡照片">' : '') + '<span class="camera-disc"><svg viewBox="0 0 36 36"><path d="M5 11h7l3-4h7l3 4h6v20H5z"/><circle cx="18" cy="21" r="7"/></svg></span><span>' + (draft.photoUploading ? '正在上传…' : (draft.photo ? '点击更换照片' : '点这里选照片')) + '</span></label>'
-      + '<input type="file" id="photo-file" accept="image/*" hidden><input type="file" id="camera-file" accept="image/*" capture="environment" hidden>'
-      + '<div class="photo-buttons"><button type="button" data-modal="camera">▣ 直接拍照</button><button type="button" data-modal="album">▧ 从相册选</button></div>'
-      + '<button type="button" class="skip-photo" data-modal="next">跳过照片</button>'
-      + '<p class="hint ck-photo-hint ' + pCls + '" id="ck-photo-storage-hint">' + esc(pHint) + '</p>';
+  if (step !== 4) {
+    const minutes = isStudy ? studyMinutesOf(draft) : draft.minutes;
+    const levels = isStudy ? studyFocusLevels : feelings;
+    const choices = isStudy ? studyTags : tags;
+    const targets = state.studyTargets.map(target => `<option value="${esc(target.id)}" ${target.id === draft.targetId ? 'selected' : ''}>${esc(target.title)}</option>`).join('');
+    const quickMinutes = [25, 45, 60, 90].map(value => `<button type="button" class="pill ${value === minutes ? 'selected' : ''}" data-modal="minutes-set" data-value="${value}">${value} 分钟</button>`).join('');
+    return modeBar + `<div class="ck-core ${isStudy ? 'ck-study' : 'ck-sport'}">
+      <label>记录日期<input required id="checkin-date" type="date" max="${today()}" value="${esc(draft.date)}"></label>
+      <label>开始时间<input id="start-time" type="time" value="${esc(draft.time)}"></label>
+      ${isStudy ? `<label>学习目标<select id="study-target-select">${targets}</select></label>` : `<label>距离（公里）<input required id="distance-input" type="number" inputmode="decimal" min="0.1" max="300" step="0.01" value="${draft.km}"></label>`}
+      <label>时长（分钟）<input required id="minutes-input" type="number" inputmode="numeric" min="1" max="${isStudy ? 960 : 1440}" step="1" value="${minutes}"></label>
+      ${isStudy ? `<div class="pills">${quickMinutes}</div>` : `<div class="ck-pace">配速 <output id="checkin-pace">${pace(draft)} /km</output></div>`}
+    </div><details id="checkin-extras" ${draft.extrasOpen ? 'open' : ''}><summary>补充记录（体感 / 标签 / 备注 / 照片）</summary>
+      <p>${isStudy ? '专注度' : '运动体感'}</p><div class="feel-options">${levels.map(([icon, label], index) => `<button type="button" class="feel-option ${draft.feel === index ? 'selected' : ''}" data-modal="feel" data-value="${index}" aria-pressed="${draft.feel === index}">${icon} ${label}</button>`).join('')}</div>
+      <div class="pills">${choices.map(tag => `<button type="button" class="pill ${draft.tags.includes(tag) ? 'selected' : ''}" data-modal="tag" data-value="${esc(tag)}">${esc(tag)}</button>`).join('')}</div>
+      <label for="run-note">备注</label><textarea class="note-input" id="run-note" maxlength="200">${esc(draft.note)}</textarea>
+      <input type="file" id="photo-file" accept="image/*" hidden><input type="file" id="camera-file" accept="image/*" capture="environment" hidden>
+      ${draft.photo ? `<img class="ck-photo-preview" src="${esc(draft.photo)}" alt="打卡照片">` : ''}
+      <div class="photo-buttons"><button type="button" data-modal="camera">拍照</button><button type="button" data-modal="album">选择照片</button></div>
+      <p class="hint" role="status">${esc(photoStorageHint(draft))}</p></details>`;
   }
-  if (step === 1) {
-    if (isStudy) {
-      const sMin = studyMinutesOf(draft), sSec = draft.seconds;
-      const sHrs = draftStudyHoursInputValue();
-      return modeBar + '<h3>学习时长</h3>'
-        + '<select id="study-target-select" class="modal-target-select">' + state.studyTargets.map(t => '<option value="' + esc(t.id) + '" ' + (t.id === draft.targetId ? 'selected' : '') + '>目标：' + esc(t.title) + '</option>').join('') + '</select>'
-        + '<input id="hours-input" class="big-input" type="number" inputmode="decimal" autocomplete="off" min="' + (1 / 60) + '" max="16" step="any" value="' + sHrs + '" aria-label="学习时长，小时"><div class="input-unit">小时</div>'
-        + '<div class="ck-derived-duration" id="ck-study-derived"><strong>' + sMin + ' 分钟</strong>（' + sSec + ' 秒）</div>'
-        + '<div class="segments">' + [-1, -0.5, 0.5, 1].map(n => '<button type="button" data-modal="hours-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + '</button>').join('') + '</div>'
-        + '<div class="pills">' + [0.5, 1, 1.5, 2, 3].map(n => '<button type="button" class="pill ' + (n * 3600 === sSec ? 'selected' : '') + '" data-modal="hours-set" data-value="' + n + '">' + n + 'h</button>').join('') + '</div>';
-    }
-    return modeBar + '<h3>距离</h3>'
-      + '<input id="distance-input" class="big-input" type="number" inputmode="decimal" autocomplete="off" min="0.1" max="300" step="0.01" value="' + draft.km.toFixed(2) + '" aria-label="跑步距离，公里"><div class="input-unit">公里</div>'
-      + '<div class="segments">' + [-1, -0.1, 0.1, 1].map(n => '<button type="button" data-modal="distance-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + '</button>').join('') + '</div>'
-      + '<div class="pills">' + [3, 5, 8, 10, 21.1].map(n => '<button type="button" class="pill ' + (draft.km === n ? 'selected' : '') + '" data-modal="distance-set" data-value="' + n + '">' + (n === 21.1 ? '半马' : n + 'K') + '</button>').join('') + '</div>';
-  }
-  if (step === 2) {
-    const sMin = isStudy ? studyMinutesOf(draft) : draft.minutes;
-    const sHrs = isStudy ? studyHoursOf(draft) : 0;
-    const sSec = isStudy ? studySecondsOf(draft) : (draft.minutes * 60);
-    return draftBanner + '<h3>时长</h3>'
-      + '<input id="minutes-input" class="big-input" type="number" inputmode="numeric" autocomplete="off" min="1" max="' + (isStudy ? '960' : '1440') + '" step="1" value="' + sMin + '" aria-label="时长，分钟"><div class="input-unit">分钟</div>'
-      + (isStudy ? '<div class="ck-derived-duration" id="ck-study-min-derived"><strong>' + sHrs.toFixed(2) + ' 小时</strong>（' + sSec + ' 秒）</div>' : '')
-      + '<div class="segments">' + [-15, -5, 5, 15].map(n => '<button type="button" data-modal="minutes-add" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + ' min</button>').join('') + '</div>'
-      + (isStudy ? '<div class="pills">' + [25, 45, 60, 90].map(n => '<button type="button" class="pill ' + (sMin === n ? 'selected' : '') + '" data-modal="minutes-set" data-value="' + n + '">' + n + ' 分钟</button>').join('') + '</div>' : '')
-      + '<label class="hint" for="start-time" style="display:block;margin-top:20px">开始时间</label>'
-      + '<input type="time" id="start-time" value="' + draft.time + '" style="margin-top:8px;width:100%;padding:10px;border:1px solid var(--ink);background:var(--paper-warm)">';
-  }
-  if (step === 3) {
-    const fList = isStudy ? studyFocusLevels : feelings;
-    const tList = isStudy ? studyTags : tags;
-    return draftBanner + '<h3>' + (isStudy ? '专注度' : '体感') + '</h3>'
-      + '<div class="feel-options">' + fList.map((f, i) => '<button type="button" class="feel-option ' + (draft.feel === i ? 'selected' : '') + '" data-modal="feel" data-value="' + i + '" aria-pressed="' + (draft.feel === i) + '"><span>' + f[0] + '</span>' + f[1] + '</button>').join('') + '</div>'
-      + '<div class="pills">' + tList.map(t => '<button type="button" class="pill ' + (draft.tags.includes(t) ? 'selected' : '') + '" data-modal="tag" data-value="' + t + '">' + t + '</button>').join('') + '</div>'
-      + '<textarea class="note-input" id="run-note" maxlength="200" placeholder="' + (isStudy ? '备注（可选）' : '备注（可选）') + '">' + esc(draft.note) + '</textarea>';
-  }
-  const syncBanner = draft.saveState === 'failed'
-    ? '<div class="ck-sync-status is-failed ck-shake" role="alert"><div><strong>同步失败</strong>：' + esc(draft.saveError || '服务器未响应') + '（已保留全部输入与原操作编号）</div><div class="ck-sync-actions"><button type="button" class="ck-btn ck-btn-retry" data-modal="save">重试同步</button><button type="button" class="ck-btn ck-btn-ghost" data-modal="save-local-pending">先存本机（等待同步）</button></div></div>'
+  const syncBanner = draft.saveState === 'local-failed'
+    ? '<div class="ck-sync-status is-failed" role="alert"><div><strong>本机保存失败</strong>：浏览器存储不可用或空间不足，已保留全部输入与操作编号（<code>' + esc(draft.operationId) + '</code>）。释放空间后可重试保存。</div></div>'
+    : draft.saveState === 'failed'
+    ? '<div class="ck-sync-status is-failed ck-shake" role="alert"><div><strong>同步失败</strong>：' + esc(draft.saveError || '服务器未响应') + '（已保留全部输入与原操作编号 <code>' + esc(draft.operationId) + '</code>）</div><div class="ck-sync-actions"><button type="button" class="ck-btn ck-btn-retry" data-modal="save">重试同步</button><button type="button" class="ck-btn ck-btn-ghost" data-modal="save-local-pending">先存本机（等待同步）</button></div></div>'
     : draft.saveState === 'pending'
       ? '<div class="ck-sync-status is-pending" role="status"><strong>等待同步</strong>：正在提交到服务器，请勿重复操作…</div>'
       : '<div class="ck-sync-status ' + (isServerOnline ? 'is-synced' : 'is-local') + '" role="status">' + (isServerOnline ? '在线模式：确认保存后将直接同步至服务器' : '离线模式：确认后将先保存在本机浏览器，联网后可同步') + '</div>';
 
   if (isStudy) {
-    const sSec = studySecondsOf(draft), sMin = studyMinutesOf(draft), sHrs = studyHoursOf(draft);
+    const sSec = studySecondsOf(draft), sMin = studyMinutesOf(draft);
     const fObj = studyFocusLevels[draft.feel] || ['🧠', '专注'];
-    return draftBanner + '<h3>确认记录</h3><div class="review-ticket is-study-ticket"><strong>' + sHrs.toFixed(2) + ' <span style="font-size:25px;letter-spacing:0">hours</span></strong><small>' + today() + ' / ' + esc(draft.person) + ' · ' + esc(findTargetTitle(draft.targetId)) + '</small><dl><dt>专注时长</dt><dd>' + sMin + ' MIN（' + sSec + ' 秒）</dd><dt>折合番茄</dt><dd>约 ' + Math.max(1, Math.round(sMin / 25)) + ' 个</dd><dt>专注度</dt><dd>' + fObj[0] + ' ' + fObj[1] + '</dd><dt>照片存储</dt><dd>' + photoTicketLabel(draft) + '</dd></dl></div>' + syncBanner;
+    return draftBanner + '<h3>确认记录</h3><div class="review-ticket is-study-ticket"><strong>' + sMin + ' <span style="font-size:25px;letter-spacing:0">分钟</span></strong><small>' + esc(draft.date) + ' / ' + esc(draft.person) + ' · ' + esc(findTargetTitle(draft.targetId)) + '</small><dl><dt>专注时长</dt><dd>' + sMin + ' MIN（' + sSec + ' 秒）</dd><dt>折合番茄</dt><dd>约 ' + Math.max(1, Math.round(sMin / 25)) + ' 个</dd><dt>专注度</dt><dd>' + fObj[0] + ' ' + fObj[1] + '</dd><dt>照片存储</dt><dd>' + photoTicketLabel(draft) + '</dd></dl></div>' + syncBanner;
   }
   const fObj = feelings[draft.feel] || ['🏃', '舒服'];
-  return draftBanner + '<h3>确认记录</h3><div class="review-ticket"><strong>' + draft.km.toFixed(2) + ' <span style="font-size:25px;letter-spacing:0">km</span></strong><small>' + today() + ' / ' + esc(draft.person) + '</small><dl><dt>时长</dt><dd>' + draft.minutes + ' MIN</dd><dt>配速</dt><dd>' + pace(draft) + ' /KM</dd><dt>感觉</dt><dd>' + fObj[0] + ' ' + fObj[1] + '</dd><dt>照片存储</dt><dd>' + photoTicketLabel(draft) + '</dd></dl></div>' + syncBanner;
+  return draftBanner + '<h3>确认记录</h3><div class="review-ticket"><strong>' + draft.km.toFixed(2) + ' <span style="font-size:25px;letter-spacing:0">km</span></strong><small>' + esc(draft.date) + ' / ' + esc(draft.person) + '</small><dl><dt>时长</dt><dd>' + draft.minutes + ' MIN</dd><dt>配速</dt><dd>' + pace(draft) + ' /KM</dd><dt>感觉</dt><dd>' + fObj[0] + ' ' + fObj[1] + '</dd><dt>照片存储</dt><dd>' + photoTicketLabel(draft) + '</dd></dl></div>' + syncBanner;
 }
 
 function drawModal() {
   const root = $('#modal-root');
-  const saveBtnText = draft.saving ? '同步中…' : (draft.saveState === 'failed' ? '重试同步 ↻' : '保存打卡 ✓');
-  root.innerHTML = '<div class="modal-overlay"><section class="checkin-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-heading"><div class="sheet-grabber" aria-hidden="true"><span></span></div><div class="modal-header"><h2 id="checkin-heading">' + (draft.mode === 'study' ? '学习打卡' : '运动打卡') + ' · ' + esc(draft.person) + '</h2><button type="button" class="close-modal" data-modal="close" aria-label="关闭弹窗（保留草稿）"><span aria-hidden="true">×</span></button></div><div class="steps" aria-label="第 ' + (step + 1) + ' 步，共 5 步">' + Array.from({ length: 5 }, (_, i) => '<i class="' + (i <= step ? 'done' : '') + '"></i>').join('') + '</div><div class="step-content">' + stepMarkup() + '</div><div class="step-footer"><button type="button" data-modal="back">' + (step ? '← 上一步' : '× 暂存退出') + '</button><button type="button" data-modal="' + (step === 4 ? 'save' : 'next') + '" ' + ((step === 3 && draft.feel === null) || draft.saving ? 'disabled' : '') + '>' + (step === 4 ? saveBtnText : '下一步 →') + '</button></div></section></div>';
+  const saveBtnText = draft.saving ? '同步中…' : (draft.saveState === 'failed' ? '重试同步 ↻' : (draft.saveState === 'local-failed' ? '重试保存 ↻' : '保存打卡 ✓'));
+  root.innerHTML = '<div class="modal-overlay"><section class="checkin-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-heading"><div class="sheet-grabber" aria-hidden="true"><span></span></div><div class="modal-header"><h2 id="checkin-heading">' + (draft.mode === 'study' ? '学习打卡' : '运动打卡') + ' · ' + esc(draft.person) + '</h2><button type="button" class="close-modal" data-modal="close" aria-label="关闭弹窗（保留草稿）"><span aria-hidden="true">×</span></button></div><div class="steps" aria-label="第 ' + (step === 4 ? 2 : 1) + ' 步，共 2 步">' + Array.from({ length: 2 }, (_, index) => '<i class="' + (index === 0 || step === 4 ? 'done' : '') + '"></i>').join('') + '</div><div class="step-content">' + stepMarkup() + '</div><div class="step-footer"><button type="button" data-modal="back">' + (step ? '← 上一步' : '× 暂存退出') + '</button><button type="button" data-modal="' + (step === 4 ? 'save' : 'next') + '" ' + (draft.photoUploading || draft.saving ? 'disabled' : '') + '>' + (step === 4 ? saveBtnText : '确认记录 →') + '</button></div></section></div>';
   const overlay = $('.modal-overlay', root), sheet = $('.checkin-modal', root), grab = $('.sheet-grabber', root), header = $('.modal-header', root);
   if (overlay && sheet) {
     overlay.addEventListener('click', ev => { if (ev.target === overlay) closeCheckin(); });
@@ -4745,10 +4918,7 @@ function drawModal() {
       el.addEventListener('touchend', onEnd);
     });
   }
-  const focusTarget = (step === 1 && ($('#distance-input') || $('#hours-input')))
-    || (step === 2 && $('#minutes-input'))
-    || (step === 3 && ($('.feel-option.selected') || $('.feel-option')))
-    || (step === 4 && $('[data-modal="save"]'))
+  const focusTarget = (step === 4 ? $('[data-modal="save"]') : $('#checkin-date'))
     || $('.step-content button, .step-content input, .step-content select')
     || $('.close-modal');
   if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus({ preventScroll: true });
@@ -4756,7 +4926,7 @@ function drawModal() {
 
 function buildCheckinRecord(syncStatus, syncError = '') {
   const record = {
-    id: Date.now(), person: draft.person || state.name, date: today(), time: draft.time,
+    id: Date.now(), person: draft.person || state.name, date: draft.date, time: draft.time,
     source: 'manual', operationId: draft.operationId,
     note: draft.note, tags: draft.tags, photo: draft.photo, likes: 0, liked: false,
     syncStatus, syncError
@@ -4771,23 +4941,31 @@ function buildCheckinRecord(syncStatus, syncError = '') {
 }
 
 function finalizeCheckinSave(savedMode, savedRec, who) {
-  insertLocalRecordDedup(savedMode, savedRec);
-  recordSelectKey = savedMode + ':' + savedRec.id;
-  // Auto-complete hb-3 (action habit) for today
-  if (who === state.name) {
-    const hbArr = state.habitLogs[today()] || [];
-    if (state.habits.some(h => h.id === 'hb-3') && !hbArr.includes('hb-3')) state.habitLogs[today()] = [...hbArr, 'hb-3'];
-  } else {
-    state.memberHabitLogs = state.memberHabitLogs || {};
-    state.memberHabitLogs[who] = state.memberHabitLogs[who] || {};
-    const mArr = state.memberHabitLogs[who][today()] || [];
-    if (state.habits.some(h => h.id === 'hb-3') && !mArr.includes('hb-3')) state.memberHabitLogs[who][today()] = [...mArr, 'hb-3'];
+  const next = { ...state, records: [...state.records], studyRecords: [...state.studyRecords],
+    studyTargets: state.studyTargets.map(target => ({ ...target })), habitLogs: { ...state.habitLogs },
+    memberHabitLogs: { ...state.memberHabitLogs } };
+  const queued = savedRec.syncStatus !== 'synced';
+  if (queued) savedRec.checkinRoom = currentRoomCode;
+  insertLocalRecordDedup(savedMode, savedRec, next);
+  const date = savedRec.date;
+  const logs = who === next.name ? next.habitLogs : (next.memberHabitLogs[who] = { ...next.memberHabitLogs[who] });
+  const done = logs[date] || [];
+  if (next.habits.some(habit => habit.id === 'hb-3') && !done.includes('hb-3')) logs[date] = [...done, 'hb-3'];
+  recomputeStudyTargetDoneHours(next);
+  const localSaved = persistLocalOnly(next);
+  if (queued && !localSaved) {
+    draft.saving = false;
+    draft.saveState = 'local-failed';
+    persistCheckinDraft(draft, step);
+    drawModal();
+    return;
   }
-  recomputeStudyTargetDoneHours();
+  state = next;
+  if (queued && !demo) queueSavedCheckin(savedMode, savedRec);
+  recordSelectKey = savedMode + ':' + savedRec.id;
   newlyArchivedRecordKey = recordSelectKey;
   const sportGoalHit = savedMode === 'sport' && total(mine(monthly())) >= state.goal;
   const studyGoalHit = savedMode === 'study' && totalStudy(monthly(mineStudy())) >= state.studyGoal;
-  persistLocalOnly();
   const returnFocusSelector = modalPreviousFocusSelector;
   closeCheckin({ discard: true });
   triggerArenaSprint(2600);
@@ -4804,7 +4982,7 @@ function finalizeCheckinSave(savedMode, savedRec, who) {
     value: savedMode === 'study' ? String(studyMinutesOf(savedRec)) : savedRec.km.toFixed(2),
     unit: savedMode === 'study' ? '分钟' : 'km',
     title: savedMode === 'study' ? (savedRec.subject || '学习打卡') : ('配速 ' + pace(savedRec) + ' /km'),
-    person: who,
+    person: who, date, localSaved,
     goalHit: sportGoalHit || studyGoalHit,
     recordKey: newlyArchivedRecordKey,
     syncStatus: savedRec.syncStatus,
@@ -4818,7 +4996,13 @@ function finalizeCheckinSave(savedMode, savedRec, who) {
 $('#modal-root').addEventListener('input', e => {
   if (!draft) return;
   const t = e.target;
-  if (t.id === 'hours-input' && draft.mode === 'study') {
+  if (t.id === 'distance-input' || t.id === 'minutes-input') updateCheckinPace();
+  if (t.id === 'checkin-date') {
+    if (t.validity.valid && t.value) {
+      draft.date = t.value;
+      persistCheckinDraft(draft, step);
+    }
+  } else if (t.id === 'hours-input' && draft.mode === 'study') {
     const h = Number(t.value);
     if (Number.isFinite(h) && h >= 1 / 60 && h <= 16) {
       setDraftStudySeconds(h * 3600);
@@ -4854,6 +5038,7 @@ $('#modal-root').addEventListener('input', e => {
 $('#modal-root').addEventListener('click', async e => {
   const b = e.target.closest('[data-modal]'); if (!b) return;
   const a = b.dataset.modal, v = b.dataset.value;
+  if (!draft || draft.saving) return;
   if (a === 'close') { closeCheckin(); return; }
   if (a === 'discard-draft') {
     const curMode = draft ? draft.mode : 'sport';
@@ -4870,9 +5055,9 @@ $('#modal-root').addEventListener('click', async e => {
     persistCheckinDraft(draft, step);
     const savedOther = getSavedDraft(v);
     if (savedOther) {
-      draft = { ...createFreshDraft(v, savedOther.targetId, savedOther.person), ...savedOther, mode: v, saving: false, restoredFromDraft: true };
+      draft = { ...createFreshDraft(v, savedOther.targetId, savedOther.person), ...savedOther, feel: savedOther.feel ?? 3, mode: v, saving: false, restoredFromDraft: true };
       step = Math.max(0, Math.min(4, Number(savedOther.step) || 0));
-      if (step === 4 && draft.feel === null) step = 3;
+      step = step === 4 ? 4 : 0;
       if (savedOther.photoInIdb && !draft.photo) {
         const k = draftStorageKey(v);
         const rop = draft.operationId;
@@ -4885,7 +5070,7 @@ $('#modal-root').addEventListener('click', async e => {
       }
     } else {
       draft = createFreshDraft(v, draft.targetId, draft.person);
-      step = Math.min(step, 1);
+      step = 0;
     }
     drawModal();
     return;
@@ -4900,14 +5085,16 @@ $('#modal-root').addEventListener('click', async e => {
   if (a === 'back') {
     if (!step) { closeCheckin(); return; }
     syncDraftFromDom();
-    step--;
+    step = 0;
     persistCheckinDraft(draft, step);
     drawModal();
     return;
   }
   if (a === 'next') {
     if (!readStep()) return;
-    step++;
+    draft.saveState = '';
+    draft.saveError = '';
+    step = 4;
     persistCheckinDraft(draft, step);
     drawModal();
     return;
@@ -4945,6 +5132,7 @@ $('#modal-root').addEventListener('click', async e => {
   }
   if (a === 'feel') {
     draft.feel = Number(v);
+    draft.extrasOpen = true;
     $$('.feel-option').forEach(el => { const active = Number(el.dataset.value) === draft.feel; el.classList.toggle('selected', active); el.setAttribute('aria-pressed', active); });
     const nextBtn = $('[data-modal="next"]');
     if (nextBtn) nextBtn.disabled = false;
@@ -4960,9 +5148,7 @@ $('#modal-root').addEventListener('click', async e => {
   if (a === 'save-local-pending') {
     if (!draft || draft.saving) return;
     const savedMode = draft.mode;
-    const endpoint = savedMode === 'study' ? '/records/study' : '/records/sport';
     const savedRec = buildCheckinRecord('pending', draft.saveError);
-    enqueuePendingOp({ operationId: savedRec.operationId, kind: savedMode, recordId: savedRec.id, endpoint, method: 'POST', payload: savedRec, status: 'pending', lastError: draft.saveError || '' });
     finalizeCheckinSave(savedMode, savedRec, savedRec.person);
     return;
   }
@@ -4997,7 +5183,6 @@ $('#modal-root').addEventListener('click', async e => {
       } else {
         savedRec.syncStatus = 'local';
         savedRec.syncError = '';
-        enqueuePendingOp({ operationId: opId, kind: savedMode, recordId: savedRec.id, endpoint, method: 'POST', payload: savedRec, status: 'pending', lastError: '' });
       }
       finalizeCheckinSave(savedMode, savedRec, who);
     } finally {
@@ -5005,6 +5190,13 @@ $('#modal-root').addEventListener('click', async e => {
     }
   }
 });
+
+$('#modal-root').addEventListener('toggle', e => {
+  if (draft && e.target.id === 'checkin-extras') {
+    draft.extrasOpen = e.target.open;
+    persistCheckinDraft(draft, step);
+  }
+}, true);
 
 $('#modal-root').addEventListener('change', async e => {
   if (!draft) return;
@@ -5017,6 +5209,7 @@ $('#modal-root').addEventListener('change', async e => {
   const file = e.target.files[0]; if (!file) return;
   if (!file.type.startsWith('image/')) { toast('请选择图片文件。'); return; }
   const uploadOpId = draft.operationId;
+  syncDraftFromDom();
   draft.photoUploading = true;
   draft.photoRestoreWarning = false;
   drawModal();
@@ -7245,13 +7438,12 @@ function triggerCheckinFeedback(opts) {
   const targetNum = parseFloat(opts.value) || 0;
   const decimals = String(opts.value).includes('.') ? String(opts.value).split('.')[1].length : 0;
   const comboDays = dualStreak(opts.person || state.name);
-  const cTier = comboTier(comboDays);
-  const stampLabel = opts.goalHit ? 'GOAL CLEARED' : (isStudy ? 'CIRCUIT CHARGED' : 'RUN VERIFIED');
+  const stampLabel = opts.goalHit ? 'GOAL CLEARED' : (isStudy ? 'STUDY VERIFIED' : 'RUN VERIFIED');
 
   const syncMeta = syncStatusMeta(opts.syncStatus || (isServerOnline ? 'synced' : 'local'));
   const needsRetry = syncMeta.key === 'failed' || syncMeta.key === 'local' || syncMeta.key === 'pending';
   const syncGuidance = syncMeta.key === 'synced'
-    ? '已同步至服务器，可在记录页查看。'
+    ? (opts.localSaved === false ? '已同步至服务器，但本机副本写入失败（建议清理浏览器空间或导出备份）。' : '已同步至服务器，可在记录页查看。')
     : syncMeta.key === 'failed'
       ? ('同步失败：' + (opts.syncError || '服务器未响应') + '。记录已保留在本机，可点击「重试同步」。')
       : syncMeta.key === 'pending'
@@ -7260,40 +7452,44 @@ function triggerCheckinFeedback(opts) {
 
   const prevFbFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const prevFbSelector = opts.returnFocusSelector || buildStableFocusSelector(prevFbFocus);
+  const recDate = opts.date || today();
   root.innerHTML = '<div class="fb-backdrop">'
-    + '<article class="fb-card ' + (isStudy ? 'is-study' : 'is-sport') + '" role="' + (syncMeta.key === 'failed' ? 'alert' : 'status') + '">'
+    + '<article class="fb-card ' + (isStudy ? 'is-study' : 'is-sport') + (isPaused ? ' is-instant' : '') + '" role="' + (syncMeta.key === 'failed' ? 'alert' : 'status') + '" aria-label="打卡完成小票">'
     + '<canvas class="fb-particle-canvas" aria-hidden="true"></canvas>'
-    + '<div class="fb-top"><span class="slash-chip">' + (isStudy ? '学习已记录' : '运动已记录') + '</span><span class="ck-sync-pill is-' + syncMeta.key + '">' + syncMeta.label + '</span><button type="button" class="fb-close" aria-label="关闭反馈"><span aria-hidden="true">×</span></button></div>'
-    + '<div class="fb-stage-tag" id="fb-stage-tag">' + (isPaused ? ('保存状态：' + syncMeta.label) : '01 // 成绩数字跳入') + '</div>'
-    + '<div class="fb-score-wrap"><strong id="fb-score-num">' + (isPaused ? opts.value : (0).toFixed(decimals)) + '</strong><em>' + esc(opts.unit) + '</em></div>'
-    + '<div class="fb-sub">' + esc(opts.person) + ' · ' + esc(opts.title) + ' · <b>COMBO ×' + comboDays + '</b></div>'
-    + '<div class="fb-sync-detail is-' + syncMeta.key + '">' + esc(syncGuidance) + '</div>'
-    + '<div class="fb-stamp" id="fb-stamp">' + stampLabel + ' ✓</div>'
+    + '<div class="fb-top"><span class="slash-chip">' + (isStudy ? '学习小票' : '运动小票') + '</span><span class="ck-sync-pill is-' + syncMeta.key + '">' + syncMeta.label + '</span><button type="button" class="fb-close" aria-label="关闭小票"><span aria-hidden="true">×</span></button></div>'
+    + '<div class="fb-score-wrap"><strong id="fb-score-num">' + (isPaused ? esc(opts.value) : (0).toFixed(decimals)) + '</strong><em>' + esc(opts.unit) + '</em></div>'
+    + '<div class="fb-sub"><span>' + esc(recDate) + '</span><span>·</span><span>' + esc(opts.person) + '</span><span>·</span><span>' + esc(opts.title) + '</span><span>·</span><b>COMBO ×' + comboDays + '</b></div>'
+    + '<div class="fb-stage-tag" id="fb-stage-tag">保存状态：' + esc(syncMeta.label) + (opts.localSaved === false && syncMeta.key === 'synced' ? '（本机未写入）' : '') + '</div>'
+    + '<div class="fb-sync-detail is-' + syncMeta.key + (opts.localSaved === false && syncMeta.key === 'synced' ? ' is-local-warn' : '') + '">' + esc(syncGuidance) + '</div>'
+    + '<div class="fb-stamp' + (isPaused ? ' is-stamped' : '') + '" id="fb-stamp">' + stampLabel + ' ✓</div>'
     + '<div class="fb-actions">'
     + (needsRetry && opts.operationId ? '<button type="button" class="fb-retry-btn" data-action="retry-sync" data-value="' + esc(opts.operationId) + '">重试同步</button>' : '')
+    + '<button type="button" class="fb-again">再记一次</button>'
     + '<button type="button" class="fb-go-wall" data-action="open-record" data-value="' + esc(opts.recordKey || '') + '">查看记录 →</button></div>'
     + '</article></div>';
 
-  const card = $('.fb-card', root);
   const scoreEl = $('#fb-score-num', root);
-  const stageEl = $('#fb-stage-tag', root);
   const stampEl = $('#fb-stamp', root);
   const pCanvas = $('.fb-particle-canvas', root);
   const closeBtn = $('.fb-close', root);
   const wallBtn = $('.fb-go-wall', root);
-
+  const againBtn = $('.fb-again', root);
+  const retryBtn = $('.fb-retry-btn', root);
   const backdropEl = $('.fb-backdrop', root);
+
   const onFbKeydown = ev => {
     if (ev.key === 'Escape') {
       ev.preventDefault();
       dismiss();
     }
   };
-  const dismiss = () => {
+  const dismiss = (dismissOpts = {}) => {
+    const restoreFocus = dismissOpts.restoreFocus !== false;
     document.removeEventListener('keydown', onFbKeydown);
     if (feedbackClearTimer) { clearTimeout(feedbackClearTimer); feedbackClearTimer = 0; }
     if (feedbackAnimId) { cancelAnimationFrame(feedbackAnimId); feedbackAnimId = 0; }
     root.innerHTML = '';
+    if (!restoreFocus) return;
     if (opts.returnFocusSelector) {
       restoreFocusBySelector(prevFbSelector);
     } else if (prevFbFocus && prevFbFocus.isConnected && prevFbFocus !== document.body) {
@@ -7305,27 +7501,31 @@ function triggerCheckinFeedback(opts) {
   document.addEventListener('keydown', onFbKeydown);
   if (backdropEl) backdropEl.addEventListener('click', ev => { if (ev.target === backdropEl) dismiss(); });
   if (closeBtn) {
-    closeBtn.addEventListener('click', dismiss);
+    closeBtn.addEventListener('click', () => dismiss());
+  }
+  if (wallBtn) {
+    wallBtn.addEventListener('click', () => dismiss({ restoreFocus: false }));
+    wallBtn.focus({ preventScroll: true });
+  } else if (closeBtn) {
     closeBtn.focus({ preventScroll: true });
   }
-  if (wallBtn) wallBtn.addEventListener('click', dismiss);
-  const retryBtn = $('.fb-retry-btn', root);
-  if (retryBtn) retryBtn.addEventListener('click', dismiss);
-
-  if (isPaused) {
-    if (stageEl) stageEl.textContent = '保存状态：' + syncMeta.label;
-    if (stampEl) stampEl.classList.add('is-stamped');
-    if (!needsRetry) feedbackClearTimer = setTimeout(dismiss, 4200);
-    return;
+  if (againBtn) {
+    againBtn.addEventListener('click', () => {
+      dismiss({ restoreFocus: false });
+      openCheckin(opts.mode, null, opts.person);
+    });
   }
+  if (retryBtn) retryBtn.addEventListener('click', () => dismiss({ restoreFocus: false }));
 
-  const parts = Array.from({ length: 44 }, (_, i) => {
-    const ang = (i / 44) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
-    const dist = 120 + Math.random() * 65;
+  if (isPaused) return;
+
+  const parts = Array.from({ length: 24 }, (_, i) => {
+    const ang = (i / 24) * Math.PI * 2 + (Math.random() - 0.5) * 0.22;
+    const dist = 68 + Math.random() * 54;
     return {
       ang, dist,
       sz: i % 3 === 0 ? 5 : 4,
-      clr: isStudy ? (i % 3 === 0 ? '#fffbe0' : i % 2 === 0 ? '#38bdf8' : '#2563eb') : (i % 3 === 0 ? '#fffbe0' : i % 2 === 0 ? '#ffd026' : '#ff5a2f')
+      clr: isStudy ? (i % 3 === 0 ? '#1a1a18' : i % 2 === 0 ? '#203f91' : '#4a6fd4') : (i % 3 === 0 ? '#1a1a18' : i % 2 === 0 ? '#e5492b' : '#e4a334')
     };
   });
 
@@ -7333,46 +7533,41 @@ function triggerCheckinFeedback(opts) {
   const stepFb = now => {
     if (!root.firstElementChild) return;
     const elapsed = now - t0;
-    const p1 = Math.min(1, elapsed / 520);
+    const p1 = Math.min(1, elapsed / 380);
     const eased1 = 1 - Math.pow(1 - p1, 3);
-    if (scoreEl) scoreEl.textContent = (targetNum * eased1).toFixed(decimals);
+    if (scoreEl) scoreEl.textContent = p1 >= 1 ? opts.value : (targetNum * eased1).toFixed(decimals);
 
     if (pCanvas && pCanvas.getContext) {
       const ctx = pCanvas.getContext('2d');
-      const cw = pCanvas.clientWidth || 320, ch = pCanvas.clientHeight || 200;
+      const cw = pCanvas.clientWidth || 340, ch = pCanvas.clientHeight || 240;
       if (pCanvas.width !== cw || pCanvas.height !== ch) { pCanvas.width = cw; pCanvas.height = ch; }
       ctx.clearRect(0, 0, cw, ch);
-      if (elapsed >= 320 && elapsed <= 1350) {
-        const p2 = Math.min(1, Math.max(0, (elapsed - 320) / 760));
-        const conv = Math.pow(p2, 1.45);
-        const cx = cw / 2, cy = ch * 0.48;
+      if (elapsed <= 520) {
+        const p2 = Math.min(1, elapsed / 520);
+        const cx = cw * 0.5, cy = ch * 0.34;
         parts.forEach(pt => {
-          const r = pt.dist * (1 - conv);
-          const x = cx + Math.cos(pt.ang + conv * 0.8) * r;
-          const y = cy + Math.sin(pt.ang + conv * 0.8) * r * 0.72;
-          ctx.globalAlpha = p2 > 0.86 ? (1 - (p2 - 0.86) / 0.14) : 0.92;
+          const r = pt.dist * (0.2 + 0.8 * (1 - Math.pow(1 - p2, 2)));
+          const x = cx + Math.cos(pt.ang) * r;
+          const y = cy + Math.sin(pt.ang) * r * 0.55;
+          ctx.globalAlpha = Math.max(0, (1 - p2) * 0.8);
           ctx.fillStyle = pt.clr;
-          ctx.fillRect(Math.round(x / 3) * 3, Math.round(y / 3) * 3, pt.sz, pt.sz);
+          ctx.fillRect(Math.round(x / 4) * 4, Math.round(y / 4) * 4, pt.sz, pt.sz);
         });
         ctx.globalAlpha = 1;
       }
     }
 
-    if (elapsed >= 380 && elapsed < 1020 && stageEl) {
-      stageEl.textContent = '02 // 像素粒子汇聚';
-      card?.classList.add('is-converging');
-    } else if (elapsed >= 1020 && elapsed < 1700) {
-      if (stageEl) stageEl.textContent = '03 // 战绩钢印盖章';
-      if (stampEl && !stampEl.classList.contains('is-stamped')) stampEl.classList.add('is-stamped');
-    } else if (elapsed >= 1700) {
-      if (stageEl) stageEl.textContent = '04 // 卡片进入战绩档案墙';
-      card?.classList.add('is-archiving');
+    if (elapsed >= 220 && stampEl && !stampEl.classList.contains('is-stamped')) {
+      stampEl.classList.add('is-stamped');
     }
 
-    if (elapsed < 2450) {
+    if (elapsed < 560) {
       feedbackAnimId = requestAnimationFrame(stepFb);
     } else {
-      dismiss();
+      if (scoreEl) scoreEl.textContent = opts.value;
+      if (stampEl) stampEl.classList.add('is-stamped');
+      if (pCanvas && pCanvas.getContext) pCanvas.getContext('2d').clearRect(0, 0, pCanvas.width, pCanvas.height);
+      feedbackAnimId = 0;
     }
   };
   feedbackAnimId = requestAnimationFrame(stepFb);
@@ -7476,7 +7671,7 @@ if (checkinParam === 'snap' || checkinParam === 'sport') {
   openCheckin('sport');
 } else if (checkinParam === 'distance') {
   openCheckin('sport');
-  step = 1;
+  step = 0;
   draft.km = 6.4;
   drawModal();
 } else if (checkinParam === 'study') {

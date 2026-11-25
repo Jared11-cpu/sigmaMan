@@ -405,11 +405,12 @@
 @media (min-width: 760px) {
   body:not(.embedded) .home .home-today-panel {
     grid-column: 2;
-    grid-row: 2 / 4;
+    grid-row: 1 / 4;
     border-left: 1px solid var(--line);
-    border-top: 1px solid var(--line);
-    padding: 12px 18px;
-    justify-content: center;
+    border-top: 0;
+    padding: 22px 24px;
+    justify-content: flex-start;
+    gap: 14px;
   }
   body:not(.embedded) .study-entry-bar {
     padding: 14px 26px;
@@ -419,3 +420,10 @@
   }
 }
 
+
+/* ===== [v20261123-sidebar-fix] Sidebar brand spacing & wall low-noise badge ===== */
+@media (min-width: 760px) {
+  body:not(.embedded) .bottom-nav {
+    top: 156px;
+  }
+}

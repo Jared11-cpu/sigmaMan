@@ -29,6 +29,33 @@ repo.ensureRoom(DEFAULT_ROOM_CODE);
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'same-origin');
+  const rawCookie = req.headers.cookie || '';
+  const cookies = {};
+  rawCookie.split(';').forEach(part => {
+    const idx = part.indexOf('=');
+    if (idx > 0) cookies[part.slice(0, idx).trim()] = decodeURIComponent(part.slice(idx + 1).trim());
+  });
+  req.cookies = cookies;
+  const room = req.headers['x-room-code'] || req.query?.room || req.query?.roomCode || DEFAULT_ROOM_CODE;
+  let personHeader = '';
+  if (req.headers['x-person']) {
+    try { personHeader = decodeURIComponent(String(req.headers['x-person'])); } catch { personHeader = String(req.headers['x-person']); }
+  }
+  const token = req.cookies['rl_member_token'] || req.headers['x-member-token'] || '';
+  if (req.path.startsWith('/api/')) {
+    try {
+      const sess = repo.issueOrVerifySession(room, personHeader, token);
+      req.memberSession = sess;
+      if (sess.token && sess.token !== token) {
+        res.setHeader('Set-Cookie', `rl_member_token=${encodeURIComponent(sess.token)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=2592000`);
+      }
+    } catch {}
+  }
+  next();
+});
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
 
@@ -46,7 +73,9 @@ function broadcast(roomCode, eventData) {
 
 function handleApiError(res, err) {
   const status = err.statusCode || 500;
-  res.status(status).json({ success: false, error: err.message || '服务器处理失败' });
+  const body = { success: false, code: err.code || (status === 400 ? 'BAD_REQUEST' : 'SERVER_ERROR'), error: err.message || '服务器处理失败' };
+  if (err.currentRecord) body.currentRecord = err.currentRecord;
+  res.status(status).json(body);
 }
 
 // Multer storage
@@ -115,28 +144,48 @@ app.get('/api/state', (req, res) => {
   } catch (err) { handleApiError(res, err); }
 });
 
+// 3b. Incremental Changes & Shared Leaderboard
+app.get('/api/changes', (req, res) => {
+  try {
+    const room = req.query.room || req.query.roomCode || DEFAULT_ROOM_CODE;
+    const since = Number(req.query.since || 0);
+    const person = req.query.person || req.memberSession?.person || null;
+    res.json({ success: true, ...repo.getChangesSince(room, since, person) });
+  } catch (err) { handleApiError(res, err); }
+});
+
+app.get('/api/leaderboard', (req, res) => {
+  try {
+    const room = req.query.room || req.query.roomCode || DEFAULT_ROOM_CODE;
+    const period = req.query.period || '本月';
+    const metric = req.query.metric || '综合积分';
+    const person = req.query.person || req.memberSession?.person || null;
+    res.json({ success: true, ...repo.getLeaderboard(room, period, metric, person) });
+  } catch (err) { handleApiError(res, err); }
+});
+
 // 4. Sport Records
 app.post('/api/records/sport', (req, res) => {
   try {
     const room = req.body.room || DEFAULT_ROOM_CODE;
     const out = repo.addSportRecord(room, req.body);
-    if (!out.deduplicated) broadcast(room, { type: 'sport-record-added', record: out.record, version: out.version });
+    if (!out.deduplicated) broadcast(room, { type: 'sport-record-added', record: out.record, version: out.version, rev: out.version, operationId: req.body.operationId || '' });
     res.json({ success: true, ...out });
   } catch (err) { handleApiError(res, err); }
 });
 app.patch('/api/records/sport/:id', (req, res) => {
   try {
     const room = req.body.room || DEFAULT_ROOM_CODE;
-    const out = repo.updateSportRecord(room, req.params.id, req.body);
-    broadcast(room, { type: 'sport-record-updated', record: out.record, version: out.version });
+    const out = repo.updateSportRecord(room, req.params.id, req.body, req.body.person || req.memberSession?.person || null);
+    if (!out.deduplicated) broadcast(room, { type: 'sport-record-updated', record: out.record, version: out.version, rev: out.version, operationId: req.body.operationId || '' });
     res.json({ success: true, ...out });
   } catch (err) { handleApiError(res, err); }
 });
 app.delete('/api/records/sport/:id', (req, res) => {
   try {
     const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
-    const out = repo.deleteSportRecord(room, req.params.id);
-    broadcast(room, { type: 'sport-record-deleted', id: Number(req.params.id), version: out.version });
+    const out = repo.deleteSportRecord(room, req.params.id, req.body || {}, req.body?.person || req.memberSession?.person || null);
+    if (!out.deduplicated) broadcast(room, { type: 'sport-record-deleted', id: Number(req.params.id), version: out.version, rev: out.version, operationId: req.body?.operationId || '' });
     res.json({ success: true, id: Number(req.params.id), ...out });
   } catch (err) { handleApiError(res, err); }
 });
@@ -146,23 +195,23 @@ app.post('/api/records/study', (req, res) => {
   try {
     const room = req.body.room || DEFAULT_ROOM_CODE;
     const out = repo.addStudyRecord(room, req.body);
-    if (!out.deduplicated) broadcast(room, { type: 'study-record-added', record: out.record, version: out.version });
+    if (!out.deduplicated) broadcast(room, { type: 'study-record-added', record: out.record, version: out.version, rev: out.version, operationId: req.body.operationId || req.body.sessionId || '' });
     res.json({ success: true, ...out });
   } catch (err) { handleApiError(res, err); }
 });
 app.patch('/api/records/study/:id', (req, res) => {
   try {
     const room = req.body.room || DEFAULT_ROOM_CODE;
-    const out = repo.updateStudyRecord(room, req.params.id, req.body);
-    broadcast(room, { type: 'study-record-updated', record: out.record, version: out.version });
+    const out = repo.updateStudyRecord(room, req.params.id, req.body, req.body.person || req.memberSession?.person || null);
+    if (!out.deduplicated) broadcast(room, { type: 'study-record-updated', record: out.record, version: out.version, rev: out.version, operationId: req.body.operationId || '' });
     res.json({ success: true, ...out });
   } catch (err) { handleApiError(res, err); }
 });
 app.delete('/api/records/study/:id', (req, res) => {
   try {
     const room = req.query.room || req.body.room || DEFAULT_ROOM_CODE;
-    const out = repo.deleteStudyRecord(room, req.params.id);
-    broadcast(room, { type: 'study-record-deleted', id: Number(req.params.id), version: out.version });
+    const out = repo.deleteStudyRecord(room, req.params.id, req.body || {}, req.body?.person || req.memberSession?.person || null);
+    if (!out.deduplicated) broadcast(room, { type: 'study-record-deleted', id: Number(req.params.id), version: out.version, rev: out.version, operationId: req.body?.operationId || '' });
     res.json({ success: true, id: Number(req.params.id), ...out });
   } catch (err) { handleApiError(res, err); }
 });
@@ -297,8 +346,8 @@ const handleRename = (req, res) => {
     const oldName = req.body.oldName;
     const newName = req.body.newName || req.body.name;
     if (!newName) return res.status(400).json({ success: false, error: '新名称不能为空' });
-    const result = repo.renamePerson(room, oldName, newName);
-    broadcast(room, { type: 'person-renamed', ...result });
+    const result = repo.renamePerson(room, oldName, newName, req.body.operationId || null);
+    if (!result.deduplicated) broadcast(room, { type: 'person-renamed', ...result, rev: result.version, operationId: req.body.operationId || '' });
     res.json({ success: true, ...result });
   } catch (err) { handleApiError(res, err); }
 };

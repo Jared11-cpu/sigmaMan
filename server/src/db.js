@@ -122,6 +122,30 @@ function initDb(dbPath) {
       PRIMARY KEY (room_code, op_id)
     );
 
+    CREATE TABLE IF NOT EXISTS room_changes (
+      room_code TEXT NOT NULL,
+      rev INTEGER NOT NULL,
+      op_id TEXT NOT NULL DEFAULT '',
+      action TEXT NOT NULL,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (room_code, rev)
+    );
+
+    CREATE TABLE IF NOT EXISTS member_sessions (
+      token TEXT PRIMARY KEY,
+      room_code TEXT NOT NULL,
+      person TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'member',
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at TEXT NOT NULL
+    );
+
     CREATE INDEX IF NOT EXISTS idx_sport_room ON records_sport(room_code, date, person);
     CREATE INDEX IF NOT EXISTS idx_study_room ON records_study(room_code, date, person);
     CREATE INDEX IF NOT EXISTS idx_habit_logs ON habit_logs(room_code, person, date);
@@ -138,6 +162,13 @@ function initDb(dbPath) {
   ensureColumn(db, 'study_targets', 'archived', 'INTEGER NOT NULL DEFAULT 0');
   ensureColumn(db, 'study_targets', 'base_hours', 'REAL NOT NULL DEFAULT 0');
   ensureColumn(db, 'habits', 'archived', 'INTEGER NOT NULL DEFAULT 0');
+  ensureColumn(db, 'records_sport', 'version', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(db, 'records_sport', 'created_by', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'records_sport', 'deleted_at', "TEXT DEFAULT NULL");
+  ensureColumn(db, 'records_study', 'version', 'INTEGER NOT NULL DEFAULT 1');
+  ensureColumn(db, 'records_study', 'created_by', "TEXT NOT NULL DEFAULT ''");
+  ensureColumn(db, 'records_study', 'deleted_at', "TEXT DEFAULT NULL");
+  db.prepare("INSERT OR IGNORE INTO schema_migrations (version, name, applied_at) VALUES (2, 'v2_ops_rev_version_auth', ?)").run(new Date().toISOString());
 
   return db;
 }

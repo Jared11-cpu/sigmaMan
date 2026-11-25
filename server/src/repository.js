@@ -1,6 +1,33 @@
 const { seedRoom, today, DEFAULT_MEMBERS } = require('./seed');
 
-function badRequest(msg) {
+const crypto = require('node:crypto');
+const path = require('node:path');
+const fs = require('node:fs');
+const { computeLeaderboard } = require('../../shared/score');
+
+function badRequest(msg, code = 'BAD_REQUEST') {
+  const e = new Error(msg);
+  e.statusCode = 400;
+  e.code = code;
+  return e;
+}
+
+function conflictError(msg, currentRecord = null) {
+  const e = new Error(msg);
+  e.statusCode = 409;
+  e.code = 'VERSION_CONFLICT';
+  if (currentRecord) e.currentRecord = currentRecord;
+  return e;
+}
+
+function forbiddenError(msg) {
+  const e = new Error(msg);
+  e.statusCode = 403;
+  e.code = 'FORBIDDEN';
+  return e;
+}
+
+function _unusedBadRequest(msg) {
   const e = new Error(msg);
   e.statusCode = 400;
   return e;
@@ -74,11 +101,79 @@ class RunningRepository {
     return this.db.prepare('SELECT * FROM rooms WHERE code = ?').get(roomCode);
   }
 
-  bumpVersion(roomCode) {
+  bumpVersion(roomCode, action = 'state-updated', payload = {}, opId = '') {
     const nowIso = new Date().toISOString();
     this.db.prepare('UPDATE rooms SET version = COALESCE(version, 1) + 1, updated_at = ? WHERE code = ?').run(nowIso, roomCode);
     const row = this.db.prepare('SELECT version FROM rooms WHERE code = ?').get(roomCode);
-    return row ? row.version : 1;
+    const rev = row ? row.version : 1;
+    try {
+      this.db.prepare('INSERT OR REPLACE INTO room_changes (room_code, rev, op_id, action, payload_json, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(roomCode, rev, String(opId || ''), String(action || 'state-updated'), JSON.stringify(payload || {}), nowIso);
+      this.db.prepare('DELETE FROM room_changes WHERE room_code = ? AND rev < ?').run(roomCode, rev - 200);
+    } catch {}
+    return rev;
+  }
+
+  issueOrVerifySession(roomCode, personHint, token) {
+    const room = this.ensureRoom(roomCode);
+    if (token) {
+      const sess = this.db.prepare('SELECT * FROM member_sessions WHERE token = ? AND room_code = ?').get(String(token), roomCode);
+      if (sess) return { token: sess.token, person: sess.person, role: sess.role };
+    }
+    const person = String(personHint || room.name || '帅哥').trim();
+    const role = person === room.name ? 'owner' : 'member';
+    const existing = this.db.prepare('SELECT * FROM member_sessions WHERE room_code = ? AND person = ? ORDER BY created_at DESC LIMIT 1').get(roomCode, person);
+    if (existing) return { token: existing.token, person: existing.person, role: existing.role };
+    const newToken = 'ms_' + crypto.randomBytes(18).toString('hex');
+    this.db.prepare('INSERT INTO member_sessions (token, room_code, person, role, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(newToken, roomCode, person, role, new Date().toISOString());
+    return { token: newToken, person, role };
+  }
+
+  getChangesSince(roomCode, sinceRev = 0, requestingPerson = null) {
+    const room = this.ensureRoom(roomCode);
+    const curRev = room.version || 1;
+    const since = Number(sinceRev) || 0;
+    const changes = this.db.prepare('SELECT rev, op_id, action, payload_json, created_at FROM room_changes WHERE room_code = ? AND rev > ? ORDER BY rev ASC LIMIT 100')
+      .all(roomCode, since)
+      .map(r => {
+        let payload = {};
+        try { payload = JSON.parse(r.payload_json || '{}'); } catch {}
+        return { rev: r.rev, operationId: r.op_id || '', action: r.action, payload, createdAt: r.created_at };
+      });
+    return {
+      roomCode,
+      sinceRev: since,
+      rev: curRev,
+      hasChanges: curRev > since,
+      changes,
+      state: curRev > since ? this.getState(roomCode, requestingPerson) : null
+    };
+  }
+
+  getLeaderboard(roomCode, period = '本月', metric = '综合积分', requestingPerson = null) {
+    const st = this.getState(roomCode, requestingPerson);
+    const lb = computeLeaderboard(st, period, metric);
+    return {
+      roomCode,
+      rev: st.dataVersion,
+      ...lb
+    };
+  }
+
+  backupBeforeDestructive(roomCode, tag = 'auto') {
+    try {
+      const dbFileRow = this.db.prepare('PRAGMA database_list').all().find(x => x.name === 'main');
+      if (!dbFileRow || !dbFileRow.file) return null;
+      const bdir = path.join(path.dirname(dbFileRow.file), 'backups');
+      if (!fs.existsSync(bdir)) fs.mkdirSync(bdir, { recursive: true });
+      const dst = path.join(bdir, `running-${roomCode}-${tag}-${Date.now()}.sqlite`);
+      const escaped = dst.replace(/'/g, "''");
+      this.db.exec(`VACUUM INTO '${escaped}'`);
+      return dst;
+    } catch {
+      return null;
+    }
   }
 
   getProcessedOp(roomCode, opId) {
@@ -97,7 +192,7 @@ class RunningRepository {
   }
 
   getStudyTargets(roomCode, person) {
-    const records = this.db.prepare('SELECT target_id, seconds, minutes, hours FROM records_study WHERE room_code = ? AND person = ?').all(roomCode, person);
+    const records = this.db.prepare('SELECT target_id, seconds, minutes, hours FROM records_study WHERE room_code = ? AND person = ? AND deleted_at IS NULL').all(roomCode, person);
     const secondsByTarget = new Map();
     for (const record of records) {
       secondsByTarget.set(record.target_id, (secondsByTarget.get(record.target_id) || 0) + savedStudySeconds(record));
@@ -138,7 +233,7 @@ class RunningRepository {
         .all(roomCode, 'study', viewer).map(r => r.record_id)
     );
 
-    const sportRecords = this.db.prepare('SELECT * FROM records_sport WHERE room_code = ? ORDER BY date DESC, time DESC, id DESC').all(roomCode).map(r => ({
+    const sportRecords = this.db.prepare('SELECT * FROM records_sport WHERE room_code = ? AND deleted_at IS NULL ORDER BY date DESC, time DESC, id DESC').all(roomCode).map(r => ({
       id: r.id,
       person: r.person,
       date: r.date,
@@ -150,11 +245,13 @@ class RunningRepository {
       tags: JSON.parse(r.tags || '[]'),
       photo: r.photo,
       source: r.source || 'manual',
+      version: r.version || 1,
+      createdBy: r.created_by || r.person,
       likes: r.likes,
       liked: sportLikes.has(r.id)
     }));
 
-    const studyRecords = this.db.prepare('SELECT * FROM records_study WHERE room_code = ? ORDER BY date DESC, time DESC, id DESC').all(roomCode).map(r => {
+    const studyRecords = this.db.prepare('SELECT * FROM records_study WHERE room_code = ? AND deleted_at IS NULL ORDER BY date DESC, time DESC, id DESC').all(roomCode).map(r => {
       return {
         id: r.id,
         person: r.person,
@@ -168,6 +265,8 @@ class RunningRepository {
         tags: JSON.parse(r.tags || '[]'),
         photo: r.photo,
         source: r.source || 'manual',
+        version: r.version || 1,
+        createdBy: r.created_by || r.person,
         likes: r.likes,
         liked: studyLikes.has(r.id)
       };
@@ -268,10 +367,22 @@ class RunningRepository {
     });
   }
 
-  updateSportRecord(roomCode, id, data) {
+  updateSportRecord(roomCode, id, data, actorPerson = null) {
+    const room = this.ensureRoom(roomCode);
+    const opId = data.operationId || data.idempotencyKey;
+    if (opId) {
+      const prev = this.getProcessedOp(roomCode, opId);
+      if (prev) return { ...prev, deduplicated: true };
+    }
     const recId = Number(id);
-    const existing = this.db.prepare('SELECT * FROM records_sport WHERE room_code = ? AND id = ?').get(roomCode, recId);
+    const existing = this.db.prepare('SELECT * FROM records_sport WHERE room_code = ? AND id = ? AND deleted_at IS NULL').get(roomCode, recId);
     if (!existing) throw badRequest('未找到该运动记录');
+    if (actorPerson && actorPerson !== room.name && actorPerson !== existing.person && actorPerson !== (existing.created_by || existing.person)) {
+      throw forbiddenError('只能编辑本人或由你代记的打卡记录');
+    }
+    if (data.baseVersion !== undefined && Number(data.baseVersion) !== (existing.version || 1)) {
+      throw conflictError('该记录已在其他设备更新，请刷新后确认', existing);
+    }
 
     const { km, minutes } = sportMetrics(
       data.km === undefined ? existing.km : data.km,
@@ -286,28 +397,41 @@ class RunningRepository {
     if (!isValidDateStr(date)) throw badRequest('日期格式不正确');
 
     return this.runTx(() => {
+      const nextRecVer = (existing.version || 1) + 1;
       this.db.prepare(`
         UPDATE records_sport
-        SET date = ?, time = ?, km = ?, minutes = ?, feel = ?, note = ?, tags = ?
+        SET date = ?, time = ?, km = ?, minutes = ?, feel = ?, note = ?, tags = ?, version = ?
         WHERE room_code = ? AND id = ?
-      `).run(date, time, km, minutes, feel, note, tags, roomCode, recId);
-      const version = this.bumpVersion(roomCode);
-      return {
-        record: {
-          id: recId, person: existing.person, date, time, km, minutes, feel, note,
-          tags: JSON.parse(tags), photo: existing.photo, source: existing.source || 'manual', likes: existing.likes
-        },
-        version
+      `).run(date, time, km, minutes, feel, note, tags, nextRecVer, roomCode, recId);
+      const record = {
+        id: recId, person: existing.person, date, time, km, minutes, feel, note,
+        tags: JSON.parse(tags), photo: existing.photo, source: existing.source || 'manual', likes: existing.likes, version: nextRecVer
       };
+      const version = this.bumpVersion(roomCode, 'sport-record-updated', { record }, opId);
+      const out = { record, version };
+      if (opId) this.saveProcessedOp(roomCode, opId, out);
+      return out;
     });
   }
 
-  deleteSportRecord(roomCode, id) {
+  deleteSportRecord(roomCode, id, data = {}, actorPerson = null) {
+    const room = this.ensureRoom(roomCode);
+    const opId = data?.operationId;
     return this.runTx(() => {
+      if (opId) {
+        const prev = this.getProcessedOp(roomCode, opId);
+        if (prev) return { ...prev, deduplicated: true };
+      }
+      const existing = this.db.prepare('SELECT * FROM records_sport WHERE room_code = ? AND id = ?').get(roomCode, Number(id));
+      if (existing && actorPerson && actorPerson !== room.name && actorPerson !== existing.person && actorPerson !== (existing.created_by || existing.person)) {
+        throw forbiddenError('只能删除本人或由你代记的打卡记录');
+      }
       this.db.prepare('DELETE FROM records_sport WHERE room_code = ? AND id = ?').run(roomCode, Number(id));
       this.db.prepare('DELETE FROM record_likes WHERE room_code = ? AND kind = ? AND record_id = ?').run(roomCode, 'sport', Number(id));
-      const version = this.bumpVersion(roomCode);
-      return { version };
+      const version = this.bumpVersion(roomCode, 'sport-record-deleted', { id: Number(id) }, opId);
+      const out = { version };
+      if (opId) this.saveProcessedOp(roomCode, opId, out);
+      return out;
     });
   }
 
@@ -352,11 +476,22 @@ class RunningRepository {
     });
   }
 
-  updateStudyRecord(roomCode, id, data) {
-    this.ensureRoom(roomCode);
+  updateStudyRecord(roomCode, id, data, actorPerson = null) {
+    const room = this.ensureRoom(roomCode);
+    const opId = data.operationId || data.idempotencyKey;
+    if (opId) {
+      const prev = this.getProcessedOp(roomCode, opId);
+      if (prev) return { ...prev, deduplicated: true };
+    }
     const recId = Number(id);
-    const existing = this.db.prepare('SELECT * FROM records_study WHERE room_code = ? AND id = ?').get(roomCode, recId);
+    const existing = this.db.prepare('SELECT * FROM records_study WHERE room_code = ? AND id = ? AND deleted_at IS NULL').get(roomCode, recId);
     if (!existing) throw badRequest('未找到该学习记录');
+    if (actorPerson && actorPerson !== room.name && actorPerson !== existing.person && actorPerson !== (existing.created_by || existing.person)) {
+      throw forbiddenError('只能编辑本人或由你代记的打卡记录');
+    }
+    if (data.baseVersion !== undefined && Number(data.baseVersion) !== (existing.version || 1)) {
+      throw conflictError('该记录已在其他设备更新，请刷新后确认', existing);
+    }
 
     const { seconds, minutes, hours } = studyDuration(data, existing);
     const date = data.date !== undefined ? String(data.date) : existing.date;
@@ -370,53 +505,72 @@ class RunningRepository {
     if (!isValidDateStr(date)) throw badRequest('日期格式不正确');
 
     return this.runTx(() => {
+      const nextRecVer = (existing.version || 1) + 1;
       this.db.prepare(`
         UPDATE records_study
-        SET date = ?, time = ?, hours = ?, minutes = ?, seconds = ?, focus = ?, target_id = ?, subject = ?, note = ?, tags = ?
+        SET date = ?, time = ?, hours = ?, minutes = ?, seconds = ?, focus = ?, target_id = ?, subject = ?, note = ?, tags = ?, version = ?
         WHERE room_code = ? AND id = ?
-      `).run(date, time, hours, minutes, seconds, focus, targetId, subject, note, tags, roomCode, recId);
+      `).run(date, time, hours, minutes, seconds, focus, targetId, subject, note, tags, nextRecVer, roomCode, recId);
 
-      const version = this.bumpVersion(roomCode);
-      return {
-        record: {
-          id: recId, person: existing.person, date, time, hours, minutes, seconds, focus, targetId, subject, note,
-          tags: JSON.parse(tags), photo: existing.photo, source: existing.source || 'manual', likes: existing.likes
-        },
-        version
+      const record = {
+        id: recId, person: existing.person, date, time, hours, minutes, seconds, focus, targetId, subject, note,
+        tags: JSON.parse(tags), photo: existing.photo, source: existing.source || 'manual', likes: existing.likes, version: nextRecVer
       };
+      const version = this.bumpVersion(roomCode, 'study-record-updated', { record }, opId);
+      const out = { record, version };
+      if (opId) this.saveProcessedOp(roomCode, opId, out);
+      return out;
     });
   }
 
-  deleteStudyRecord(roomCode, id) {
-    this.ensureRoom(roomCode);
+  deleteStudyRecord(roomCode, id, data = {}, actorPerson = null) {
+    const room = this.ensureRoom(roomCode);
+    const opId = data?.operationId;
     return this.runTx(() => {
+      if (opId) {
+        const prev = this.getProcessedOp(roomCode, opId);
+        if (prev) return { ...prev, deduplicated: true };
+      }
+      const existing = this.db.prepare('SELECT * FROM records_study WHERE room_code = ? AND id = ?').get(roomCode, Number(id));
+      if (existing && actorPerson && actorPerson !== room.name && actorPerson !== existing.person && actorPerson !== (existing.created_by || existing.person)) {
+        throw forbiddenError('只能删除本人或由你代记的打卡记录');
+      }
       this.db.prepare('DELETE FROM records_study WHERE room_code = ? AND id = ?').run(roomCode, Number(id));
       this.db.prepare('DELETE FROM record_likes WHERE room_code = ? AND kind = ? AND record_id = ?').run(roomCode, 'study', Number(id));
-      const version = this.bumpVersion(roomCode);
-      return { version };
+      const version = this.bumpVersion(roomCode, 'study-record-deleted', { id: Number(id) }, opId);
+      const out = { version };
+      if (opId) this.saveProcessedOp(roomCode, opId, out);
+      return out;
     });
   }
 
-  toggleLike(roomCode, kind, recordId, person) {
+  toggleLike(roomCode, kind, recordId, person, opId = null) {
     this.ensureRoom(roomCode);
-    const existing = this.db.prepare('SELECT 1 FROM record_likes WHERE room_code = ? AND kind = ? AND record_id = ? AND person = ?').get(roomCode, kind, Number(recordId), person);
     const table = kind === 'study' ? 'records_study' : 'records_sport';
 
     return this.runTx(() => {
+      if (opId) {
+        const prev = this.getProcessedOp(roomCode, opId);
+        if (prev) return { ...prev, deduplicated: true };
+      }
+      const existing = this.db.prepare('SELECT 1 FROM record_likes WHERE room_code = ? AND kind = ? AND record_id = ? AND person = ?').get(roomCode, kind, Number(recordId), person);
+      let out;
       if (existing) {
         this.db.prepare('DELETE FROM record_likes WHERE room_code = ? AND kind = ? AND record_id = ? AND person = ?').run(roomCode, kind, Number(recordId), person);
         this.db.prepare(`UPDATE ${table} SET likes = MAX(0, likes - 1) WHERE room_code = ? AND id = ?`).run(roomCode, Number(recordId));
         const row = this.db.prepare(`SELECT likes FROM ${table} WHERE room_code = ? AND id = ?`).get(roomCode, Number(recordId));
-        const version = this.bumpVersion(roomCode);
-        return { liked: false, likes: row ? row.likes : 0, version };
+        const version = this.bumpVersion(roomCode, 'record-liked', { kind, id: Number(recordId), liked: false }, opId);
+        out = { liked: false, likes: row ? row.likes : 0, version };
       } else {
         const nowIso = new Date().toISOString();
         this.db.prepare('INSERT INTO record_likes (room_code, kind, record_id, person, created_at) VALUES (?, ?, ?, ?, ?)').run(roomCode, kind, Number(recordId), person, nowIso);
         this.db.prepare(`UPDATE ${table} SET likes = likes + 1 WHERE room_code = ? AND id = ?`).run(roomCode, Number(recordId));
         const row = this.db.prepare(`SELECT likes FROM ${table} WHERE room_code = ? AND id = ?`).get(roomCode, Number(recordId));
-        const version = this.bumpVersion(roomCode);
-        return { liked: true, likes: row ? row.likes : 1, version };
+        const version = this.bumpVersion(roomCode, 'record-liked', { kind, id: Number(recordId), liked: true }, opId);
+        out = { liked: true, likes: row ? row.likes : 1, version };
       }
+      if (opId) this.saveProcessedOp(roomCode, opId, out);
+      return out;
     });
   }
 
@@ -596,7 +750,8 @@ class RunningRepository {
     return members;
   }
 
-  renamePerson(roomCode, oldName, newName) {
+  renamePerson(roomCode, oldName, newName, opId = null) {
+    if (opId) { const prev = this.getProcessedOp(roomCode, opId); if (prev) return { ...prev, deduplicated: true }; }
     const room = this.ensureRoom(roomCode);
     const trimmedOld = String(oldName || room.name || '').trim();
     const trimmedNew = String(newName || '').trim();
@@ -627,12 +782,15 @@ class RunningRepository {
       this.db.prepare('UPDATE record_likes SET person = ? WHERE room_code = ? AND person = ?').run(trimmedNew, roomCode, trimmedOld);
       const version = this.bumpVersion(roomCode);
 
-      return { oldName: trimmedOld, newName: trimmedNew, name: trimmedNew, version };
+      const out = { oldName: trimmedOld, newName: trimmedNew, name: trimmedNew, version };
+      if (opId) this.saveProcessedOp(roomCode, opId, out);
+      return out;
     });
   }
 
   clearRecords(roomCode) {
     this.ensureRoom(roomCode);
+    this.backupBeforeDestructive(roomCode, 'clear');
     return this.runTx(() => {
       this.db.prepare('DELETE FROM records_sport WHERE room_code = ?').run(roomCode);
       this.db.prepare('DELETE FROM records_study WHERE room_code = ?').run(roomCode);
@@ -643,6 +801,7 @@ class RunningRepository {
   }
 
   importState(roomCode, raw) {
+    this.backupBeforeDestructive(roomCode, 'import');
     if (!raw || typeof raw !== 'object' || !Array.isArray(raw.records) || !Array.isArray(raw.studyRecords || [])) {
       throw badRequest('导入数据格式不正确：缺少必要的记录列表');
     }

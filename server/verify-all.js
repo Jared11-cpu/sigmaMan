@@ -474,6 +474,43 @@ async function runVerification() {
       stateAfterReplay.records.length === restartState.records.length,
       '重启后重试相同 operationId，返回原记录和版本且无额外写入');
 
+    // API-22: GET /api/leaderboard & GET /api/changes?since=<rev>
+    const lbRes = await (await fetch(`${restartBase}/api/leaderboard?room=default&period=${encodeURIComponent('本月')}&metric=${encodeURIComponent('综合积分')}`)).json();
+    const chRes = await (await fetch(`${restartBase}/api/changes?room=default&since=1`)).json();
+    record('API-22', 'GET /api/leaderboard 前后端同源榜单与 GET /api/changes 差量接口', '增量与同源',
+      lbRes.success && lbRes.timezone === 'Asia/Shanghai' && Array.isArray(lbRes.rows) && lbRes.rows.length >= 1 && chRes.success && chRes.rev >= 1 && Array.isArray(chRes.changes),
+      '服务端同源计算榜单返回北京时间区间与排名，且 /api/changes 正确返回修订号差量列表');
+
+    // API-23: PATCH/LIKE operationId idempotency + baseVersion 409 conflict + ownership 403 guard
+    const editOpId = 'edit-idem-' + Date.now();
+    const patch1 = await (await fetch(`${restartBase}/api/records/sport/${sportId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', km: 7.25, minutes: 38, operationId: editOpId })
+    })).json();
+    const patch2 = await (await fetch(`${restartBase}/api/records/sport/${sportId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', km: 9.99, minutes: 50, operationId: editOpId })
+    })).json();
+    const conflictRes = await fetch(`${restartBase}/api/records/sport/${sportId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', km: 8.0, minutes: 40, baseVersion: 1 })
+    });
+    const forbidRes = await fetch(`${restartBase}/api/records/sport/${sportId}`, {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ room: 'default', person: '陌生旁观者', km: 8.0, minutes: 40 })
+    });
+    record('API-23', '编辑/点赞通用 operationId 幂等、baseVersion 409 乐观锁与 403 归属保护', '数据安全',
+      patch1.success && patch2.deduplicated === true && patch2.record.km === 7.25 && conflictRes.status === 409 && forbidRes.status === 403,
+      '重复 editOpId 幂等返回首次结果 (7.25km)，旧版本号返回 409 Conflict，非本人/非代记人篡改返回 403 Forbidden');
+
+    // API-24: Protected file SHA256 gate (pixel-progress.js & pixel-progress.css untouched)
+    const crypto = require('node:crypto');
+    const ppJsHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname, '..', 'pixel-progress.js'))).digest('hex').slice(0, 16).toUpperCase();
+    const ppCssHash = crypto.createHash('sha256').update(fs.readFileSync(path.join(__dirname, '..', 'pixel-progress.css'))).digest('hex').slice(0, 16).toUpperCase();
+    record('API-24', '受保护像素进度条文件 SHA256 零改动门禁', '保护区门禁',
+      ppJsHash === '5536205A387C6EB8' && ppCssHash === 'B4EDDDB4E9220AD6',
+      `pixel-progress.js (${ppJsHash}) 与 pixel-progress.css (${ppCssHash}) 哈希 100% 原样保留`);
+
     await new Promise(r => server2.close(r));
   } catch (err) {
     console.error('Test execution error:', err);
