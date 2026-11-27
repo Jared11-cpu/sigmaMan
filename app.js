@@ -183,6 +183,7 @@ const VALID_VIEWS = ['home', 'calendar', 'progress', 'plan', 'study', 'ranking',
 const STATS_CARDS_KEY = STORE + '_stats_cards_v1';
 const DEFAULT_STATS_CARDS = {
   summary: true,
+  plans: true,
   yearDots: true,
   metricBars: true,
   monthCurve: true,
@@ -214,6 +215,8 @@ let statsPeriod = 'month'; // 'week' | 'month' | 'year' | 'all'
 let statsAnchorDate = today();
 let statsDayDate = today();
 let statsSelectedNode = '';
+let statsSelectedBars = {};
+function clearStatsSelections() { statsSelectedNode = ''; statsSelectedBars = {}; }
 const hashView = (typeof location !== 'undefined' && location.hash) ? location.hash.replace(/^#/, '').split('?')[0] : '';
 let view = params.get('view') || (VALID_VIEWS.includes(hashView) ? hashView : 'home');
 let showArchivedTargets = false, showArchivedHabits = false, pendingImportBackup = null;
@@ -307,6 +310,7 @@ let pomodoroTotal = pomoSession.totalSec, pomodoroLeft = getPomoLeftSec(), pomod
 let pomodoroTargetId = pomoSession.targetId || state.studyTargets[0]?.id || 'st-1';
 
 let quoteIndex = params.has('quote') ? Number(params.get('quote')) : 0, quoteTimer, step = 0, draft = null, modalPreviousFocus = null, modalPreviousFocusSelector = '', toastTimer, dialogSave = null;
+if (view === 'people') view = 'progress';
 if (!VALID_VIEWS.includes(view)) view = 'home';
 
 const nav = [
@@ -321,19 +325,17 @@ const DESKTOP_NAV = [
   ['progress', '统计', 'chart'],
   ['records', '记录', 'pulse'],
   ['ranking', '排名', 'trophy'],
-  ['__div__', '计划与自律', ''],
+  ['__div__', '计划与成就', ''],
   ['plan', '运动计划', 'shoe'],
   ['study', '学习目标', 'book'],
-  ['achievements', '成就勋章', 'medal'],
-  ['people', '自律伙伴', 'sunrise']
+  ['achievements', '成就勋章', 'medal']
 ];
 const MORE_ITEMS = [
   { id: 'records', label: '记录明细', icon: 'pulse', sub: '全部运动与学习流水和凭证' },
-  { id: 'ranking', label: '竞技排名', icon: 'trophy', sub: '多人榜单与PK对比' },
-  { id: 'plan', label: '运动计划', icon: 'shoe', sub: '跑步计划与28天排程' },
+  { id: 'ranking', label: '竞技排名', icon: 'trophy', sub: '榜单数据与趋势对比' },
+  { id: 'plan', label: '运动计划', icon: 'shoe', sub: '跑步目标与28天排程' },
   { id: 'study', label: '学习目标', icon: 'book', sub: '专注番茄与目标拆解' },
-  { id: 'achievements', label: '成就勋章', icon: 'medal', sub: '勋章墙与连续里程碑' },
-  { id: 'people', label: '自律伙伴', icon: 'sunrise', sub: '每日习惯与同行伙伴' }
+  { id: 'achievements', label: '成就勋章', icon: 'medal', sub: '勋章墙与连续里程碑' }
 ];
 const MORE_VIEWS = MORE_ITEMS.map(x => x.id);
 if (embedded) document.body.classList.add('embedded');
@@ -1313,7 +1315,7 @@ function studyRadarAxes(person = state.name) {
     { key: '学习时间', en: 'TIME', val: timeScore, sub: mtHours.toFixed(1) + 'h / 周' + weekHours.toFixed(1) + 'h', targetView: 'study' },
     { key: '任务完成度', en: 'TASKS', val: avgTargetPct, sub: state.studyTargets.length + '目标 ' + avgTargetPct + '%', targetView: 'study' },
     { key: '努力程度', en: 'EFFORT', val: effortScore, sub: '均专注 ' + avgFocus.toFixed(1) + '/4 · ' + weekSessions + '场', targetView: 'records' },
-    { key: '自律时间', en: 'HABIT', val: disciplineScore, sub: '7日 ' + hab7 + '% · 连胜' + ds + '天', targetView: 'people' }
+    { key: '自律时间', en: 'HABIT', val: disciplineScore, sub: '7日 ' + hab7 + '% · 连胜' + ds + '天', targetView: 'progress' }
   ];
 }
 
@@ -1443,13 +1445,12 @@ function track() {
     + (homeBpMode === 'track' ? '<canvas class="arena-fx-canvas" aria-hidden="true"></canvas>' : '')
     + '<div class="arena-hud-top">'
     + '<span class="arena-hud-tag slash-chip">[ ' + (homeBpMode === 'study' ? 'NEURAL RADAR' : '400M PIXEL ARENA') + ' ]</span>'
-    + '<button type="button" class="arena-combo-pill tier-' + cTier.tier + '" data-action="go-view" data-value="people" title="查看 COMBO 连击与自律里程碑">'
+    + '<button type="button" class="arena-combo-pill tier-' + cTier.tier + '" data-action="go-view" data-value="progress" title="查看 COMBO 连击与统计总览">'
     + comboPixelEmblemSvg(cTier, 16)
     + '<span>COMBO ×' + myCombo + '</span><em>' + cTier.code + '</em></button>'
     + '</div>'
     + trackBody
     + '<button class="track-badge track-mode-switch" data-action="toggle-home-bp" title="点击切换运动跑道与四维学习雷达">' + (homeBpMode === 'study' ? '4D RADAR ⇄ 400M 跑道' : '400M TRACK ⇄ 四维学习雷达') + '</button>'
-    + '<button class="track-add-btn" data-action="add-person" title="添加竞技人物/伙伴">' + (members.length === 1 ? '＋ 加人物' : '＋ 加人物 (' + members.length + '人)') + '</button>'
     + '<button class="track-caption ' + ((done && sDone) ? 'done' : '') + '" data-action="go-view" data-value="' + (homeBpMode === 'study' ? 'study' : 'progress') + '">' + (homeBpMode === 'study' ? ('选中：' + radarFocusAxis + ' · 进学习目标 →') : (isSprinting ? '⚡ 打卡冲刺圈进行中…' : done ? '今日已跑 ✓ · 点节点查看线表' : '跑 ' + (done ? 1 : 0) + '/1 · 学 ' + (sDone ? 1 : 0) + '/1 · ' + (members.length === 1 ? '查看双轨线表 →' : members.length + '人同跑'))) + '</button>'
     + '</div>';
 }
@@ -1552,7 +1553,7 @@ function homeTodayPanel() {
   const members = allMembers();
 
   const habitsCardHtml = habitsList.length
-    ? '<div class="rd-section-label"><span>今日自律 · ' + hb.done + '/' + hb.total + '</span><button type="button" data-action="go-view" data-value="people">管理 →</button></div>'
+    ? '<div class="rd-section-label"><span>今日自律 · ' + hb.done + '/' + hb.total + '</span><button type="button" data-action="stats-edit-habits-modal">管理 →</button></div>'
       + '<div class="rd-card rd-checklist-card">'
       + habitsList.map(h => {
         const ok = doneHabits.includes(h.id);
@@ -1603,7 +1604,7 @@ function homeTodayPanel() {
     + entryBars
     + habitsCardHtml
     + '<div class="rd-section-label"><span>今日明细 (' + todayItems.length + ')</span>'
-    + (members.length ? '<button type="button" data-action="add-person">+ 伙伴 (' + members.length + '人)</button>' : '<button type="button" data-action="add-person">+ 加伙伴</button>')
+    + '<button type="button" data-action="go-view" data-value="progress">查看统计 →</button>'
     + '</div>'
     + '<div class="rd-card rd-feed-card">' + feedRowsHtml + '</div>'
     + '</section>';
@@ -1635,8 +1636,15 @@ function morePage() {
       + '</button></li>';
   }).join('');
   return '<section class="ck-more-page" aria-labelledby="ck-more-heading">'
-    + '<header class="ck-more-header"><h2 id="ck-more-heading">更多</h2><p>进度、运动、学习、成就与自律</p></header>'
+    + '<header class="ck-more-header"><h2 id="ck-more-heading">更多</h2><p>记录、排名、计划、学习与成就</p></header>'
     + '<ul class="ck-more-list" aria-label="全部扩展页面入口">' + rows + '</ul>'
+    + '<div class="rd-card rd-more-tools">'
+    + '<div class="rd-more-tools-head"><strong>快捷管理与设置</strong><small>作息习惯、计划同步与图表配置</small></div>'
+    + '<div class="rd-more-tools-actions">'
+    + '<button type="button" class="rd-pill-btn" data-action="stats-edit-habits-modal">✎ 作息与自律管理</button>'
+    + '<button type="button" class="rd-pill-btn" data-action="go-stats-plan" data-value="sport">⚡ 统计页计划同步</button>'
+    + '<button type="button" class="rd-pill-btn" data-action="stats-open-settings">⚙ 统计图表设置</button>'
+    + '</div></div>'
     + '</section>';
 }
 
@@ -1661,7 +1669,7 @@ function home() {
     + '<section class="home-metrics home-metrics-4 ck-home-metrics" aria-label="运动学习自律与核心进度">'
     + '<button class="metric-tile" data-action="go-view" data-value="plan"><div class="metric-top"><small>本月运动 / RUN</small><em class="metric-rank">' + (solo ? ('目标 ' + sPct + '%') : ('#' + mySportRank + (mySportRank === 1 ? ' 领跑' : ' 差' + sportLeadDelta + 'k'))) + '</em></div><strong>' + mt.toFixed(1) + '<em> KM</em></strong>' + PixelProgressBar.renderHtml({ progress: sPct, height: 12, width: '100%', bare: true, variant: 'orange', className: 'metric-ppb', ariaLabel: '本月运动目标进度' }) + '</button>'
     + '<button class="metric-tile" data-action="go-view" data-value="study"><div class="metric-top"><small>本月学习 / STUDY</small><em class="metric-rank is-blue">' + (solo ? ('目标 ' + stPct + '%') : ('#' + myStudyRank + (myStudyRank === 1 ? ' 领跑' : ' 差' + studyLeadDelta + 'h'))) + '</em></div><strong>' + stH.toFixed(1) + '<em> H</em></strong>' + PixelProgressBar.renderHtml({ progress: stPct, height: 12, width: '100%', bare: true, variant: 'blue', className: 'metric-ppb', ariaLabel: '本月学习目标进度' }) + '</button>'
-    + (() => { const ds = dualStreak(); const ct = comboTier(ds); const nextGoal = ct.nextAt || 30; const cPct = ct.nextAt ? Math.min(100, Math.round(ds / nextGoal * 100)) : 100; return '<button class="metric-tile is-combo-tile tier-' + ct.tier + '" data-action="go-view" data-value="people"><div class="metric-top"><small>COMBO 连击 / STREAK</small><em class="metric-rank is-gold">' + ct.code + ' · ' + hb.done + '/' + hb.total + '</em></div><strong>COMBO ×' + ds + '</strong>' + PixelProgressBar.renderHtml({ progress: cPct, height: 12, width: '100%', bare: true, variant: 'gold', className: 'metric-ppb', ariaLabel: 'COMBO 连击进度' }) + '</button>'; })()
+    + (() => { const ds = dualStreak(); const ct = comboTier(ds); const nextGoal = ct.nextAt || 30; const cPct = ct.nextAt ? Math.min(100, Math.round(ds / nextGoal * 100)) : 100; return '<button class="metric-tile is-combo-tile tier-' + ct.tier + '" data-action="go-view" data-value="progress"><div class="metric-top"><small>COMBO 连击 / STREAK</small><em class="metric-rank is-gold">' + ct.code + ' · ' + hb.done + '/' + hb.total + '</em></div><strong>COMBO ×' + ds + '</strong>' + PixelProgressBar.renderHtml({ progress: cPct, height: 12, width: '100%', bare: true, variant: 'gold', className: 'metric-ppb', ariaLabel: 'COMBO 连击进度' }) + '</button>'; })()
     + '<button class="metric-tile" data-action="go-view" data-value="progress"><div class="metric-top"><small>' + (solo ? '综合积分 / SCORE' : '多人竞技 / PK榜') + '</small><em class="metric-rank is-ink">' + (solo ? '单人基准' : (board.length + '人同榜')) + '</em></div><strong>' + (solo ? (myRow.score + '<em> 分</em>') : ('第' + myRank + '<em>名 · ' + myRow.score + '分</em>')) + '</strong>' + PixelProgressBar.renderHtml({ progress: solo ? Math.max(sPct, stPct) : Math.round(myRow.score / Math.max(1, board[0]?.score || 1) * 100), height: 12, width: '100%', bare: true, variant: 'ink', className: 'metric-ppb', ariaLabel: '综合竞技进度' }) + '</button>'
     + '</section>'
     + homeTodayPanel()
@@ -1769,7 +1777,7 @@ function focusAppleRing(key, panelEl) {
         fCta.dataset.mode = activeTile.dataset.ringCtaMode || 'sport';
         delete fCta.dataset.value;
       } else {
-        fCta.dataset.value = activeTile.dataset.ringCtaView || 'people';
+        fCta.dataset.value = activeTile.dataset.ringCtaView || 'progress';
         delete fCta.dataset.mode;
       }
       fCta.textContent = activeTile.dataset.ringCtaLabel || '';
@@ -2095,7 +2103,7 @@ function lineChart(type) {
   const scaleSwitchHtml = supportsScaleToggle
     ? '<div class="comp-scale-pills"><button type="button" class="' + (chartScaleMode === 'cum' ? 'active' : '') + '" data-action="chart-scale" data-value="cum">累计曲线</button><button type="button" class="' + (chartScaleMode === 'single' ? 'active' : '') + '" data-action="chart-scale" data-value="single">单次分布</button></div>'
     : '';
-  const soloAddBtnHtml = solo ? '<button type="button" class="comp-chip add-btn" data-action="add-person">＋ 加人物对比</button>' : '';
+  const soloAddBtnHtml = '';
 
   const topControlsBar = (dualTabsHtml || scaleSwitchHtml || soloAddBtnHtml)
     ? '<div class="comp-controls-top">' + dualTabsHtml + '<div class="comp-controls-right">' + scaleSwitchHtml + soloAddBtnHtml + '</div></div>'
@@ -2123,7 +2131,6 @@ function lineChart(type) {
     ? '<div class="comp-filter-row">'
       + '<button type="button" class="comp-chip ' + (chartPersonFilter === 'all' ? 'active' : '') + '" data-action="chart-person" data-value="all">全部 ' + members.length + ' 人PK</button>'
       + members.map(m => '<button type="button" class="comp-chip ' + (chartPersonFilter === m ? 'active' : '') + '" style="--mclr:' + memberColor(m) + '" data-action="chart-person" data-value="' + esc(m) + '"><i></i><span>' + esc(m) + '</span><b>' + chipSummaryOf(m) + '</b></button>').join('')
-      + '<button type="button" class="comp-chip add-btn" data-action="add-person">＋ 加人物</button>'
       + '</div>'
     : '';
 
@@ -2660,7 +2667,7 @@ function calendarPage() {
     const chips = [];
     if (spPlan) chips.push('<button type="button" class="rd-allday-chip is-sport" data-action="cal-slot-add" data-date="' + dk + '" data-time="07:00" data-mode="sport">跑 ' + spPlan + 'k</button>');
     if (stPlan) chips.push('<button type="button" class="rd-allday-chip is-study" data-action="cal-slot-add" data-date="' + dk + '" data-time="09:00" data-mode="study">学 ' + stPlan + 'h</button>');
-    if (hbRate.done > 0) chips.push('<button type="button" class="rd-allday-chip is-habit" data-action="go-view" data-value="people">自律 ' + hbRate.done + '/' + hbRate.total + '</button>');
+    if (hbRate.done > 0) chips.push('<button type="button" class="rd-allday-chip is-habit" data-action="stats-edit-habits-modal">自律 ' + hbRate.done + '/' + hbRate.total + '</button>');
     return '<div class="rd-allday-cell' + (isT ? ' is-today' : '') + '">' + chips.join('') + '</div>';
   }).join('');
 
@@ -2843,10 +2850,11 @@ function calendarPage() {
 }
 
 /* ---------- View 2: Statistics Dashboard (Usage + Full TomatoToDo + Running-App 12-Month Dot Matrix & Crisp Metric Bars + Smooth Splines) ---------- */
-function renderSlimBarChartSvg(buckets, color, unitLabel, formatVal) {
-  const W = 440, H = 156, padL = 10, padR = 48, padT = 14, padB = 24;
+function renderSlimBarChartSvg(chartId, buckets, color, unitLabel, formatVal) {
+  const W = 440, H = 158, padL = 10, padR = 52, padT = 16, padB = 26;
   const plotW = W - padL - padR, plotH = H - padT - padB;
-  const rawMax = Math.max(0, ...buckets.map(b => b.val));
+  const safeBuckets = Array.isArray(buckets) ? buckets : [];
+  const rawMax = Math.max(0, ...safeBuckets.map(b => Number(b.val) || 0));
   const niceMax = rawMax <= 0 ? 10 : Math.ceil(rawMax * 1.15);
   const ticks = [0, niceMax / 2, niceMax];
   const gridSvg = ticks.map(tv => {
@@ -2855,23 +2863,63 @@ function renderSlimBarChartSvg(buckets, color, unitLabel, formatVal) {
       + '<text class="rd-axis-txt" x="' + (W - padR + 6) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="start">' + esc(formatVal ? formatVal(tv) : String(Math.round(tv))) + '</text>';
   }).join('');
 
-  const n = Math.max(1, buckets.length);
+  const curSelKey = statsSelectedBars[chartId] || '';
+  const matchedBucket = curSelKey ? safeBuckets.find(b => b.key === curSelKey) : null;
+  if (curSelKey && !matchedBucket) delete statsSelectedBars[chartId];
+
+  const n = Math.max(1, safeBuckets.length);
   const colW = plotW / n;
-  const bw = Math.max(4, Math.min(18, colW * 0.44));
-  const barsSvg = buckets.map((b, i) => {
+  const bw = Math.max(5, Math.min(20, colW * 0.48));
+  const barsSvg = safeBuckets.map((b, i) => {
     const cx = padL + i * colW + colW / 2;
-    const h = b.val > 0 ? Math.max(4, (b.val / niceMax) * plotH) : 0;
+    const val = Math.max(0, Number(b.val) || 0);
+    const h = val > 0 ? Math.max(5, (val / niceMax) * plotH) : 0;
     const y = padT + plotH - h;
-    const showLbl = n <= 12 || i === 0 || i === n - 1 || i % Math.ceil(n / 7) === 0;
-    return '<g>'
+    const isSel = !!(matchedBucket && matchedBucket.key === b.key);
+    const showLbl = n <= 12 || i === 0 || i === n - 1 || i % Math.ceil(n / 7) === 0 || isSel;
+    const valStr = b.valDisplay || ((formatVal ? formatVal(val) : String(val)) + (unitLabel || ''));
+    const ariaTxt = (b.fullLabel || b.label) + ' ' + valStr + (b.extra ? (' · ' + b.extra) : '');
+    const barKey = chartId + ':' + b.key;
+    const hitX = (padL + i * colW).toFixed(1);
+    const hitW = Math.max(8, colW).toFixed(1);
+    const ringX = (cx - bw / 2 - 2.5).toFixed(1);
+    const ringY = (val > 0 ? Math.max(padT - 2, y - 2.5) : (padT + plotH - 8)).toFixed(1);
+    const ringH = (val > 0 ? (h + 5) : 10).toFixed(1);
+    return '<g class="rd-bar-col' + (isSel ? ' is-selected' : '') + (val === 0 ? ' is-zero' : '') + '"'
+      + ' data-action="stats-pick-bar" data-chart-id="' + esc(chartId) + '" data-value="' + esc(barKey) + '"'
+      + ' data-focus-key="bar:' + esc(barKey) + '" tabindex="0" role="button" aria-pressed="' + isSel + '" aria-label="' + esc(ariaTxt) + '">'
+      + '<rect class="rd-bar-hit" x="' + hitX + '" y="' + padT + '" width="' + hitW + '" height="' + (plotH + 4) + '" fill="transparent"><title>' + esc(b.tip || ariaTxt) + '</title></rect>'
+      + '<rect class="rd-bar-focus-ring" x="' + ringX + '" y="' + ringY + '" width="' + (bw + 5).toFixed(1) + '" height="' + ringH + '" rx="4" fill="none" stroke="#1a1a18" stroke-width="1.8" stroke-dasharray="2.5 2"/>'
+      + (isSel ? '<rect class="rd-bar-sel-bg" x="' + (padL + i * colW + 1).toFixed(1) + '" y="' + padT + '" width="' + Math.max(6, colW - 2).toFixed(1) + '" height="' + plotH + '" rx="4" fill="' + color + '" fill-opacity=".10"/>' : '')
       + (h > 0
-        ? '<rect class="rd-bar-rect" x="' + (cx - bw / 2).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="2.5" fill="' + color + '"><title>' + esc(b.tip || (b.label + ': ' + b.val + unitLabel)) + '</title></rect>'
-        : '<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + (padT + plotH - 2) + '" width="' + bw.toFixed(1) + '" height="2" rx="1" fill="rgba(38,38,36,.10)"/>')
-      + (showLbl ? '<text class="rd-axis-txt" x="' + cx.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(b.label) + '</text>' : '')
+        ? '<rect class="rd-bar-rect" x="' + (cx - bw / 2).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="3" fill="' + color + '" opacity="' + (matchedBucket && !isSel ? '0.45' : '1') + '"/>'
+        : '<rect class="rd-bar-zero" x="' + (cx - bw / 2).toFixed(1) + '" y="' + (padT + plotH - 3) + '" width="' + bw.toFixed(1) + '" height="3" rx="1.5" fill="' + (isSel ? color : 'rgba(38,38,36,.16)') + '"/>')
+      + (showLbl ? '<text class="rd-axis-txt' + (isSel ? ' is-sel-lbl' : '') + '" x="' + cx.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(b.label) + '</text>' : '')
       + '</g>';
   }).join('');
 
-  return '<svg class="rd-svg-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img">' + gridSvg + barsSvg + '</svg>';
+  const peakB = safeBuckets.slice().sort((a, b) => (Number(b.val) || 0) - (Number(a.val) || 0))[0];
+  let readoutHtml = '';
+  if (matchedBucket) {
+    const valStr = matchedBucket.valDisplay || (String(matchedBucket.val) + (unitLabel || ''));
+    readoutHtml = '<div class="rd-bar-readout is-active" data-bar-readout="' + esc(chartId) + '" role="status" aria-live="polite">'
+      + '<span class="rd-bar-readout-key">' + esc(matchedBucket.fullLabel || matchedBucket.label) + '</span>'
+      + '<strong class="rd-bar-readout-val">' + esc(valStr) + '</strong>'
+      + (matchedBucket.extra ? '<span class="rd-bar-readout-extra">' + esc(matchedBucket.extra) + '</span>' : '')
+      + '</div>';
+  } else {
+    const peakTxt = peakB && Number(peakB.val) > 0
+      ? ('峰值 ' + (peakB.fullLabel || peakB.label) + ' · ' + (peakB.valDisplay || (peakB.val + (unitLabel || ''))))
+      : '当前周期暂无数值，点击任意柱条可查看零值明细';
+    readoutHtml = '<div class="rd-bar-readout" data-bar-readout="' + esc(chartId) + '" role="status" aria-live="polite">'
+      + '<span class="rd-bar-readout-hint">点击或方向键选中柱条 · ' + esc(peakTxt) + '</span>'
+      + '</div>';
+  }
+
+  return '<div class="rd-bar-chart-wrap">'
+    + '<svg class="rd-svg-chart" viewBox="0 0 ' + W + ' ' + H + '" role="group" aria-label="交互柱状图，支持点击与方向键选中查看具体数值">' + gridSvg + barsSvg + '</svg>'
+    + readoutHtml
+    + '</div>';
 }
 
 function renderSmoothSplineCardSvg(points, color, gradId, formatY) {
@@ -3005,6 +3053,9 @@ function renderYearDotMatrixCard(yearNum, mySport, myStudy) {
 function progress() {
   const mySport = mine(state.records);
   const myStudy = mineStudy(state.studyRecords);
+  const bjToday = today();
+  const bjYesterday = dateShift(-1);
+  const bjTomorrow = dateShift(1);
   const anchorDt = new Date(statsAnchorDate + 'T12:00:00');
   const yr = anchorDt.getFullYear();
   const mo = anchorDt.getMonth() + 1;
@@ -3012,7 +3063,6 @@ function progress() {
   const monWeek = getMondayOfWeek(statsAnchorDate);
   const weekDays = Array.from({ length: 7 }, (_, i) => addDaysStr(monWeek, i));
 
-  // Filter records for selected period
   function inPeriod(dk) {
     if (statsPeriod === 'all') return true;
     if (statsPeriod === 'year') return String(dk).startsWith(yr + '-');
@@ -3026,44 +3076,57 @@ function progress() {
 
   const pSport = mySport.filter(r => inPeriod(r.date));
   const pStudy = myStudy.filter(r => inPeriod(r.date));
+  const pSportKm = total(pSport);
+  const pStudyH = totalStudy(pStudy);
+  const pHbRate = weeklyHabitPct(state.name);
+  const pScore = Math.round(pSportKm * 10 + pStudyH * 15 + pHbRate * 0.5);
+  const ds = dualStreak();
 
-  const topCardHtml = '<section class="rd-card rd-stats-topbar">'
+  // Top Overview Hero with Storm Pixel Canvas (auto-initialized by initPixelMatrices(), obeys motion-paused & reduced-motion)
+  const topCardHtml = '<section class="poster-hero poster-storm rd-stats-hero" data-wm="STATS">'
+    + '<div class="rd-stats-hero-inner">'
     + '<div class="rd-stats-head-row">'
-    + '<h2>统计数据</h2>'
+    + '<div class="rd-stats-hero-title"><span class="rd-hero-eyebrow">[ 统计总览 · STORM PIXEL ]</span><h2>统计数据</h2></div>'
     + '<div class="rd-stats-head-icons">'
-    + '<button type="button" class="rd-icon-btn" data-action="go-view" data-value="calendar" title="日历时间表" aria-label="打开日历">' + icon('calendar') + '</button>'
-    + '<button type="button" class="rd-icon-btn" data-action="go-view" data-value="records" title="打卡流水" aria-label="打开记录">' + icon('pulse') + '</button>'
-    + '<button type="button" class="rd-icon-btn" data-action="go-view" data-value="achievements" title="成就勋章" aria-label="打开成就">' + icon('medal') + '</button>'
-    + '<button type="button" class="rd-icon-btn" data-action="stats-open-settings" title="统计图表设置" aria-label="统计图表设置">⚙</button>'
+    + '<button type="button" class="rd-icon-btn is-hero" data-action="go-view" data-value="calendar" title="日历时间表" aria-label="打开日历">' + icon('calendar') + '</button>'
+    + '<button type="button" class="rd-icon-btn is-hero" data-action="go-view" data-value="records" title="打卡流水" aria-label="打开记录">' + icon('pulse') + '</button>'
+    + '<button type="button" class="rd-icon-btn is-hero" data-action="go-view" data-value="achievements" title="成就勋章" aria-label="打开成就">' + icon('medal') + '</button>'
+    + '<button type="button" class="rd-icon-btn is-hero" data-action="stats-open-settings" title="统计图表设置" aria-label="统计图表设置">⚙</button>'
     + '</div></div>'
-    + '<div class="rd-seg is-stretch" role="tablist" aria-label="统计维度">'
+    + '<div class="rd-stats-hero-kpis" aria-label="当前周期核心指标">'
+    + '<div class="rd-hero-kpi"><small>' + esc(periodLabel) + ' · 综合分</small><strong>' + pScore + '<em>分</em></strong></div>'
+    + '<div class="rd-hero-kpi"><small>跑步里程</small><strong>' + pSportKm.toFixed(1) + '<em>km</em></strong></div>'
+    + '<div class="rd-hero-kpi"><small>学习投入</small><strong>' + pStudyH.toFixed(1) + '<em>h</em></strong></div>'
+    + '<div class="rd-hero-kpi"><small>双轨连胜</small><strong>' + ds + '<em>天</em></strong></div>'
+    + '</div>'
+    + '<div class="rd-seg is-stretch is-hero-seg" role="tablist" aria-label="统计维度">'
     + [['all', '总览'], ['sport', '运动'], ['study', '学习'], ['rank', '排名']].map(([id, lbl]) =>
-      '<button type="button" class="' + (statsTab === id ? 'active' : '') + '" data-action="stats-tab" data-value="' + id + '">' + lbl + '</button>'
+      '<button type="button" role="tab" aria-selected="' + (statsTab === id) + '" class="' + (statsTab === id ? 'active' : '') + '" data-action="stats-tab" data-value="' + id + '">' + lbl + '</button>'
     ).join('')
     + '</div>'
     + (statsTab !== 'rank'
       ? '<div class="rd-stats-filter-row">'
-        + '<div class="rd-seg" role="tablist" aria-label="时间周期">'
+        + '<div class="rd-seg is-hero-seg" role="tablist" aria-label="时间周期">'
         + [['week', '周'], ['month', '月'], ['year', '年'], ['all', '全部']].map(([id, lbl]) =>
-          '<button type="button" class="' + (statsPeriod === id ? 'active' : '') + '" data-action="stats-period" data-value="' + id + '">' + lbl + '</button>'
+          '<button type="button" role="tab" aria-selected="' + (statsPeriod === id) + '" class="' + (statsPeriod === id ? 'active' : '') + '" data-action="stats-period" data-value="' + id + '">' + lbl + '</button>'
         ).join('')
         + '</div>'
         + (statsPeriod !== 'all'
-          ? '<div class="rd-period-nav">'
-            + '<button type="button" class="rd-icon-btn" data-action="stats-shift-period" data-value="-1" aria-label="上一周期">‹</button>'
-            + '<span class="rd-period-label">' + periodLabel + '</span>'
-            + '<button type="button" class="rd-icon-btn" data-action="stats-shift-period" data-value="1" aria-label="下一周期">›</button>'
+          ? '<div class="rd-period-nav is-hero-nav">'
+            + '<button type="button" class="rd-icon-btn is-hero" data-action="stats-shift-period" data-value="-1" aria-label="上一周期">‹</button>'
+            + '<span class="rd-period-label">' + esc(periodLabel) + '</span>'
+            + '<button type="button" class="rd-icon-btn is-hero" data-action="stats-shift-period" data-value="1" aria-label="下一周期">›</button>'
             + '</div>'
-          : '<span class="rd-period-label">全部历史</span>')
+          : '<span class="rd-period-label is-hero-lbl">全部历史</span>')
         + '</div>'
       : '')
-    + '</section>';
+    + '</div></section>';
 
   if (statsTab === 'rank') {
-    return '<div class="rd-stats-page">' + topCardHtml + '<div class="rd-card" style="overflow:hidden">' + ranking() + '</div></div>';
+    return '<div class="rd-stats-page">' + topCardHtml + '<div class="rd-rank-embed">' + ranking() + '</div></div>';
   }
 
-  // Card 1 & 2: Cumulative & Single-Day Overview (TomatoToDo top cards)
+  // Card 1 & 2: Independent Cumulative Overview & Yesterday/Today/Tomorrow Daily Card
   const totalCountAll = (statsTab === 'sport' ? mySport.length : statsTab === 'study' ? myStudy.length : mySport.length + myStudy.length);
   const totalSportKmAll = total(mySport);
   const totalStudyMinAll = myStudy.reduce((s, r) => s + studyMinutesOf(r), 0);
@@ -3079,49 +3142,191 @@ function progress() {
   const dayCount = (statsTab === 'sport' ? daySp.length : statsTab === 'study' ? daySt.length : daySp.length + daySt.length);
   const daySportKm = total(daySp);
   const dayStudyMin = daySt.reduce((s, r) => s + studyMinutesOf(r), 0);
+  const dayHb = habitRateForDate(statsDayDate);
+  const isFutureDay = statsDayDate > bjToday;
+  const dayRelLabel = statsDayDate === bjYesterday ? '昨天' : statsDayDate === bjToday ? '今天' : statsDayDate === bjTomorrow ? '明天' : (isFutureDay ? '未来计划' : '历史实绩');
+
+  const dNow = chinaNow();
+  const daysLeftMo = Math.max(1, new Date(dNow.getFullYear(), dNow.getMonth() + 1, 0).getDate() - dNow.getDate() + 1);
+  const myMtNow = total(mine(monthly())), myStNow = totalStudy(monthly(mineStudy()));
+  const remSportNow = Math.max(0, state.goal - myMtNow), remStudyNow = Math.max(0, state.studyGoal - myStNow);
+  const sportPlannedDay = isSportPlanned(statsDayDate);
+  const studyPlannedDay = isStudyPlanned(statsDayDate);
+
+  const dayDetailListHtml = isFutureDay
+    ? (() => {
+      const activeT = activeStudyTargets().slice(0, 3);
+      return '<div class="rd-day-plan-panel">'
+        + '<div class="rd-day-plan-note">完成量按实际记录显示（当前实绩 ' + dayCount + ' 次），以下为 ' + esc(statsDayDate) + ' 计划与待办：</div>'
+        + '<div class="rd-day-plan-items">'
+        + (statsTab !== 'study'
+          ? '<div class="rd-day-plan-row"><div><strong><i class="rd-dot is-sport"></i> 运动计划</strong><small>' + (sportPlannedDay ? ('已排晨跑 · 建议日均 ' + (remSportNow / daysLeftMo).toFixed(1) + ' km') : '当前设为休息日') + '</small></div>'
+            + '<button type="button" class="rd-pill-btn ' + (sportPlannedDay ? 'is-sport-soft' : 'is-ghost') + '" data-action="toggle-sport-date" data-value="' + esc(statsDayDate) + '">' + (sportPlannedDay ? '✓ 已排跑' : '＋ 排入跑步') + '</button></div>'
+          : '')
+        + (statsTab !== 'sport'
+          ? '<div class="rd-day-plan-row"><div><strong><i class="rd-dot is-study"></i> 学习计划</strong><small>' + (studyPlannedDay ? ('已排学习 · 建议日均 ' + (remStudyNow / daysLeftMo).toFixed(1) + ' h') : '当前设为休息日') + '</small></div>'
+            + '<button type="button" class="rd-pill-btn ' + (studyPlannedDay ? 'is-study-soft' : 'is-ghost') + '" data-action="toggle-study-date" data-value="' + esc(statsDayDate) + '">' + (studyPlannedDay ? '✓ 已排学' : '＋ 排入学习') + '</button></div>'
+          : '')
+        + (statsTab !== 'sport' && activeT.length
+          ? '<div class="rd-day-plan-targets"><span>重点目标：</span>' + activeT.map(t => '<button type="button" class="rd-mini-chip" data-action="edit-study-target" data-value="' + esc(t.id) + '">' + esc(t.title.slice(0, 12)) + ' (' + t.doneHours.toFixed(1) + '/' + t.targetHours + 'h)</button>').join('') + '</div>'
+          : '')
+        + '<div class="rd-day-plan-row is-subtle"><div><strong>自律待办提醒</strong><small>共 ' + activeHabits().length + ' 项每日作息习惯（可在下方分布卡直接编辑）</small></div>'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-habits-modal">调整清单</button></div>'
+        + '</div></div>';
+    })()
+    : (() => {
+      const dayItems = [
+        ...(statsTab === 'study' ? [] : daySp.map(r => ({ ...r, _kind: 'sport', _key: 'sport:' + r.id }))),
+        ...(statsTab === 'sport' ? [] : daySt.map(r => ({ ...r, _kind: 'study', _key: 'study:' + r.id })))
+      ].sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
+      if (!dayItems.length) {
+        return '<div class="rd-day-actual-empty"><span>' + esc(dayRelLabel) + '（' + esc(statsDayDate) + '）暂无实际打卡记录</span>'
+          + '<button type="button" class="rd-pill-btn is-primary" data-action="checkin" data-mode="' + (statsTab === 'study' ? 'study' : 'sport') + '">+ 补记一条</button></div>';
+      }
+      return '<div class="rd-day-actual-list">'
+        + dayItems.slice(0, 4).map(it => {
+          const isSt = it._kind === 'study';
+          const valTxt = isSt ? (studyMinutesOf(it) + ' 分钟') : (Number(it.km).toFixed(2) + ' km');
+          const subTxt = isSt ? (it.subject || findTargetTitle(it.targetId)) : (it.note || ('配速 ' + pace(it)));
+          return '<button type="button" class="rd-day-actual-row" data-action="open-receipt-modal" data-value="' + esc(it._key) + '">'
+            + '<span class="rd-feed-pill ' + (isSt ? 'is-study' : 'is-sport') + '">' + (isSt ? '学习' : '运动') + '</span>'
+            + '<span class="rd-day-actual-main"><strong>' + esc(valTxt) + '</strong><small>' + esc(subTxt) + '</small></span>'
+            + '<span class="rd-day-actual-time">' + esc(it.time || '--:--') + ' ›</span>'
+            + '</button>';
+        }).join('')
+        + '</div>';
+    })();
 
   const summaryCardsHtml = statsVisibleCards.summary
     ? '<article class="rd-card rd-stat-card">'
-      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>累计总览</h3><small>全周期真实汇总</small></div></div>'
-      + '<div class="rd-kpi-row">'
-      + '<div class="rd-kpi-cell"><small>累计次数</small><strong>' + totalCountAll + '<em>次</em></strong></div>'
-      + '<div class="rd-kpi-cell"><small>' + (statsTab === 'study' ? '累计学习' : '累计跑量') + '</small><strong>' + (statsTab === 'study' ? (totalStudyMinAll / 60).toFixed(1) + '<em>h</em>' : totalSportKmAll.toFixed(1) + '<em>km</em>') + '</strong></div>'
-      + '<div class="rd-kpi-cell"><small>' + (statsTab === 'all' ? '累计学习' : '日均时长') + '</small><strong>' + (statsTab === 'all' ? (totalStudyMinAll / 60).toFixed(1) + '<em>h</em>' : formatDurHm(avgDailyMin)) + '</strong></div>'
-      + '</div></article>'
+      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>累计总览</h3><small>全周期真实累计（按北京时间）</small></div><span class="rd-day-badge is-neutral">累计实绩</span></div>'
+      + '<div class="rd-usage-totals">'
+      + '<div class="rd-usage-total-cell"><small>累计打卡</small><strong>' + totalCountAll + '<em>次</em></strong><span>活跃 ' + uniqueDaysAll + ' 天</span></div>'
+      + '<div class="rd-usage-total-cell"><small>' + (statsTab === 'study' ? '累计学习' : '累计跑量') + '</small><strong>' + (statsTab === 'study' ? (totalStudyMinAll / 60).toFixed(1) + '<em>h</em>' : totalSportKmAll.toFixed(1) + '<em>km</em>') + '</strong><span>' + (statsTab === 'all' ? ('学习 ' + (totalStudyMinAll / 60).toFixed(1) + ' h') : ('日均 ' + formatDurHm(avgDailyMin))) + '</span></div>'
+      + '</div>'
+      + '<div class="rd-usage-subrow"><span>日均总投入 <b>' + formatDurHm(avgDailyMin) + '</b></span><span>本月已跑 <b>' + myMtNow.toFixed(1) + ' km</b> · 已学 <b>' + myStNow.toFixed(1) + ' h</b></span></div>'
+      + '</article>'
       + '<article class="rd-card rd-stat-card">'
       + '<div class="rd-stat-card-head">'
-      + '<div class="rd-stat-card-title"><h3>当日统计</h3><small>' + statsDayDate + '</small></div>'
+      + '<div class="rd-stat-card-title"><h3>当日统计 · ' + esc(dayRelLabel) + '</h3><small>' + esc(statsDayDate) + '（北京时间）</small></div>'
+      + '<div class="rd-day-head-right">'
+      + '<span class="rd-day-badge ' + (isFutureDay ? 'is-plan' : 'is-actual') + '">' + (isFutureDay ? '计划与待办' : '实际记录') + '</span>'
       + '<div class="rd-stat-arrows">'
       + '<button type="button" data-action="stats-shift-day" data-value="-1" aria-label="前一天">‹</button>'
       + '<button type="button" data-action="stats-shift-day" data-value="1" aria-label="后一天">›</button>'
-      + '</div></div>'
-      + '<div class="rd-kpi-row is-2">'
-      + '<div class="rd-kpi-cell"><small>当日次数</small><strong>' + dayCount + '<em>次</em></strong></div>'
-      + '<div class="rd-kpi-cell"><small>' + (statsTab === 'sport' ? '当日里程' : statsTab === 'study' ? '当日专注' : '运动 / 学习') + '</small><strong>'
-      + (statsTab === 'sport' ? (daySportKm.toFixed(1) + '<em>km</em>') : statsTab === 'study' ? (dayStudyMin + '<em>分钟</em>') : (daySportKm.toFixed(1) + '<em>km</em> / ' + dayStudyMin + '<em>m</em>'))
-      + '</strong></div></div></article>'
+      + '</div></div></div>'
+      + '<div class="rd-seg is-stretch rd-day-preset-seg" role="tablist" aria-label="切换昨天今天明天">'
+      + [[-1, '昨天', bjYesterday], [0, '今天', bjToday], [1, '明天', bjTomorrow]].map(([offset, lbl, dk]) =>
+        '<button type="button" role="tab" aria-selected="' + (statsDayDate === dk) + '" class="' + (statsDayDate === dk ? 'active' : '') + '" data-action="stats-day-preset" data-value="' + offset + '">' + lbl + '</button>'
+      ).join('')
+      + '</div>'
+      + '<div class="rd-kpi-row is-3">'
+      + '<div class="rd-kpi-cell"><small>' + (isFutureDay ? '实际已完成' : '当日次数') + '</small><strong>' + dayCount + '<em>次</em></strong></div>'
+      + '<div class="rd-kpi-cell"><small>' + (statsTab === 'study' ? '实绩专注' : '实绩里程') + '</small><strong>' + (statsTab === 'study' ? (dayStudyMin + '<em>m</em>') : (daySportKm.toFixed(1) + '<em>km</em>')) + '</strong></div>'
+      + '<div class="rd-kpi-cell"><small>' + (statsTab === 'all' ? '实绩学习' : '当日自律') + '</small><strong>' + (statsTab === 'all' ? (dayStudyMin + '<em>m</em>') : (dayHb.done + '/' + dayHb.total)) + '</strong></div>'
+      + '</div>'
+      + dayDetailListHtml
+      + '</article>'
     : '';
 
-  // Card 3: 12-Month Dot Matrix Calendar
+  // Card 2.5: Embedded Sport Plan & Study Plan (Pixel Edition — Big % + PixelProgressBar, NO circular rings!)
+  const plansHtml = statsVisibleCards.plans ? (() => {
+    const monthPace = monthElapsedPct();
+    const sPct = Math.round(myMtNow / Math.max(1, state.goal) * 100);
+    const stPct = Math.round(myStNow / Math.max(1, state.studyGoal) * 100);
+    const dows = [[1, '一'], [2, '二'], [3, '三'], [4, '四'], [5, '五'], [6, '六'], [0, '日']];
+    const next7 = Array.from({ length: 7 }, (_, i) => dateShift(i));
+    let out = '';
+    if (statsTab !== 'study') {
+      const sport7Html = next7.map((dk, idx) => {
+        const planned = isSportPlanned(dk);
+        const done = mySport.some(r => r.date === dk);
+        const lbl = idx === 0 ? '今' : idx === 1 ? '明' : dk.slice(5);
+        return '<button type="button" class="rd-plan-day-chip ' + (done ? 'is-done' : planned ? 'is-planned-sport' : 'is-rest') + '" data-action="toggle-sport-date" data-value="' + dk + '" aria-pressed="' + planned + '" title="点击切换 ' + dk + ' 跑步计划"><span>' + lbl + '</span><b>' + (done ? '✓' : planned ? '跑' : '休') + '</b></button>';
+      }).join('');
+      out += '<article class="rd-card rd-stat-card rd-plan-pixel-card is-sport-plan" id="stats-sport-plan">'
+        + '<div class="rd-stat-card-head">'
+        + '<div class="rd-stat-card-title"><h3>运动计划 · 像素进度</h3><small>双向同步至「运动计划」数据源</small></div>'
+        + '<div class="rd-plan-head-acts">'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-goal">✎ 改目标</button>'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="plan">28天排程 →</button>'
+        + '</div></div>'
+        + '<div class="rd-pixel-plan-hero">'
+        + '<div class="rd-pixel-big-pct is-sport">' + sPct + '<em>%</em></div>'
+        + '<div class="rd-pixel-plan-meta"><strong>' + myMtNow.toFixed(1) + ' <em>/ ' + state.goal + ' km</em></strong><small>' + (remSportNow > 0 ? ('还差 ' + remSportNow.toFixed(1) + ' km · 日均 ' + (remSportNow / daysLeftMo).toFixed(1) + ' km') : '本月运动目标已达成 ✓') + '</small></div>'
+        + '</div>'
+        + '<div class="rd-pixel-bar-row">' + PixelProgressBar.renderHtml({ progress: Math.min(100, sPct), height: 18, width: '100%', bare: true, variant: 'orange', pacePct: monthPace, className: 'rd-stats-ppb', ariaLabel: '本月运动目标像素进度' }) + '</div>'
+        + '<div class="rd-plan-quick-bar">'
+        + '<div class="rd-plan-step-btns">' + [-10, -5, 5, 10].map(n => '<button type="button" class="rd-mini-step" data-action="goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + 'km</button>').join('') + '</div>'
+        + '<div class="rd-plan-dow-pills" role="group" aria-label="每周跑步日">' + dows.map(([dNum, lbl]) => '<button type="button" class="rd-dow-pill ' + (state.days.includes(dNum) ? 'active is-sport' : '') + '" data-action="day" data-value="' + dNum + '" aria-pressed="' + state.days.includes(dNum) + '">' + lbl + '</button>').join('') + '</div>'
+        + '</div>'
+        + '<div class="rd-plan-7day-strip"><span class="rd-plan-sub-lbl">近7天排程（点日期切换）</span><div class="rd-plan-7day-grid">' + sport7Html + '</div></div>'
+        + '</article>';
+    }
+    if (statsTab !== 'sport') {
+      const study7Html = next7.map((dk, idx) => {
+        const planned = isStudyPlanned(dk);
+        const done = myStudy.some(r => r.date === dk);
+        const lbl = idx === 0 ? '今' : idx === 1 ? '明' : dk.slice(5);
+        return '<button type="button" class="rd-plan-day-chip ' + (done ? 'is-done' : planned ? 'is-planned-study' : 'is-rest') + '" data-action="toggle-study-date" data-value="' + dk + '" aria-pressed="' + planned + '" title="点击切换 ' + dk + ' 学习计划"><span>' + lbl + '</span><b>' + (done ? '✓' : planned ? '学' : '休') + '</b></button>';
+      }).join('');
+      const activeTargets = activeStudyTargets();
+      const targetsMiniHtml = activeTargets.length
+        ? '<div class="rd-plan-targets-list">' + activeTargets.slice(0, 4).map(t => {
+          const tp = Math.min(100, Math.round((t.doneHours / Math.max(1, t.targetHours)) * 100));
+          return '<div class="rd-plan-target-row">'
+            + '<div class="rd-plan-target-top"><strong>' + esc(t.title) + '</strong><span>' + t.doneHours.toFixed(1) + '/' + t.targetHours + 'h (' + tp + '%)</span></div>'
+            + '<div class="rd-plan-target-bar-wrap">'
+            + PixelProgressBar.renderHtml({ progress: tp, height: 10, width: '100%', bare: true, color: t.color || '#203f91', state: tp >= 100 ? 'success' : 'loading', className: 'rd-target-ppb', ariaLabel: t.title + ' 进度' })
+            + '<button type="button" class="rd-mini-act" data-action="quick-study" data-value="' + esc(t.id) + ':0.5" title="快捷+0.5h">+0.5h</button>'
+            + '<button type="button" class="rd-mini-act" data-action="edit-study-target" data-value="' + esc(t.id) + '" aria-label="编辑 ' + esc(t.title) + '">✎</button>'
+            + '</div></div>';
+        }).join('') + '</div>'
+        : '<div class="rd-empty-box">暂无学习目标</div>';
+
+      out += '<article class="rd-card rd-stat-card rd-plan-pixel-card is-study-plan" id="stats-study-plan">'
+        + '<div class="rd-stat-card-head">'
+        + '<div class="rd-stat-card-title"><h3>学习计划 · 像素进度</h3><small>双向同步至「学习目标」数据源</small></div>'
+        + '<div class="rd-plan-head-acts">'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-study-goal">✎ 改目标</button>'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="add-study-target">＋ 目标</button>'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="study">专注舱 →</button>'
+        + '</div></div>'
+        + '<div class="rd-pixel-plan-hero">'
+        + '<div class="rd-pixel-big-pct is-study">' + stPct + '<em>%</em></div>'
+        + '<div class="rd-pixel-plan-meta"><strong>' + myStNow.toFixed(1) + ' <em>/ ' + state.studyGoal + ' h</em></strong><small>' + (remStudyNow > 0 ? ('还差 ' + remStudyNow.toFixed(1) + ' h · 日均 ' + (remStudyNow / daysLeftMo).toFixed(1) + ' h') : '本月学习目标已达成 ✓') + '</small></div>'
+        + '</div>'
+        + '<div class="rd-pixel-bar-row">' + PixelProgressBar.renderHtml({ progress: Math.min(100, stPct), height: 18, width: '100%', bare: true, variant: 'blue', pacePct: monthPace, className: 'rd-stats-ppb', ariaLabel: '本月学习目标像素进度' }) + '</div>'
+        + '<div class="rd-plan-quick-bar">'
+        + '<div class="rd-plan-step-btns">' + [-10, -5, 5, 10].map(n => '<button type="button" class="rd-mini-step" data-action="study-goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + 'h</button>').join('') + '</div>'
+        + '<div class="rd-plan-dow-pills" role="group" aria-label="每周学习日">' + dows.map(([dNum, lbl]) => '<button type="button" class="rd-dow-pill ' + (state.studyDays.includes(dNum) ? 'active is-study' : '') + '" data-action="study-day" data-value="' + dNum + '" aria-pressed="' + state.studyDays.includes(dNum) + '">' + lbl + '</button>').join('') + '</div>'
+        + '</div>'
+        + '<div class="rd-plan-7day-strip"><span class="rd-plan-sub-lbl">近7天排程（点日期切换）</span><div class="rd-plan-7day-grid">' + study7Html + '</div></div>'
+        + targetsMiniHtml
+        + '</article>';
+    }
+    return out;
+  })() : '';
+
+  // Card 3: 12-Month Dot Matrix Calendar (preserving Noodle's larger, high-contrast dots)
   const yearDotsHtml = statsVisibleCards.yearDots ? renderYearDotMatrixCard(yr, mySport, myStudy) : '';
 
-  // Card 4: Multi-Metric Slim Vertical Bar Cards (Running-App screenshot inspired!)
+  // Card 4: Multi-Metric Interactive Slim Vertical Bar Cards
   function buildPeriodBuckets() {
     if (statsPeriod === 'week') {
       const dows = ['一', '二', '三', '四', '五', '六', '日'];
-      return weekDays.map((dk, i) => ({ key: dk, label: dows[i], match: r => r.date === dk }));
+      return weekDays.map((dk, i) => ({ key: dk, label: dows[i], fullLabel: dk + ' (周' + dows[i] + ')', match: r => r.date === dk }));
     }
     if (statsPeriod === 'month') {
       const daysInMo = new Date(yr, mo, 0, 12).getDate();
       return Array.from({ length: daysInMo }, (_, i) => {
         const dk = ymStr + '-' + pad(i + 1);
-        return { key: dk, label: String(i + 1), match: r => r.date === dk };
+        return { key: dk, label: String(i + 1), fullLabel: dk, match: r => r.date === dk };
       });
     }
-    // year or all -> 12 months of yr
     return Array.from({ length: 12 }, (_, i) => {
       const mKey = yr + '-' + pad(i + 1);
-      return { key: mKey, label: String(i + 1), match: r => String(r.date).startsWith(mKey + '-') };
+      return { key: mKey, label: String(i + 1) + '月', fullLabel: yr + '年' + (i + 1) + '月', match: r => String(r.date).startsWith(mKey + '-') };
     });
   }
   const periodBuckets = buildPeriodBuckets();
@@ -3129,39 +3334,40 @@ function progress() {
     const cards = [];
     if (statsTab !== 'study') {
       const distBuckets = periodBuckets.map(b => {
-        const v = Number(pSport.filter(b.match).reduce((s, r) => s + Number(r.km || 0), 0).toFixed(2));
-        return { label: b.label, val: v, tip: b.key + ' · ' + v.toFixed(2) + ' km' };
+        const list = pSport.filter(b.match);
+        const v = Number(list.reduce((s, r) => s + Number(r.km || 0), 0).toFixed(2));
+        return { key: b.key, label: b.label, fullLabel: b.fullLabel, val: v, valDisplay: v.toFixed(2) + ' km', extra: list.length ? (list.length + ' 次跑步') : '零记录', tip: b.fullLabel + ' · ' + v.toFixed(2) + ' km' };
       });
       cards.push('<article class="rd-card rd-stat-card">'
         + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>跑步里程 · Distance</h3><small>' + periodLabel + '</small></div></div>'
         + '<div class="rd-mbar-headline">' + total(pSport).toFixed(2) + '<small>km</small></div>'
-        + renderSlimBarChartSvg(distBuckets, '#0ea5a4', ' km', v => v.toFixed(1))
+        + renderSlimBarChartSvg('dist', distBuckets, '#e5492b', ' km', v => v.toFixed(1))
         + '</article>');
     }
     const durBuckets = periodBuckets.map(b => {
       const spM = statsTab === 'study' ? 0 : pSport.filter(b.match).reduce((s, r) => s + Number(r.minutes || 0), 0);
       const stM = statsTab === 'sport' ? 0 : pStudy.filter(b.match).reduce((s, r) => s + studyMinutesOf(r), 0);
       const v = Math.round(spM + stM);
-      return { label: b.label, val: v, tip: b.key + ' · ' + formatDurHm(v) };
+      return { key: b.key, label: b.label, fullLabel: b.fullLabel, val: v, valDisplay: v + ' 分钟', extra: v > 0 ? formatDurHm(v) : '零记录', tip: b.fullLabel + ' · ' + formatDurHm(v) };
     });
     const totalDurMin = durBuckets.reduce((s, b) => s + b.val, 0);
     cards.push('<article class="rd-card rd-stat-card">'
       + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>总投入时长 · Duration</h3><small>' + periodLabel + '</small></div></div>'
       + '<div class="rd-mbar-headline">' + formatDurHm(totalDurMin) + '</div>'
-      + renderSlimBarChartSvg(durBuckets, '#16a34a', ' 分钟', v => Math.round(v) + 'm')
+      + renderSlimBarChartSvg('dur', durBuckets, '#128641', ' 分钟', v => Math.round(v) + 'm')
       + '</article>');
 
     const sessBuckets = periodBuckets.map(b => {
       const spC = statsTab === 'study' ? 0 : pSport.filter(b.match).length;
       const stC = statsTab === 'sport' ? 0 : pStudy.filter(b.match).length;
       const v = spC + stC;
-      return { label: b.label, val: v, tip: b.key + ' · ' + v + ' 次' };
+      return { key: b.key, label: b.label, fullLabel: b.fullLabel, val: v, valDisplay: v + ' 次', extra: statsTab === 'all' ? ('运动 ' + spC + ' · 学习 ' + stC) : (v ? '已打卡' : '零记录'), tip: b.fullLabel + ' · ' + v + ' 次' };
     });
     const totalSess = sessBuckets.reduce((s, b) => s + b.val, 0);
     cards.push('<article class="rd-card rd-stat-card">'
       + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>打卡频次 · Sessions</h3><small>' + periodLabel + '</small></div></div>'
       + '<div class="rd-mbar-headline">' + totalSess + '<small>次</small></div>'
-      + renderSlimBarChartSvg(sessBuckets, '#2563eb', ' 次', v => String(Math.round(v)))
+      + renderSlimBarChartSvg('sess', sessBuckets, '#203f91', ' 次', v => String(Math.round(v)))
       + '</article>');
 
     if (statsTab !== 'study') {
@@ -3169,30 +3375,31 @@ function progress() {
         const list = pSport.filter(b.match);
         const km = total(list), min = list.reduce((s, r) => s + Number(r.minutes || 0), 0);
         const v = km > 0 ? Number((min / km).toFixed(2)) : 0;
-        return { label: b.label, val: v, tip: b.key + ' · 配速 ' + (v ? v.toFixed(1) + ' min/km' : '—') };
+        const pDisp = v ? (Math.floor(v) + "'" + pad(Math.round((v % 1) * 60)) + '" /km') : '0 min/km';
+        return { key: b.key, label: b.label, fullLabel: b.fullLabel, val: v, valDisplay: pDisp, extra: km > 0 ? (km.toFixed(1) + ' km') : '无跑步配速', tip: b.fullLabel + ' · 配速 ' + pDisp };
       });
       cards.push('<article class="rd-card rd-stat-card">'
         + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>平均配速 · Average Pace</h3><small>' + periodLabel + '</small></div></div>'
         + '<div class="rd-mbar-headline">' + (pSport.length ? avgPace(pSport) : '--') + '<small>/km</small></div>'
-        + renderSlimBarChartSvg(paceBuckets, '#65a30d', ' min/km', v => v ? (Math.floor(v) + "'" + pad(Math.round((v % 1) * 60)) + '"') : '0')
+        + renderSlimBarChartSvg('pace', paceBuckets, '#65a30d', ' min/km', v => v ? (Math.floor(v) + "'" + pad(Math.round((v % 1) * 60)) + '"') : '0')
         + '</article>');
     } else {
       const focusBuckets = periodBuckets.map(b => {
         const list = pStudy.filter(b.match);
         const v = list.length ? Number((list.reduce((s, r) => s + Number(r.focus || 3), 0) / list.length).toFixed(2)) : 0;
-        return { label: b.label, val: v, tip: b.key + ' · 专注 ' + v + '/5' };
+        return { key: b.key, label: b.label, fullLabel: b.fullLabel, val: v, valDisplay: v.toFixed(1) + ' 分', extra: list.length ? (list.length + ' 次学习') : '零记录', tip: b.fullLabel + ' · 专注 ' + v.toFixed(1) + '/5' };
       });
       const avgF = pStudy.length ? (pStudy.reduce((s, r) => s + Number(r.focus || 3), 0) / pStudy.length).toFixed(1) : '0.0';
       cards.push('<article class="rd-card rd-stat-card">'
         + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>平均专注度 · Focus</h3><small>' + periodLabel + '</small></div></div>'
         + '<div class="rd-mbar-headline">' + avgF + '<small>/ 5.0</small></div>'
-        + renderSlimBarChartSvg(focusBuckets, '#e5492b', ' 分', v => v.toFixed(1))
+        + renderSlimBarChartSvg('focus', focusBuckets, '#e5492b', ' 分', v => v.toFixed(1))
         + '</article>');
     }
     return '<div class="rd-metric-bars-grid is-wide">' + cards.join('') + '</div>';
   })() : '';
 
-  // Card 5: Smooth Monthly Spline Curve (replaces stiff line chart!)
+  // Card 5: Smooth Monthly Spline Curve
   const monthCurveHtml = statsVisibleCards.monthCurve ? (() => {
     const daysInMo = new Date(yr, mo, 0, 12).getDate();
     const pts = Array.from({ length: daysInMo }, (_, i) => {
@@ -3210,15 +3417,15 @@ function progress() {
       + '<div class="rd-stat-card-head">'
       + '<div class="rd-stat-card-title"><h3>月度丝滑趋势曲线</h3><small>' + yr + '年' + mo + '月</small></div>'
       + '<div class="rd-stat-arrows">'
-      + '<button type="button" data-action="stats-shift-period" data-value="-1">‹</button>'
-      + '<button type="button" data-action="stats-shift-period" data-value="1">›</button>'
+      + '<button type="button" data-action="stats-shift-period" data-value="-1" aria-label="上一月">‹</button>'
+      + '<button type="button" data-action="stats-shift-period" data-value="1" aria-label="下一月">›</button>'
       + '</div></div>'
       + renderSmoothSplineCardSvg(pts, col, 'rd-mo-grad', unitFn)
       + '<div class="rd-spline-readout" role="status" aria-live="polite"><span>' + esc(activePt ? activePt.tip : '点击曲线圆点查看单日详情') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看明细 →</button></div>'
       + '</article>';
   })() : '';
 
-  // Card 6: 24h Hourly Period Distribution (TomatoToDo 本月专注时段分布)
+  // Card 6: 24h Hourly Period Distribution (interactive clickable + keyboard bars!)
   const hourlyHtml = statsVisibleCards.hourly ? (() => {
     const monthRecs = [
       ...(statsTab === 'study' ? [] : mySport.filter(r => String(r.date).startsWith(ymStr + '-'))),
@@ -3230,18 +3437,19 @@ function progress() {
         const hh = Math.floor(parseTimeToMins(r.time) / 60);
         return hh >= h0 && hh < h1;
       });
-      const mins = list.reduce((s, r) => s + (r.km !== undefined ? Number(r.minutes || 30) : studyMinutesOf(r)), 0);
-      return { label: pad(h0) + 'h', val: Math.round(mins), tip: pad(h0) + ':00-' + pad(h1) + ':00 · ' + list.length + ' 次 · ' + formatDurHm(mins) };
+      const mins = Math.round(list.reduce((s, r) => s + (r.km !== undefined ? Number(r.minutes || 30) : studyMinutesOf(r)), 0));
+      const slotLbl = pad(h0) + ':00-' + pad(h1) + ':00';
+      return { key: 'h' + pad(h0), label: pad(h0) + 'h', fullLabel: slotLbl, val: mins, valDisplay: mins + ' 分钟', extra: list.length + ' 次打卡', tip: slotLbl + ' · ' + list.length + ' 次 · ' + formatDurHm(mins) };
     });
     const peak = hourBuckets.slice().sort((a, b) => b.val - a.val)[0];
     return '<article class="rd-card rd-stat-card">'
       + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>本月时段分布</h3><small>' + yr + '年' + mo + '月</small></div>'
-      + '<small style="color:var(--muted);font-size:11.5px">' + (peak && peak.val > 0 ? ('高峰 ' + peak.label) : '暂无时段数据') + '</small></div>'
-      + renderSlimBarChartSvg(hourBuckets, '#203f91', ' 分钟', v => Math.round(v) + 'm')
+      + '<small style="color:var(--muted);font-size:11.5px">' + (peak && peak.val > 0 ? ('高峰 ' + peak.fullLabel) : '暂无时段数据') + '</small></div>'
+      + renderSlimBarChartSvg('hourly', hourBuckets, '#203f91', ' 分钟', v => Math.round(v) + 'm')
       + '</article>';
   })() : '';
 
-  // Card 7: Horizontal Rounded Bar Ranking (TomatoToDo App Foreground Time inspired!)
+  // Card 7: Horizontal Rounded Bar Ranking
   const hbarHtml = statsVisibleCards.horizontalRank ? (() => {
     const rows = [];
     if (statsTab === 'study') {
@@ -3261,7 +3469,7 @@ function progress() {
     const maxV = Math.max(1, ...rows.map(r => r.val));
     const axisTicks = [0, 0.25, 0.5, 0.75, 1].map(f => Math.round(maxV * f));
     return '<article class="rd-card rd-stat-card">'
-      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>' + (statsTab === 'study' ? '学习目标耗时排行' : '成员投入横向排行') + '</h3><small>' + periodLabel + '</small></div></div>'
+      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>' + (statsTab === 'study' ? '学习目标耗时排行' : '投入横向排行') + '</h3><small>' + periodLabel + '</small></div></div>'
       + '<div class="rd-hbar-axis">' + axisTicks.map(v => '<span>' + v + '</span>').join('') + '</div>'
       + '<div class="rd-hbar-list">'
       + (rows.length ? rows.map(r => {
@@ -3274,12 +3482,14 @@ function progress() {
       + '</div></article>';
   })() : '';
 
-  // Card 8: Autonomy / Wake-Sleep & Feel/Focus Distribution
+  // Card 8: Editable Autonomy / Schedule Distribution & Feel/Focus Distribution
   const habitsQualityHtml = (statsVisibleCards.habits || statsVisibleCards.quality) ? (() => {
     let out = '';
     if (statsVisibleCards.habits) {
       const daysInMo = new Date(yr, mo, 0, 12).getDate();
       const hbList = activeHabits();
+      const toggleDk = statsDayDate <= bjToday ? statsDayDate : bjToday;
+      const doneOnToggle = state.habitLogs[toggleDk] || [];
       const hbRows = hbList.map((h, i) => {
         let cnt = 0;
         for (let d = 1; d <= daysInMo; d++) {
@@ -3287,14 +3497,27 @@ function progress() {
           if ((state.habitLogs[dk] || []).includes(h.id)) cnt++;
         }
         const pct = Math.round((cnt / Math.max(1, daysInMo)) * 100);
-        return '<div class="rd-hbar-row">'
-          + '<div class="rd-hbar-top"><span class="rd-hbar-name">' + esc(h.title) + '</span><span class="rd-hbar-val">' + cnt + ' 天 (' + pct + '%)</span></div>'
-          + '<div class="rd-hbar-track" style="min-height:14px"><div class="rd-hbar-fill" style="height:10px;width:' + Math.max(4, pct) + '%;background:' + MEMBER_PALETTE[i % MEMBER_PALETTE.length] + '"></div></div>'
+        const isChecked = doneOnToggle.includes(h.id);
+        return '<div class="rd-hbar-row rd-habit-edit-row">'
+          + '<div class="rd-hbar-top">'
+          + '<span class="rd-hbar-name rd-habit-name-wrap">'
+          + '<button type="button" class="rd-habit-check-btn' + (isChecked ? ' is-done' : '') + '" data-action="toggle-habit-date" data-value="' + esc(toggleDk + ':' + h.id) + '" aria-pressed="' + isChecked + '" aria-label="切换 ' + esc(toggleDk) + ' 的' + esc(h.title) + '完成状态">' + (isChecked ? '✓' : '') + '</button>'
+          + '<span class="rd-habit-title-txt">' + esc(h.title) + '</span>'
+          + '<em class="rd-habit-tag-pill">' + esc(h.tag || '作息') + '</em>'
+          + '</span>'
+          + '<span class="rd-habit-right-ctl"><span class="rd-hbar-val">' + cnt + ' 天 (' + pct + '%)</span>'
+          + '<button type="button" class="rd-mini-act" data-action="edit-habit" data-value="' + esc(h.id) + '" aria-label="编辑习惯 ' + esc(h.title) + '">✎</button></span>'
+          + '</div>'
+          + '<div class="rd-hbar-track" style="min-height:14px"><div class="rd-hbar-fill" style="height:10px;width:' + Math.max(cnt ? 6 : 2, pct) + '%;background:' + MEMBER_PALETTE[i % MEMBER_PALETTE.length] + '"></div></div>'
           + '</div>';
       }).join('');
-      out += '<article class="rd-card rd-stat-card">'
-        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>作息与自律达成分布</h3><small>' + yr + '年' + mo + '月</small></div><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="people">去打卡 →</button></div>'
-        + '<div class="rd-hbar-list">' + (hbRows || '<div class="rd-empty-box">暂无自律项</div>') + '</div>'
+      out += '<article class="rd-card rd-stat-card" id="stats-habits-card">'
+        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>作息与自律达成分布</h3><small>' + yr + '年' + mo + '月 · 勾选 ' + esc(toggleDk) + ' 即时重算</small></div>'
+        + '<div class="rd-plan-head-acts">'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="add-habit">＋ 新增</button>'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-habits-modal">✎ 编辑作息</button>'
+        + '</div></div>'
+        + '<div class="rd-hbar-list">' + (hbRows || '<div class="rd-empty-box">暂无自律项，点右上角「＋ 新增」创建</div>') + '</div>'
         + '</article>';
     }
     if (statsVisibleCards.quality) {
@@ -3338,6 +3561,7 @@ function progress() {
     + topCardHtml
     + '<div class="rd-stats-grid">'
     + summaryCardsHtml
+    + plansHtml
     + yearDotsHtml
     + metricBarsHtml
     + monthCurveHtml
@@ -3465,6 +3689,7 @@ function plan() {
     + '<div><small>剩余待跑</small><strong>' + remaining.toFixed(1) + '<em>KM</em></strong></div>'
     + '</div></section>'
     + '<section class="plan-controls">'
+    + '<div class="rd-plan-sync-bar"><span>数据已与「统计数据 · 运动计划」双向同步</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-stats-plan" data-value="sport">在统计页查看 →</button></div>'
     + '<div class="preset-row">' + presets.map(g => '<button class="preset-chip ' + (state.goal === g ? 'active' : '') + '" data-action="goal-set" data-value="' + g + '">' + g + 'K</button>').join('') + '</div>'
     + '<div class="segments">' + [-10, -5, 5, 10].map(n => '<button data-action="goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + ' km</button>').join('') + '</div>'
     + '</section>'
@@ -3536,6 +3761,7 @@ function study() {
     + '</section>'
     + studyEntryBars
     + '<section class="plan-controls">'
+    + '<div class="rd-plan-sync-bar"><span>数据已与「统计数据 · 学习计划」双向同步</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-stats-plan" data-value="study">在统计页查看 →</button></div>'
     + '<div class="preset-row">' + presets.map(g => '<button type="button" class="preset-chip ' + (state.studyGoal === g ? 'active' : '') + '" data-action="study-goal-set" data-value="' + g + '">' + g + 'H</button>').join('') + '</div>'
     + '<div class="segments">' + [-10, -5, 5, 10].map(n => '<button type="button" data-action="study-goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + ' h</button>').join('') + '</div>'
     + '</section>'
@@ -3654,7 +3880,6 @@ function ranking() {
     ? '<div class="empty ck-empty-state" role="status"><p><strong>' + esc(rankPeriod) + '还没有上榜记录</strong><span>记录一次运动或学习即可刷新榜单排名。</span></p><div class="ck-empty-actions">'
       + '<button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记一次</button>'
       + (isRankFiltered ? '<button type="button" class="ck-empty-cta is-subtle" data-action="reset-rank-filter">重置筛选</button>' : '')
-      + (soloRank ? '<button type="button" class="ck-empty-cta is-subtle" data-action="add-person">＋ 添加伙伴</button>' : '')
       + '</div></div>'
     : '';
   return '<div class="rank-layout"><div class="rank-left">'
@@ -3687,7 +3912,6 @@ function ranking() {
         + '<p>运动 ' + r.km.toFixed(1) + ' km · 学习 ' + r.hrs.toFixed(1) + ' h · 综合 ' + r.score + ' 积分 · 出勤 ' + r.days + ' 天 · 近7天自律 ' + r.hbRate + '%</p></div>'
         + '<div class="rank-result">' + result + '<small>' + unit + '</small></div></div>';
     }).join('')
-    + '<div class="rank-invite"><div>' + icon('users') + '<div><strong>' + (soloRank ? '添加伙伴同榜 PK' : '邀请更多伙伴') + '</strong><small>支持同榜对比运动、学习与积分</small></div></div><button type="button" data-action="add-person">＋ 添加伙伴</button></div>'
     + '</div><div class="rank-right">'
     + '<div class="pace-summary"><div><small>最快配速</small><strong>' + bestPace + '</strong></div><div><small>累计学习</small><strong>' + totalStudy(myStudy).toFixed(1) + ' h</strong></div><div><small>双轨连胜</small><strong>' + dualStreak() + ' 天</strong></div></div>'
     + subtabs(['运动配速对比', '学习专注对比'], rankChartMode === 'study' ? '学习专注对比' : '运动配速对比', 'rank-chart-mode', 'equal', { '运动配速对比': 'shoe', '学习专注对比': 'book' })
@@ -4688,6 +4912,7 @@ function applyRecordsHashQuery(hashStr) {
 applyRecordsHashQuery(typeof location !== 'undefined' ? location.hash : '');
 
 function navigate(v, fromPop = false) {
+  if (v === 'people') v = 'progress';
   if (!VALID_VIEWS.includes(v)) v = 'home';
   activeFilterSheet = '';
   if (v !== 'records') closeReceiptDialog();
@@ -5271,8 +5496,22 @@ document.addEventListener('click', async e => {
     return;
   }
   // Statistics actions
-  if (a === 'stats-tab') { statsTab = v; render(true); return; }
-  if (a === 'stats-period') { statsPeriod = v; render(true); return; }
+  if (a === 'stats-tab') { statsTab = v; clearStatsSelections(); render(true); return; }
+  if (a === 'stats-period') { statsPeriod = v; clearStatsSelections(); render(true); return; }
+  if (a === 'stats-day-preset') { statsDayDate = dateShift(Number(v) || 0); render(true); return; }
+  if (a === 'go-stats-plan') {
+    statsVisibleCards.plans = true;
+    saveStatsVisibleCards();
+    if (v === 'sport' && statsTab === 'study') statsTab = 'all';
+    if (v === 'study' && statsTab === 'sport') statsTab = 'all';
+    if (statsTab === 'rank') statsTab = 'all';
+    navigate('progress');
+    requestAnimationFrame(() => {
+      const targetEl = $(v === 'study' ? '#stats-study-plan' : '#stats-sport-plan');
+      if (targetEl) targetEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+    });
+    return;
+  }
   if (a === 'stats-pick-node') {
     const keepFocus = document.activeElement && document.activeElement.closest('.rd-spline-node');
     statsSelectedNode = v;
@@ -5280,20 +5519,99 @@ document.addEventListener('click', async e => {
     if (keepFocus) restoreFocusBySelector('[data-focus-key="spline:' + v.replace(/"/g, '\"') + '"]');
     return;
   }
+  if (a === 'stats-pick-bar') {
+    const keepFocus = document.activeElement && document.activeElement.closest('.rd-bar-col');
+    const sep = String(v || '').indexOf(':');
+    if (sep > 0) {
+      const cid = v.slice(0, sep), bkey = v.slice(sep + 1);
+      statsSelectedBars[cid] = bkey;
+      render(true);
+      if (keepFocus) restoreFocusBySelector('[data-focus-key="bar:' + v.replace(/"/g, '\"') + '"]');
+    }
+    return;
+  }
+  if (a === 'stats-edit-goal') {
+    openEditor('修改本月运动目标 (km)', '<div class="field-group"><label for="ed-sport-goal">本月目标里程 (公里)</label><input id="ed-sport-goal" type="number" inputmode="decimal" min="5" max="10000" step="5" value="' + state.goal + '" required></div><p class="hint">修改后将同步更新「运动计划」与「统计数据」页面。</p>', () => {
+      const g = Math.max(5, Math.min(10000, Math.round(Number($('#ed-sport-goal').value) || state.goal)));
+      state.goal = g;
+      persist(true); render(true); toast('本月运动目标已更新为 ' + g + ' km');
+    });
+    return;
+  }
+  if (a === 'stats-edit-study-goal') {
+    openEditor('修改本月学习目标 (小时)', '<div class="field-group"><label for="ed-study-goal">本月目标学习时长 (小时)</label><input id="ed-study-goal" type="number" inputmode="decimal" min="5" max="1000" step="5" value="' + state.studyGoal + '" required></div><p class="hint">修改后将同步更新「学习目标」与「统计数据」页面。</p>', () => {
+      const g = Math.max(5, Math.min(1000, Math.round(Number($('#ed-study-goal').value) || state.studyGoal)));
+      state.studyGoal = g;
+      persist(true); render(true); toast('本月学习目标已更新为 ' + g + ' 小时');
+    });
+    return;
+  }
+  if (a === 'stats-edit-habits-modal') {
+    const toggleDk = statsDayDate <= today() ? statsDayDate : today();
+    const doneIds = state.habitLogs[toggleDk] || [];
+    const listHtml = state.habits.map((h, idx) => {
+      const on = doneIds.includes(h.id);
+      return '<div class="rd-habit-modal-item' + (h.archived ? ' is-archived' : '') + '">'
+        + '<label class="rd-habit-modal-check"><input type="checkbox" data-hb-check="' + esc(h.id) + '"' + (on ? ' checked' : '') + (h.archived ? ' disabled' : '') + '></label>'
+        + '<input class="rd-habit-modal-title" type="text" maxlength="24" data-hb-title="' + esc(h.id) + '" value="' + esc(h.title) + '" aria-label="习惯名称">'
+        + '<input class="rd-habit-modal-tag" type="text" maxlength="6" data-hb-tag="' + esc(h.id) + '" value="' + esc(h.tag || '作息') + '" aria-label="习惯标签">'
+        + '<label class="rd-habit-modal-arch" title="停用后保留历史记录"><input type="checkbox" data-hb-arch="' + esc(h.id) + '"' + (h.archived ? ' checked' : '') + '><span>停用</span></label>'
+        + '</div>';
+    }).join('');
+    const body = '<p class="hint" style="margin-top:0">正在编辑个人作息与自律项（勾选框对应 <strong>' + esc(toggleDk) + '</strong> 完成状态），保存后立即重算统计分布：</p>'
+      + '<div class="rd-habit-modal-list">' + listHtml + '</div>'
+      + '<div class="rd-habit-modal-add">'
+      + '<input id="new-hb-inline-title" type="text" maxlength="24" placeholder="新增一条习惯（可选，例如：23:00 放下手机）">'
+      + '<input id="new-hb-inline-tag" type="text" maxlength="6" value="作息" placeholder="标签">'
+      + '</div>';
+    openEditor('编辑作息与自律习惯', body, () => {
+      const nextDone = [];
+      state.habits.forEach(h => {
+        const tInp = $('#editor-body [data-hb-title="' + h.id + '"]');
+        const tagInp = $('#editor-body [data-hb-tag="' + h.id + '"]');
+        const archInp = $('#editor-body [data-hb-arch="' + h.id + '"]');
+        const chkInp = $('#editor-body [data-hb-check="' + h.id + '"]');
+        const newTitle = tInp ? tInp.value.trim() : h.title;
+        if (newTitle) h.title = newTitle;
+        if (tagInp) h.tag = tagInp.value.trim() || '作息';
+        if (archInp) h.archived = archInp.checked;
+        if (chkInp && chkInp.checked && !h.archived) nextDone.push(h.id);
+        if (isServerOnline) serverFetch('/habits/' + h.id, 'PATCH', { title: h.title, tag: h.tag, archived: h.archived });
+      });
+      const addTitle = ($('#new-hb-inline-title')?.value || '').trim();
+      const addTag = ($('#new-hb-inline-tag')?.value || '').trim() || '作息';
+      if (addTitle) {
+        const newH = { id: 'hb-' + Date.now(), title: addTitle, tag: addTag, icon: 'bolt', archived: false };
+        state.habits.push(newH);
+        if (isServerOnline) serverFetch('/habits', 'POST', newH);
+      }
+      state.habitLogs[toggleDk] = nextDone;
+      persistLocalOnly();
+      queueOrSendWriteOp({ operationId: nextOpId('hblog'), coalesceKey: 'hblog:' + state.name + ':' + toggleDk, kind: 'habit-log', endpoint: '/habit-logs', method: 'PUT', payload: { person: state.name, date: toggleDk, habitIds: nextDone } });
+      render(true);
+      toast('作息与自律习惯已保存，分布已重算');
+    }, '保存并重算 →');
+    return;
+  }
   if (a === 'stats-shift-day') { statsDayDate = addDaysStr(statsDayDate, Number(v)); render(true); return; }
   if (a === 'stats-shift-period') {
     const delta = Number(v);
     const dt = new Date(statsAnchorDate + 'T12:00:00');
     if (statsPeriod === 'week') dt.setDate(dt.getDate() + delta * 7);
-    else if (statsPeriod === 'month') dt.setMonth(dt.getMonth() + delta);
-    else dt.setFullYear(dt.getFullYear() + delta);
+    else if (statsPeriod === 'month') {
+      const ty = dt.getFullYear(), tm = dt.getMonth() + delta;
+      const lastDay = new Date(ty, tm + 1, 0, 12).getDate();
+      dt.setFullYear(ty, tm, Math.min(dt.getDate(), lastDay));
+    } else dt.setFullYear(dt.getFullYear() + delta);
     statsAnchorDate = dateKey(dt);
+    clearStatsSelections();
     render(true);
     return;
   }
   if (a === 'stats-open-settings') {
     const items = [
       ['summary', '累计总览与当日统计卡'],
+      ['plans', '运动与学习计划像素同步卡'],
       ['yearDots', '年度 12 个月圆点矩阵卡'],
       ['metricBars', '多维度竖柱分析卡组 (里程/时长/频次/配速)'],
       ['monthCurve', '月度丝滑趋势曲线卡'],
@@ -8924,6 +9242,33 @@ if (!embedded && !demo && typeof window !== 'undefined') {
     render(true);
   });
 }
+
+// Keyboard navigation for interactive slim bar charts (ArrowLeft / ArrowRight / Home / End)
+document.addEventListener('keydown', e => {
+  if (!(e.target instanceof Element) || !e.target.matches('.rd-bar-col[data-action="stats-pick-bar"]')) return;
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+  const svg = e.target.closest('svg');
+  if (!svg) return;
+  const cols = [...svg.querySelectorAll('.rd-bar-col[data-action="stats-pick-bar"]')];
+  const idx = cols.indexOf(e.target);
+  if (idx < 0 || !cols.length) return;
+  e.preventDefault();
+  let nextIdx = idx;
+  if (e.key === 'ArrowRight') nextIdx = Math.min(cols.length - 1, idx + 1);
+  else if (e.key === 'ArrowLeft') nextIdx = Math.max(0, idx - 1);
+  else if (e.key === 'Home') nextIdx = 0;
+  else if (e.key === 'End') nextIdx = cols.length - 1;
+  const target = cols[nextIdx];
+  if (target) {
+    const val = target.dataset.value || '';
+    const sep = val.indexOf(':');
+    if (sep > 0) {
+      statsSelectedBars[val.slice(0, sep)] = val.slice(sep + 1);
+      render(true);
+      restoreFocusBySelector('[data-focus-key="bar:' + val.replace(/"/g, '\"') + '"]');
+    }
+  }
+});
 
 // Keyboard navigation for spline chart nodes (ArrowLeft / ArrowRight / Home / End)
 document.addEventListener('keydown', e => {
