@@ -1612,7 +1612,10 @@
   font-variant-numeric: tabular-nums;
   flex-wrap: wrap;
 }
-.rd-spline-node { cursor: pointer; }
+.rd-spline-node { cursor: pointer; outline: none; }
+.rd-spline-focus-ring { opacity: 0; pointer-events: none; transition: opacity 0.14s ease; }
+.rd-spline-node:focus-visible .rd-spline-focus-ring,
+.rd-spline-node:focus .rd-spline-focus-ring { opacity: 1; }
 
 /* Horizontal Rounded Ranking Bars (TomatoToDo App-Time inspired) */
 .rd-hbar-axis {
@@ -1642,10 +1645,13 @@
 }
 .rd-hbar-top {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   justify-content: space-between;
+  gap: 4px 10px;
+  flex-wrap: wrap;
   font-size: 12.5px;
   color: var(--ink-deep);
+  min-width: 0;
 }
 .rd-hbar-name {
   display: inline-flex;
@@ -1653,6 +1659,7 @@
   gap: 6px;
   font-weight: 700;
   min-width: 0;
+  max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1660,26 +1667,31 @@
 .rd-hbar-track {
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 28px;
+  width: 100%;
+  min-height: 20px;
+  background: rgba(38, 38, 36, 0.06);
+  border-radius: 8px;
+  overflow: hidden;
 }
 .rd-hbar-fill {
-  height: 26px;
+  height: 20px;
   border-radius: 8px;
-  min-width: 12px;
+  min-width: 8px;
+  max-width: 100%;
   display: inline-flex;
   align-items: center;
-  padding: 0 8px;
   color: #fff;
   font-size: 11px;
   font-weight: 700;
   transition: width 0.3s cubic-bezier(.22,1,.36,1);
 }
 .rd-hbar-val {
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 700;
   color: var(--ink);
   white-space: nowrap;
+  flex-shrink: 0;
+  margin-left: auto;
   font-variant-numeric: tabular-nums;
 }
 

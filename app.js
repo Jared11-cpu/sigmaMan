@@ -1505,8 +1505,9 @@ function smoothSplinePath(pts) {
   for (let i = 0; i < n - 1; i++) {
     const p0 = pts[i], p1 = pts[i + 1];
     const h = dx[i] / 3;
-    const c1x = p0.x + h, c1y = p0.y + tangents[i] * h;
-    const c2x = p1.x - h, c2y = p1.y - tangents[i + 1] * h;
+    const yLo = Math.min(p0.y, p1.y), yHi = Math.max(p0.y, p1.y);
+    const c1x = p0.x + h, c1y = Math.max(yLo, Math.min(yHi, p0.y + tangents[i] * h));
+    const c2x = p1.x - h, c2y = Math.max(yLo, Math.min(yHi, p1.y - tangents[i + 1] * h));
     d += ' C' + c1x.toFixed(1) + ',' + c1y.toFixed(1)
       + ' ' + c2x.toFixed(1) + ',' + c2y.toFixed(1)
       + ' ' + p1.x.toFixed(1) + ',' + p1.y.toFixed(1);
@@ -2876,7 +2877,8 @@ function renderSlimBarChartSvg(buckets, color, unitLabel, formatVal) {
 function renderSmoothSplineCardSvg(points, color, gradId, formatY) {
   const W = 440, H = 164, padL = 38, padR = 14, padT = 16, padB = 26;
   const plotW = W - padL - padR, plotH = H - padT - padB;
-  const rawMax = Math.max(0, ...points.map(p => p.val));
+  const safePoints = Array.isArray(points) ? points : [];
+  const rawMax = Math.max(0, ...safePoints.map(p => Number(p.val) || 0));
   const niceMax = rawMax <= 0 ? 10 : Math.ceil(rawMax * 1.18 * 10) / 10;
   const ticks = [0, niceMax / 2, niceMax];
   const gridSvg = ticks.map(tv => {
@@ -2885,16 +2887,31 @@ function renderSmoothSplineCardSvg(points, color, gradId, formatY) {
       + '<text class="rd-axis-txt" x="' + (padL - 6) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' + esc(formatY(tv)) + '</text>';
   }).join('');
 
-  const n = Math.max(1, points.length);
-  const coords = points.map((p, i) => ({
-    ...p,
-    x: n === 1 ? (padL + plotW / 2) : (padL + (i / (n - 1)) * plotW),
-    y: padT + plotH - (p.val / niceMax) * plotH
-  }));
+  if (!safePoints.length) {
+    return '<svg class="rd-svg-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="暂无趋势数据">'
+      + gridSvg
+      + '<text class="rd-axis-txt" x="' + (padL + plotW / 2).toFixed(1) + '" y="' + (padT + plotH / 2).toFixed(1) + '" text-anchor="middle">暂无趋势数据</text>'
+      + '</svg>';
+  }
 
-  const d = smoothSplinePath(coords);
+  const n = safePoints.length;
+  const coords = safePoints.map((p, i) => {
+    const val = Math.max(0, Number(p.val) || 0);
+    return {
+      ...p,
+      val,
+      x: n === 1 ? (padL + plotW / 2) : (padL + (i / (n - 1)) * plotW),
+      y: padT + plotH - (val / niceMax) * plotH
+    };
+  });
+
+  const d = coords.length > 1 ? smoothSplinePath(coords) : '';
   const area = coords.length > 1
     ? d + ' L' + coords.at(-1).x.toFixed(1) + ',' + (padT + plotH) + ' L' + coords[0].x.toFixed(1) + ',' + (padT + plotH) + ' Z'
+    : '';
+  const singleGuide = coords.length === 1
+    ? '<line x1="' + coords[0].x.toFixed(1) + '" y1="' + coords[0].y.toFixed(1) + '" x2="' + coords[0].x.toFixed(1) + '" y2="' + (padT + plotH).toFixed(1) + '" stroke="' + color + '" stroke-width="1.5" stroke-dasharray="3 3" opacity=".45"/>'
+      + '<circle cx="' + coords[0].x.toFixed(1) + '" cy="' + coords[0].y.toFixed(1) + '" r="10" fill="' + color + '" fill-opacity=".14"/>'
     : '';
   const defs = '<defs><linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1">'
     + '<stop offset="0%" stop-color="' + color + '" stop-opacity=".26"/>'
@@ -2905,16 +2922,17 @@ function renderSmoothSplineCardSvg(points, color, gradId, formatY) {
     const isSel = statsSelectedNode === p.key;
     const showLbl = n <= 12 || i === 0 || i === n - 1 || i % Math.ceil(n / 6) === 0 || isSel;
     const showDot = p.val > 0 || isSel || n <= 14;
-    return '<g class="rd-spline-node" data-action="stats-pick-node" data-value="' + esc(p.key) + '">'
+    return '<g class="rd-spline-node' + (isSel ? ' is-selected' : '') + '" data-action="stats-pick-node" data-value="' + esc(p.key) + '" data-focus-key="spline:' + esc(p.key) + '" tabindex="0" role="button" aria-pressed="' + isSel + '" aria-label="' + esc(p.tip) + '">'
       + '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="10" fill="transparent"><title>' + esc(p.tip) + '</title></circle>'
+      + '<circle class="rd-spline-focus-ring" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="9.5" fill="none" stroke="#1a1a18" stroke-width="2" stroke-dasharray="2 2"/>'
       + (isSel ? '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="8" fill="' + color + '" fill-opacity=".18" stroke="' + color + '" stroke-width="1.4"/>' : '')
-      + (showDot ? '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="' + (isSel ? 4.6 : 3.2) + '" fill="' + color + '" stroke="#ffffff" stroke-width="1.8"/>' : '')
+      + (showDot ? '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="' + (isSel || n === 1 ? 4.6 : 3.2) + '" fill="' + color + '" stroke="#ffffff" stroke-width="1.8"/>' : '')
       + (showLbl ? '<text class="rd-axis-txt" x="' + p.x.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(p.label) + '</text>' : '')
       + '</g>';
   }).join('');
 
-  return '<svg class="rd-svg-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img">'
-    + defs + gridSvg
+  return '<svg class="rd-svg-chart" viewBox="0 0 ' + W + ' ' + H + '" role="group" aria-label="趋势曲线节点，支持方向键与回车选择">'
+    + defs + gridSvg + singleGuide
     + (area ? '<path d="' + area + '" fill="url(#' + gradId + ')"/>' : '')
     + (d ? '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>' : '')
     + nodesSvg
@@ -3196,7 +3214,7 @@ function progress() {
       + '<button type="button" data-action="stats-shift-period" data-value="1">›</button>'
       + '</div></div>'
       + renderSmoothSplineCardSvg(pts, col, 'rd-mo-grad', unitFn)
-      + '<div class="rd-spline-readout"><span>' + esc(activePt ? activePt.tip : '点击曲线圆点查看单日详情') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看明细 →</button></div>'
+      + '<div class="rd-spline-readout" role="status" aria-live="polite"><span>' + esc(activePt ? activePt.tip : '点击曲线圆点查看单日详情') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看明细 →</button></div>'
       + '</article>';
   })() : '';
 
@@ -3249,8 +3267,8 @@ function progress() {
       + (rows.length ? rows.map(r => {
         const pct = Math.max(6, Math.round((r.val / maxV) * 100));
         return '<div class="rd-hbar-row">'
-          + '<div class="rd-hbar-top"><span class="rd-hbar-name"><i class="rd-dot" style="background:' + r.color + '"></i>' + esc(r.name) + '</span></div>'
-          + '<div class="rd-hbar-track"><div class="rd-hbar-fill" style="width:' + pct + '%;background:' + r.color + '"></div><span class="rd-hbar-val">' + esc(r.display) + '</span></div>'
+          + '<div class="rd-hbar-top"><span class="rd-hbar-name"><i class="rd-dot" style="background:' + r.color + '"></i>' + esc(r.name) + '</span><span class="rd-hbar-val">' + esc(r.display) + '</span></div>'
+          + '<div class="rd-hbar-track"><div class="rd-hbar-fill" style="width:' + pct + '%;background:' + r.color + '"></div></div>'
           + '</div>';
       }).join('') : '<div class="rd-empty-box">当前周期暂无排行数据</div>')
       + '</div></article>';
@@ -3312,7 +3330,7 @@ function progress() {
     return '<article class="rd-card rd-stat-card is-wide">'
       + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>年度丝滑趋势曲线</h3><small>' + yr + ' 年 1–12 月</small></div></div>'
       + renderSmoothSplineCardSvg(pts, '#0ea5a4', 'rd-yr-grad', v => statsTab === 'sport' ? (v.toFixed(0) + 'k') : statsTab === 'study' ? (v.toFixed(0) + 'h') : String(Math.round(v)))
-      + '<div class="rd-spline-readout"><span>' + esc(activePt ? activePt.tip : '点击月份节点查看汇总') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看 ' + yr + ' 年全部记录 →</button></div>'
+      + '<div class="rd-spline-readout" role="status" aria-live="polite"><span>' + esc(activePt ? activePt.tip : '点击月份节点查看汇总') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看 ' + yr + ' 年全部记录 →</button></div>'
       + '</article>';
   })() : '';
 
@@ -5255,7 +5273,13 @@ document.addEventListener('click', async e => {
   // Statistics actions
   if (a === 'stats-tab') { statsTab = v; render(true); return; }
   if (a === 'stats-period') { statsPeriod = v; render(true); return; }
-  if (a === 'stats-pick-node') { statsSelectedNode = v; render(true); return; }
+  if (a === 'stats-pick-node') {
+    const keepFocus = document.activeElement && document.activeElement.closest('.rd-spline-node');
+    statsSelectedNode = v;
+    render(true);
+    if (keepFocus) restoreFocusBySelector('[data-focus-key="spline:' + v.replace(/"/g, '\"') + '"]');
+    return;
+  }
   if (a === 'stats-shift-day') { statsDayDate = addDaysStr(statsDayDate, Number(v)); render(true); return; }
   if (a === 'stats-shift-period') {
     const delta = Number(v);
@@ -8900,6 +8924,30 @@ if (!embedded && !demo && typeof window !== 'undefined') {
     render(true);
   });
 }
+
+// Keyboard navigation for spline chart nodes (ArrowLeft / ArrowRight / Home / End)
+document.addEventListener('keydown', e => {
+  if (!(e.target instanceof Element) || !e.target.matches('.rd-spline-node[data-action="stats-pick-node"]')) return;
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key)) return;
+  const svg = e.target.closest('svg');
+  if (!svg) return;
+  const nodes = [...svg.querySelectorAll('.rd-spline-node[data-action="stats-pick-node"]')];
+  const idx = nodes.indexOf(e.target);
+  if (idx < 0 || !nodes.length) return;
+  e.preventDefault();
+  let nextIdx = idx;
+  if (e.key === 'ArrowRight') nextIdx = Math.min(nodes.length - 1, idx + 1);
+  else if (e.key === 'ArrowLeft') nextIdx = Math.max(0, idx - 1);
+  else if (e.key === 'Home') nextIdx = 0;
+  else if (e.key === 'End') nextIdx = nodes.length - 1;
+  const target = nodes[nextIdx];
+  if (target) {
+    const val = target.dataset.value || '';
+    statsSelectedNode = val;
+    render(true);
+    restoreFocusBySelector('[data-focus-key="spline:' + val.replace(/"/g, '\"') + '"]');
+  }
+});
 
 // Calendar select/search, drag-and-drop scheduling & responsive nav sync
 document.addEventListener('change', e => {
