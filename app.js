@@ -190,6 +190,7 @@ let recordRangeFilter = '7d'; // '7d' | '30d' | 'all'
 let recordTrendMode = 'daily'; // 'daily' | 'cum'
 let recordSelectedDate = ''; // '' (full interval) | 'YYYY-MM-DD'
 let recordsMoreOpen = false;
+let activeFilterSheet = ''; // '' | 'rec-range' | 'rec-kind' | 'rec-more' | 'rank-period' | 'rank-metric'
 let recordsMoreChartType = '28天热力'; // '28天热力' | '黄金时段' | '强度分布' | '状态感觉'
 let externalFilterNotice = '';
 let lastReceiptFocusSelector = '';
@@ -1506,9 +1507,9 @@ function morePage() {
     achievements: '勋章墙与连续里程碑',
     people: '今日自律 ' + hb.done + '/' + hb.total + ' · COMBO ×' + ds
   };
-  const rows = MORE_ITEMS.map(item => {
+  const rows = MORE_ITEMS.map((item, idx) => {
     const summary = metaMap[item.id] || item.sub;
-    return '<li class="ck-more-item"><button type="button" class="ck-more-row" data-view="' + item.id + '" aria-label="打开' + item.label + '页，' + esc(summary) + '">'
+    return '<li class="ck-more-item" style="--ck-i:' + idx + '"><button type="button" class="ck-more-row" data-view="' + item.id + '" aria-label="打开' + item.label + '页，' + esc(summary) + '">'
       + '<span class="ck-more-ico-wrap" aria-hidden="true">' + icon(item.icon, 'ck-more-ico') + '</span>'
       + '<span class="ck-more-text"><strong>' + item.label + '</strong><small>' + esc(summary) + '</small></span>'
       + '<span class="ck-more-chevron" aria-hidden="true">›</span>'
@@ -1537,13 +1538,14 @@ function home() {
   const solo = board.length === 1;
 
   return '<div class="home ck-home">'
-    + homeTodayPanel() + quoteMarkup()
-    + '<section class="home-metrics home-metrics-4" aria-label="运动学习自律与核心进度">'
+    + quoteMarkup()
+    + '<section class="home-metrics home-metrics-4 ck-home-metrics" aria-label="运动学习自律与核心进度">'
     + '<button class="metric-tile" data-action="go-view" data-value="plan"><div class="metric-top"><small>本月运动 / RUN</small><em class="metric-rank">' + (solo ? ('目标 ' + sPct + '%') : ('#' + mySportRank + (mySportRank === 1 ? ' 领跑' : ' 差' + sportLeadDelta + 'k'))) + '</em></div><strong>' + mt.toFixed(1) + '<em> KM</em></strong>' + PixelProgressBar.renderHtml({ progress: sPct, height: 12, width: '100%', bare: true, variant: 'orange', className: 'metric-ppb', ariaLabel: '本月运动目标进度' }) + '</button>'
     + '<button class="metric-tile" data-action="go-view" data-value="study"><div class="metric-top"><small>本月学习 / STUDY</small><em class="metric-rank is-blue">' + (solo ? ('目标 ' + stPct + '%') : ('#' + myStudyRank + (myStudyRank === 1 ? ' 领跑' : ' 差' + studyLeadDelta + 'h'))) + '</em></div><strong>' + stH.toFixed(1) + '<em> H</em></strong>' + PixelProgressBar.renderHtml({ progress: stPct, height: 12, width: '100%', bare: true, variant: 'blue', className: 'metric-ppb', ariaLabel: '本月学习目标进度' }) + '</button>'
     + (() => { const ds = dualStreak(); const ct = comboTier(ds); const nextGoal = ct.nextAt || 30; const cPct = ct.nextAt ? Math.min(100, Math.round(ds / nextGoal * 100)) : 100; return '<button class="metric-tile is-combo-tile tier-' + ct.tier + '" data-action="go-view" data-value="people"><div class="metric-top"><small>COMBO 连击 / STREAK</small><em class="metric-rank is-gold">' + ct.code + ' · ' + hb.done + '/' + hb.total + '</em></div><strong>COMBO ×' + ds + '</strong>' + PixelProgressBar.renderHtml({ progress: cPct, height: 12, width: '100%', bare: true, variant: 'gold', className: 'metric-ppb', ariaLabel: 'COMBO 连击进度' }) + '</button>'; })()
     + '<button class="metric-tile" data-action="go-view" data-value="progress"><div class="metric-top"><small>' + (solo ? '综合积分 / SCORE' : '多人竞技 / PK榜') + '</small><em class="metric-rank is-ink">' + (solo ? '单人基准' : (board.length + '人同榜')) + '</em></div><strong>' + (solo ? (myRow.score + '<em> 分</em>') : ('第' + myRank + '<em>名 · ' + myRow.score + '分</em>')) + '</strong>' + PixelProgressBar.renderHtml({ progress: solo ? Math.max(sPct, stPct) : Math.round(myRow.score / Math.max(1, board[0]?.score || 1) * 100), height: 12, width: '100%', bare: true, variant: 'ink', className: 'metric-ppb', ariaLabel: '综合竞技进度' }) + '</button>'
     + '</section>'
+    + homeTodayPanel()
     + '</div>';
 }
 
@@ -2019,7 +2021,7 @@ function lineChart(type) {
     const allLMonth = [...monthly(mineStudy())].sort((a, b) => (a.date + a.time).localeCompare(b.date + a.time));
     const sRecs = allSMonth.filter(r => r.date >= minStr && r.date <= maxStr);
     const lRecs = allLMonth.filter(r => r.date >= minStr && r.date <= maxStr);
-    if (!allSMonth.length && !allLMonth.length) return '<div class="empty">暂无本月曲线数据，完成第一次运动或学习打卡后自动生成。</div>';
+    if (!allSMonth.length && !allLMonth.length) return '<div class="empty ck-empty-state" role="status"><p><strong>暂无本月曲线数据</strong><span>完成第一次运动或学习打卡后自动生成。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记运动</button><button type="button" class="ck-empty-cta is-study" data-action="checkin" data-mode="study">记学习</button></div></div>';
     const maxPct = 100;
     let sSum = total(allSMonth.filter(r => r.date < minStr));
     const sPts = sRecs.map((r, i) => {
@@ -2069,7 +2071,7 @@ function lineChart(type) {
     const { minStr, maxStr, mapX, ticks } = fixed28DateScale(58, 486);
     const allMonthly = monthly(state.records).filter(r => visibleMembers.includes(r.person));
     const inWindow = allMonthly.filter(r => r.date >= minStr && r.date <= maxStr);
-    if (!allMonthly.length) return '<div class="empty">暂无本月运动曲线数据，完成第一次跑步打卡后自动生成。</div>';
+    if (!allMonthly.length) return '<div class="empty ck-empty-state" role="status"><p><strong>暂无本月运动曲线数据</strong><span>完成第一次跑步打卡后自动生成。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记一次运动</button></div></div>';
     const isSingle = chartScaleMode === 'single';
     const rawMax = isSingle
       ? Math.max(10, ...allMonthly.map(r => r.km))
@@ -2118,7 +2120,7 @@ function lineChart(type) {
     const { minStr, maxStr, mapX, ticks } = fixed28DateScale(58, 486);
     const allMonthly = monthly(state.studyRecords).filter(r => visibleMembers.includes(r.person));
     const inWindow = allMonthly.filter(r => r.date >= minStr && r.date <= maxStr);
-    if (!allMonthly.length) return '<div class="empty">暂无本月学习曲线数据，完成第一次学习打卡后自动生成。</div>';
+    if (!allMonthly.length) return '<div class="empty ck-empty-state" role="status"><p><strong>暂无本月学习曲线数据</strong><span>完成第一次学习打卡后自动生成。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-study" data-action="checkin" data-mode="study">记一次学习</button></div></div>';
     const isSingle = chartScaleMode === 'single';
     const rawMax = isSingle
       ? Math.max(2, ...allMonthly.map(r => studyHoursOf(r)))
@@ -2164,7 +2166,7 @@ function lineChart(type) {
   if (mode === 'score-comp') {
     const { minStr, maxStr, mapX, ticks } = fixed28DateScale(58, 486);
     const unified = allUnifiedRecords('all', false).filter(r => r.date >= minStr && r.date <= maxStr && r.date.slice(0, 7) === today().slice(0, 7) && visibleMembers.includes(r.person));
-    if (!unified.length) return '<div class="empty">暂无近28天综合积分曲线数据。</div>';
+    if (!unified.length) return '<div class="empty ck-empty-state" role="status"><p><strong>暂无近 28 天综合积分曲线数据</strong><span>记录一次运动或学习即可生成趋势。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记一次</button></div></div>';
     const board = teamLeaderboard('本月', '综合积分');
     let maxScore = 100;
     const rawSeries = visibleMembers.map(m => {
@@ -2211,7 +2213,7 @@ function lineChart(type) {
   if (mode === 'study-focus') {
     const { minStr, maxStr, mapX, ticks } = fixed28DateScale(58, 486);
     const recs = state.studyRecords.filter(r => r.date >= minStr && r.date <= maxStr && visibleMembers.includes(r.person)).sort((a, b) => (a.date + a.time).localeCompare(b.date + a.time));
-    if (!recs.length) return '<div class="empty">暂无近28天学习时长趋势数据。</div>';
+    if (!recs.length) return '<div class="empty ck-empty-state" role="status"><p><strong>暂无近 28 天学习时长趋势数据</strong><span>记一次学习即可点亮专注趋势。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-study" data-action="checkin" data-mode="study">记学习</button></div></div>';
     const { niceMax, ticks: yTicks } = niceUpperAndTicks(Math.max(3, ...recs.map(r => studyHoursOf(r))) * 1.12, 'h', 4);
     seriesList = visibleMembers.map(m => {
       const mRecs = recs.filter(r => r.person === m);
@@ -2239,7 +2241,7 @@ function lineChart(type) {
 
   const { minStr, maxStr, mapX, ticks } = fixed28DateScale(58, 486);
   const recs = state.records.filter(r => r.date >= minStr && r.date <= maxStr && visibleMembers.includes(r.person)).sort((a, b) => (a.date + a.time).localeCompare(b.date + a.time));
-  if (!recs.length) return '<div class="empty">暂无近28天配速趋势数据。</div>';
+  if (!recs.length) return '<div class="empty ck-empty-state" role="status"><p><strong>暂无近 28 天配速趋势数据</strong><span>记一次跑步即可生成配速曲线。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记运动</button></div></div>';
   const paces = recs.map(paceSeconds);
   const minSec = Math.max(180, Math.floor(Math.min(...paces) / 30) * 30 - 30);
   const maxSec = Math.max(minSec + 120, Math.ceil(Math.max(...paces) / 30) * 30 + 30);
@@ -2728,17 +2730,47 @@ function ranking() {
   const bestPace = myRuns.length ? (formatPaceSec(Math.min(...myRuns.map(paceSeconds))) + ' /km') : '—';
 
   const soloRank = rows.length === 1;
+  const isRankFiltered = rankPeriod !== '本月' || rankMetric !== '综合积分';
+  const rankPeriodOpen = activeFilterSheet === 'rank-period';
+  const rankMetricOpen = activeFilterSheet === 'rank-metric';
+  const rankPeriods = ['今天', '本周', '本月', '总榜'];
+  const rankMetrics = ['综合积分', '按公里', '按学习', '按天数', '按人气'];
+  const rankMetricIcons = { '综合积分': 'trophy', '按公里': 'shoe', '按学习': 'book', '按天数': 'calendar', '按人气': 'heart' };
+  const rankDrawerHtml = rankPeriodOpen
+    ? '<div class="ck-filter-drawer" id="ck-rank-drawer" role="group" aria-label="选择榜单周期">'
+      + rankPeriods.map(p => '<button type="button" class="ck-chip ' + (rankPeriod === p ? 'active' : '') + '" aria-pressed="' + (rankPeriod === p) + '" data-action="rank-period" data-value="' + p + '">' + p + '</button>').join('')
+      + '</div>'
+    : rankMetricOpen
+      ? '<div class="ck-filter-drawer" id="ck-rank-drawer" role="group" aria-label="选择榜单维度">'
+        + rankMetrics.map(m => '<button type="button" class="ck-chip ' + (rankMetric === m ? 'active' : '') + '" aria-pressed="' + (rankMetric === m) + '" data-action="rank-metric" data-value="' + m + '">' + icon(rankMetricIcons[m], 'ck-chip-ico') + '<span>' + m + '</span></button>').join('')
+        + '</div>'
+      : '';
+  const allRankZero = !rows.length || rows.every(r => !valOf(r));
+  const rankEmptyHtml = allRankZero
+    ? '<div class="empty ck-empty-state" role="status"><p><strong>' + esc(rankPeriod) + '还没有上榜记录</strong><span>记录一次运动或学习即可刷新榜单排名。</span></p><div class="ck-empty-actions">'
+      + '<button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记一次</button>'
+      + (isRankFiltered ? '<button type="button" class="ck-empty-cta is-subtle" data-action="reset-rank-filter">重置筛选</button>' : '')
+      + (soloRank ? '<button type="button" class="ck-empty-cta is-subtle" data-action="add-person">＋ 添加伙伴</button>' : '')
+      + '</div></div>'
+    : '';
   return '<div class="rank-layout"><div class="rank-left">'
     + '<section class="poster-hero poster-storm poster-compact" data-wm="' + (soloRank ? 'SOLO' : '#1') + '">'
     + '<div class="poster-meta"><span>' + (soloRank ? '个人榜单' : 'PK 榜单') + ' · ' + rankPeriod + '</span><span>' + rankMetric + '</span></div>'
     + '<div class="rank-hero-main"><div><span class="rank-crown-tag">' + icon('crown') + ' ' + (soloRank ? '当前记录' : '榜首') + '</span><h2>' + esc(top?.name || state.name) + '</h2></div><div class="rank-hero-score">' + topVal + '</div></div>'
     + '</section>'
-    + '<section class="rank-filters" aria-label="榜单筛选">'
-    + '<div class="filter-row"><span class="filter-label">' + icon('calendar') + ' 周期</span>' + subtabs(['今天', '本周', '本月', '总榜'], rankPeriod, 'rank-period', 'equal') + '</div>'
-    + '<div class="rank-period-meta" aria-label="统计周期与时区"><span>统计周期：<strong>' + esc(rankPeriod) + '</strong> · ' + esc(periodInfo.text) + '（北京时间）</span></div>'
-    + '<div class="filter-row"><span class="filter-label">' + icon('bolt') + ' 维度</span>' + subtabs(['综合积分', '按公里', '按学习', '按天数', '按人气'], rankMetric, 'rank-metric', 'equal', { '综合积分': 'trophy', '按公里': 'shoe', '按学习': 'book', '按天数': 'calendar', '按人气': 'heart' }) + '</div>'
-    + (rankMetric === '综合积分' ? '<p class="rank-bonus-note">综合积分含近 7 天自律达成率加分（自律率 × 0.5，不随所选周期变化）。</p>' : '')
+    + '<section class="rank-filters ck-filter-panel ck-rank-filters" id="rank-shared-filters" aria-label="榜单筛选">'
+    + '<div class="ck-filter-bar" role="toolbar" aria-label="榜单筛选胶囊">'
+    + '<button type="button" class="ck-pill' + (rankPeriod !== '本月' ? ' is-active' : '') + (rankPeriodOpen ? ' is-open' : '') + '" data-action="toggle-filter-sheet" data-value="rank-period" aria-expanded="' + rankPeriodOpen + '" aria-controls="ck-rank-drawer" aria-label="筛选周期，当前 ' + esc(rankPeriod) + '"><span>周期：' + esc(rankPeriod) + '</span><span class="ck-pill-caret" aria-hidden="true">▾</span></button>'
+    + '<button type="button" class="ck-pill' + (rankMetric !== '综合积分' ? ' is-active' : '') + (rankMetricOpen ? ' is-open' : '') + '" data-action="toggle-filter-sheet" data-value="rank-metric" aria-expanded="' + rankMetricOpen + '" aria-controls="ck-rank-drawer" aria-label="筛选维度，当前 ' + esc(rankMetric) + '"><span>维度：' + esc(rankMetric) + '</span><span class="ck-pill-caret" aria-hidden="true">▾</span></button>'
+    + (isRankFiltered ? '<button type="button" class="ck-pill ck-pill-reset" data-action="reset-rank-filter" aria-label="重置榜单筛选为本月与综合积分">↺ 重置</button>' : '')
+    + '</div>'
+    + rankDrawerHtml
+    + '<div class="ck-rank-meta" aria-label="统计周期与积分说明">'
+    + '<span class="ck-rank-meta-text">' + esc(rankPeriod) + ' · ' + esc(periodInfo.text) + '（北京时间）</span>'
+    + (rankMetric === '综合积分' ? '<details class="ck-rank-tip"><summary>积分说明</summary><p>综合积分含近 7 天自律达成率加分（自律率 × 0.5，不随所选周期变化）。</p></details>' : '')
+    + '</div>'
     + '</section>'
+    + rankEmptyHtml
     + rows.map((r, i) => {
       const clr = memberColor(r.name);
       const val = valOf(r), barPct = val ? Math.max(8, Math.round(val / maxVal * 100)) : 0;
@@ -2828,7 +2860,7 @@ function achievements() {
         + '</span>'
         + '<span class="medal-back">' + icon(m[0], 'medal-back-ico') + '<strong>' + m[3] + '</strong><p>' + m[4] + '</p><small>' + curVal + ' / ' + m[6] + ' ' + m[7] + '</small></span>'
         + '</span></button>';
-    }).join('') : '<div class="empty">当前筛选下暂无勋章。</div>') + '</div></div>';
+    }).join('') : '<div class="empty ck-empty-state" role="status"><p><strong>当前筛选下暂无勋章</strong><span>切换查看全部勋章，或去打卡解锁新里程碑。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-subtle" data-action="ach-filter" data-value="全部">查看全部勋章</button><button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记一次</button></div></div>') + '</div></div>';
 }
 
 /* ---------- View 7: Records & Interactive Blueprint Charts ---------- */
@@ -3237,7 +3269,7 @@ function dataChart() {
 }
 
 function buildReceiptCardMarkup(r, seqIndex, totalInList) {
-  if (!r) return '<div class="empty">当前筛选下还没有打卡记录。</div>';
+  if (!r) return '<div class="empty ck-empty-state" role="status"><p><strong>当前筛选下还没有打卡记录</strong><span>可以立即记一次，或重置筛选查看全部记录。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记一次</button><button type="button" class="ck-empty-cta is-subtle" data-action="reset-filter-default">重置筛选</button></div></div>';
   const recPendingOp = r.operationId ? roomPendingOps().find(x => x.operationId === r.operationId) : null;
   const recNeedsRetry = Boolean(recPendingOp);
   const recRetryBtn = recNeedsRetry
@@ -3429,30 +3461,45 @@ function recordsPage() {
     ? '<div class="external-filter-notice" role="status" aria-live="polite"><span>' + icon('spark') + ' ' + esc(externalFilterNotice) + '</span><button type="button" class="btn-xs" data-action="reset-filter-default">恢复默认筛选</button></div>'
     : '';
 
-  const filterPanelHtml = '<section class="records-filter-panel" id="records-shared-filters" aria-label="记录筛选">'
+  const isRecordsFiltered = recordRangeFilter !== '7d' || recordKindFilter !== 'all' || recordPersonFilter !== 'mine' || !!recordSelectedDate;
+  const moreFilterCount = (recordPersonFilter !== 'mine' ? 1 : 0) + (recordSelectedDate ? 1 : 0);
+  const recRangeOpen = activeFilterSheet === 'rec-range';
+  const recKindOpen = activeFilterSheet === 'rec-kind';
+  const recMoreOpen = activeFilterSheet === 'rec-more';
+  const recDrawerHtml = recRangeOpen
+    ? '<div class="ck-filter-drawer" id="ck-records-drawer" role="group" aria-label="选择时间范围">'
+      + '<button type="button" aria-pressed="' + (recordRangeFilter === '7d') + '" class="ck-chip ' + (recordRangeFilter === '7d' ? 'active' : '') + '" data-action="set-record-range" data-value="7d">近 7 天</button>'
+      + '<button type="button" aria-pressed="' + (recordRangeFilter === '30d') + '" class="ck-chip ' + (recordRangeFilter === '30d' ? 'active' : '') + '" data-action="set-record-range" data-value="30d">近 30 天</button>'
+      + '<button type="button" aria-pressed="' + (recordRangeFilter === 'all') + '" class="ck-chip ' + (recordRangeFilter === 'all' ? 'active' : '') + '" data-action="set-record-range" data-value="all">全部历史</button>'
+      + '</div>'
+    : recKindOpen
+      ? '<div class="ck-filter-drawer" id="ck-records-drawer" role="group" aria-label="选择记录类型">'
+        + '<button type="button" aria-pressed="' + (recordKindFilter === 'all') + '" class="ck-chip ' + (recordKindFilter === 'all' ? 'active' : '') + '" data-action="set-record-kind" data-value="all">全部</button>'
+        + '<button type="button" aria-pressed="' + (recordKindFilter === 'sport') + '" class="ck-chip is-sport-chip ' + (recordKindFilter === 'sport' ? 'active' : '') + '" data-action="set-record-kind" data-value="sport">运动</button>'
+        + '<button type="button" aria-pressed="' + (recordKindFilter === 'study') + '" class="ck-chip is-study-chip ' + (recordKindFilter === 'study' ? 'active' : '') + '" data-action="set-record-kind" data-value="study">学习</button>'
+        + '</div>'
+      : recMoreOpen
+        ? '<div class="ck-filter-drawer ck-filter-drawer-more" id="ck-records-drawer" role="group" aria-label="人员与指定日期筛选">'
+          + '<div class="ck-drawer-row"><span class="ck-drawer-label">人员</span><div class="ck-drawer-chips" role="group" aria-label="按人员筛选">'
+          + '<button type="button" aria-pressed="' + (recordPersonFilter === 'mine') + '" class="ck-chip ' + (recordPersonFilter === 'mine' ? 'active' : '') + '" data-action="set-record-person" data-value="mine">我</button>'
+          + '<button type="button" aria-pressed="' + (recordPersonFilter === 'all') + '" class="ck-chip ' + (recordPersonFilter === 'all' ? 'active' : '') + '" data-action="set-record-person" data-value="all">全员</button>'
+          + '</div></div>'
+          + '<div class="ck-drawer-row"><label class="ck-drawer-label" for="records-date-jump">指定日期</label><div class="ck-drawer-date">'
+          + '<input type="date" id="records-date-jump" name="record-date" class="records-date-input ck-date-input" value="' + esc(recordSelectedDate) + '" max="' + todayDk + '" autocomplete="off">'
+          + (recordSelectedDate ? '<button type="button" class="btn-back-range ck-clear-date" data-action="clear-date-filter">清除日期</button>' : '')
+          + '</div></div>'
+          + '</div>'
+        : '';
+
+  const filterPanelHtml = '<section class="records-filter-panel ck-filter-panel ck-records-filters" id="records-shared-filters" aria-label="记录筛选">'
     + externalNoticeHtml
-    + '<div class="filter-row">'
-    + '<div class="filter-group"><span class="filter-label">类型</span><div class="mini-subtabs" role="group" aria-label="按类型筛选">'
-    + '<button type="button" aria-pressed="' + (recordKindFilter === 'all') + '" class="subtab ' + (recordKindFilter === 'all' ? 'active' : '') + '" data-action="set-record-kind" data-value="all">全部</button>'
-    + '<button type="button" aria-pressed="' + (recordKindFilter === 'sport') + '" class="subtab is-sport-tab ' + (recordKindFilter === 'sport' ? 'active' : '') + '" data-action="set-record-kind" data-value="sport">运动</button>'
-    + '<button type="button" aria-pressed="' + (recordKindFilter === 'study') + '" class="subtab is-study-tab ' + (recordKindFilter === 'study' ? 'active' : '') + '" data-action="set-record-kind" data-value="study">学习</button>'
-    + '</div></div>'
-    + '<div class="filter-group"><span class="filter-label">人员</span><div class="mini-subtabs" role="group" aria-label="按人员筛选">'
-    + '<button type="button" aria-pressed="' + (recordPersonFilter === 'mine') + '" class="subtab ' + (recordPersonFilter === 'mine' ? 'active' : '') + '" data-action="set-record-person" data-value="mine">我</button>'
-    + '<button type="button" aria-pressed="' + (recordPersonFilter === 'all') + '" class="subtab ' + (recordPersonFilter === 'all' ? 'active' : '') + '" data-action="set-record-person" data-value="all">全员</button>'
-    + '</div></div>'
+    + '<div class="ck-filter-bar" role="toolbar" aria-label="记录筛选胶囊">'
+    + '<button type="button" class="ck-pill' + (recordRangeFilter !== '7d' ? ' is-active' : '') + (recRangeOpen ? ' is-open' : '') + '" data-action="toggle-filter-sheet" data-value="rec-range" aria-expanded="' + recRangeOpen + '" aria-controls="ck-records-drawer" aria-label="筛选时间范围，当前 ' + rangeText + '"><span>' + rangeText + '</span><span class="ck-pill-caret" aria-hidden="true">▾</span></button>'
+    + '<button type="button" class="ck-pill' + (recordKindFilter !== 'all' ? ' is-active' : '') + (recKindOpen ? ' is-open' : '') + '" data-action="toggle-filter-sheet" data-value="rec-kind" aria-expanded="' + recKindOpen + '" aria-controls="ck-records-drawer" aria-label="筛选记录类型，当前 ' + kindText + '"><span>类型：' + kindText + '</span><span class="ck-pill-caret" aria-hidden="true">▾</span></button>'
+    + '<button type="button" class="ck-pill' + (moreFilterCount > 0 ? ' is-active' : '') + (recMoreOpen ? ' is-open' : '') + '" data-action="toggle-filter-sheet" data-value="rec-more" aria-expanded="' + recMoreOpen + '" aria-controls="ck-records-drawer" aria-label="更多筛选：人员与指定日期' + (moreFilterCount ? '，已选 ' + moreFilterCount + ' 项' : '') + '"><span>更多筛选' + (moreFilterCount ? ' · ' + moreFilterCount : '') + '</span><span class="ck-pill-caret" aria-hidden="true">▾</span></button>'
+    + (isRecordsFiltered ? '<button type="button" class="ck-pill ck-pill-reset" data-action="reset-filter-default" aria-label="重置所有记录筛选">↺ 重置</button>' : '')
     + '</div>'
-    + '<div class="filter-row">'
-    + '<div class="filter-group"><span class="filter-label">范围</span><div class="mini-subtabs" role="group" aria-label="按时间范围筛选">'
-    + '<button type="button" aria-pressed="' + (recordRangeFilter === '7d') + '" class="subtab ' + (recordRangeFilter === '7d' ? 'active' : '') + '" data-action="set-record-range" data-value="7d">近 7 天</button>'
-    + '<button type="button" aria-pressed="' + (recordRangeFilter === '30d') + '" class="subtab ' + (recordRangeFilter === '30d' ? 'active' : '') + '" data-action="set-record-range" data-value="30d">近 30 天</button>'
-    + (recordRangeFilter === 'all' ? '<button type="button" aria-pressed="true" class="subtab active" data-action="set-record-range" data-value="all">全部历史</button>' : '')
-    + '</div></div>'
-    + '<div class="filter-group filter-date-group"><label class="filter-label" for="records-date-jump">日期</label>'
-    + '<input type="date" id="records-date-jump" name="record-date" class="records-date-input" value="' + esc(recordSelectedDate) + '" max="' + todayDk + '" autocomplete="off">'
-    + (recordSelectedDate ? '<button type="button" class="btn-back-range" data-action="clear-date-filter">清除日期</button>' : '')
-    + '</div>'
-    + '</div>'
+    + recDrawerHtml
     + '</section>';
 
   const chartModeBarHtml = '<div class="records-chart-mode-bar" role="group" aria-label="切换每日柱或累计折线">'
@@ -3486,9 +3533,10 @@ function recordsPage() {
   const isTodayEmpty = recordSelectedDate === todayDk && !anyTodayRecForPerson;
   const emptyWallHtml = isTodayEmpty
     ? '<div class="empty records-empty" role="status"><p><strong>今天还没有记录</strong></p><div class="records-empty-actions"><button type="button" class="today-act-btn is-sport" data-action="checkin" data-mode="sport">记运动</button><button type="button" class="today-act-btn is-study" data-action="checkin" data-mode="study">记学习</button><button type="button" class="btn-back-range" data-action="clear-date-filter">查看' + rangeText + '记录</button></div></div>'
-    : '<div class="empty records-empty" role="status"><p><strong>没有符合筛选条件的记录</strong></p><div class="records-empty-actions">'
-      + (recordSelectedDate ? '<button type="button" class="btn-back-range" data-action="clear-date-filter">清除日期</button>' : '')
-      + '<button type="button" class="btn-back-range" data-action="reset-filter-default">恢复默认筛选</button>'
+    : '<div class="empty records-empty ck-empty-state" role="status"><p><strong>没有符合筛选条件的记录</strong><span>可以立即记一次，或重置筛选查看默认区间。</span></p><div class="records-empty-actions ck-empty-actions">'
+      + '<button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记一次</button>'
+      + (recordSelectedDate ? '<button type="button" class="btn-back-range ck-empty-cta is-subtle" data-action="clear-date-filter">清除日期</button>' : '')
+      + '<button type="button" class="btn-back-range ck-empty-cta is-subtle" data-action="reset-filter-default">恢复默认筛选</button>'
       + '</div></div>';
 
   return filterPanelHtml + '<div class="records-layout"><div class="records-left">'
@@ -3549,7 +3597,7 @@ function people() {
 
   const archivedHabitCount = state.habits.filter(h => h.archived).length;
   const visibleHabits = showArchivedHabits ? state.habits : activeHabits();
-  const habitRows = visibleHabits.map(h => {
+  const habitRows = (visibleHabits.length ? visibleHabits.map(h => {
     const idxAll = state.habits.findIndex(x => x.id === h.id);
     const done = (state.habitLogs[today()] || []).includes(h.id);
     const weekDots = Array.from({ length: 7 }, (_, i) => {
@@ -3572,7 +3620,7 @@ function people() {
       + (state.habits.length > 1 ? '<button class="habit-del" data-action="del-habit" data-value="' + esc(h.id) + '" aria-label="删除自律项">×</button>' : '')
       + '</span>'
       + '</div>';
-  }).join('')
+  }).join('') : '<div class="empty ck-empty-state" role="status"><p><strong>还没有启用中的自律项</strong><span>添加一个每日行动项，开始累积自律连击。</span></p><div class="ck-empty-actions"><button type="button" class="ck-empty-cta is-sport" data-action="add-habit">＋ 添加自律项</button></div></div>')
   + (archivedHabitCount ? '<button type="button" class="archived-toggle" data-action="toggle-archived-habits">' + (showArchivedHabits ? '收起已停用习惯 (' + archivedHabitCount + ')' : '查看已停用习惯 (' + archivedHabitCount + ')') + '</button>' : '');
 
   const myCombo = dualStreak();
@@ -3706,6 +3754,7 @@ applyRecordsHashQuery(typeof location !== 'undefined' ? location.hash : '');
 
 function navigate(v, fromPop = false) {
   if (!VALID_VIEWS.includes(v)) v = 'home';
+  activeFilterSheet = '';
   if (v !== 'records') closeReceiptDialog();
   const prevView = view;
   view = v;
@@ -4112,6 +4161,12 @@ function openRecordEditModal(key) {
 
 /* ---------- Global Event Delegation ---------- */
 document.addEventListener('click', async e => {
+  if (activeFilterSheet && !e.target.closest('.ck-filter-panel')) {
+    const prevSheet = activeFilterSheet;
+    activeFilterSheet = '';
+    if (prevSheet.startsWith('rec-') && view === 'records') updateRecordsPageInPlace();
+    else if (prevSheet.startsWith('rank-') && view === 'ranking') render(true);
+  }
   const navButton = e.target.closest('[data-view]'); if (navButton) {
     if (navButton.dataset.view === 'records' && view !== 'records') {
       recordSelectedDate = '';
@@ -4290,11 +4345,28 @@ document.addEventListener('click', async e => {
   }
   if (a === 'open-record') { openExternalRecord(v, b.dataset.focusKey ? ('[data-focus-key="' + b.dataset.focusKey + '"]') : ''); return; }
 
+  if (a === 'toggle-filter-sheet') {
+    activeFilterSheet = (activeFilterSheet === v) ? '' : v;
+    if (v.startsWith('rec-') && view === 'records') updateRecordsPageInPlace();
+    else render(true);
+    restoreFocusBySelector('[data-action="toggle-filter-sheet"][data-value="' + v + '"]');
+    return;
+  }
   if (a === 'rank-period' || a === 'rank-metric') {
     if (a === 'rank-period') rankPeriod = v;
     else rankMetric = v;
+    activeFilterSheet = '';
     render(true);
-    restoreFocusBySelector('[data-action="' + a + '"][data-value="' + v + '"]');
+    restoreFocusBySelector('[data-action="toggle-filter-sheet"][data-value="' + a + '"]');
+    return;
+  }
+  if (a === 'reset-rank-filter') {
+    rankPeriod = '本月';
+    rankMetric = '综合积分';
+    activeFilterSheet = '';
+    render(true);
+    restoreFocusBySelector('[data-action="toggle-filter-sheet"][data-value="rank-period"]');
+    toast('已恢复默认榜单筛选（本月 · 综合积分）');
     return;
   }
   if (a === 'rank-chart-mode') { rankChartMode = v === '学习专注对比' ? 'study' : 'sport'; selectedNodeKey = ''; render(true); return; }
@@ -4305,8 +4377,9 @@ document.addEventListener('click', async e => {
   if (a === 'record-kind' || a === 'set-record-kind') {
     recordKindFilter = (v === '运动' || v === 'sport') ? 'sport' : (v === '学习' || v === 'study') ? 'study' : 'all';
     selectedChartNote = ''; selectedBucket = null; externalFilterNotice = '';
+    activeFilterSheet = '';
     updateRecordsPageInPlace();
-    restoreFocusBySelector('[data-action="set-record-kind"][data-value="' + recordKindFilter + '"]');
+    restoreFocusBySelector('[data-action="toggle-filter-sheet"][data-value="rec-kind"]');
     return;
   }
   if (a === 'set-record-person') {
@@ -4323,8 +4396,9 @@ document.addEventListener('click', async e => {
       if (recordSelectedDate < rMin) recordSelectedDate = '';
     }
     selectedChartNote = ''; selectedBucket = null; externalFilterNotice = '';
+    activeFilterSheet = '';
     updateRecordsPageInPlace();
-    restoreFocusBySelector('[data-action="set-record-range"][data-value="' + recordRangeFilter + '"]');
+    restoreFocusBySelector('[data-action="toggle-filter-sheet"][data-value="rec-range"]');
     return;
   }
   if (a === 'set-record-trend') {
@@ -4343,14 +4417,15 @@ document.addEventListener('click', async e => {
   if (a === 'clear-date-filter') {
     recordSelectedDate = '';
     updateRecordsPageInPlace();
-    restoreFocusBySelector('#records-date-jump');
+    restoreFocusBySelector(activeFilterSheet === 'rec-more' ? '#records-date-jump' : '[data-action="toggle-filter-sheet"][data-value="rec-more"]');
     return;
   }
   if (a === 'reset-filter-default') {
     recordKindFilter = 'all'; recordPersonFilter = 'mine'; recordRangeFilter = '7d';
     recordTrendMode = 'daily'; recordSelectedDate = ''; externalFilterNotice = '';
+    activeFilterSheet = '';
     render(true);
-    restoreFocusBySelector('[data-action="set-record-kind"][data-value="all"]');
+    restoreFocusBySelector('[data-action="toggle-filter-sheet"][data-value="rec-range"]');
     toast('已恢复默认筛选（我 · 近 7 天 · 每日量）');
     return;
   }
@@ -4817,8 +4892,7 @@ function openCheckin(mode = 'sport', targetId = null, personName = state.name, o
       photoRestoreWarning: false,
       restoredFromDraft: true
     };
-    step = Math.max(0, Math.min(4, Number(saved.step) || 0));
-    step = step === 4 ? 4 : 0;
+    step = 0;
     if (saved.photoInIdb && !draft.photo) {
       const key = draftStorageKey(mode);
       const restoreOpId = draft.operationId;
@@ -4889,6 +4963,15 @@ function readStep() {
   for (const field of $$('.ck-core input, .ck-core select')) {
     if (!field.reportValidity()) return false;
   }
+  const dateField = $('#checkin-date');
+  if (dateField && !dateField.checkValidity()) {
+    const extras = $('#checkin-extras');
+    if (extras && !extras.open) {
+      extras.open = true;
+      if (draft) draft.extrasOpen = true;
+    }
+    if (!dateField.reportValidity()) return false;
+  }
   syncDraftFromDom();
   return true;
 }
@@ -4906,56 +4989,80 @@ function stepMarkup() {
   const draftBanner = draft.restoredFromDraft
     ? '<div class="ck-draft-banner" role="status"><span>已恢复草稿</span><button type="button" class="ck-btn ck-btn-ghost" data-modal="discard-draft">丢弃草稿</button></div>'
     : '';
-  const modeBar = draftBanner + '<div class="modal-mode-switch">'
-    + '<button type="button" class="' + (!isStudy ? 'active' : '') + '" data-modal="switch-mode" data-value="sport">🏃 运动打卡</button>'
-    + '<button type="button" class="' + (isStudy ? 'active' : '') + '" data-modal="switch-mode" data-value="study">📚 学习打卡</button>'
-    + '</div>'
-    + '<div class="modal-person-row"><span>打卡人</span>'
-    + allMembers().map(m => '<button type="button" class="mp-pill ' + (draft.person === m ? 'active' : '') + '" style="--mclr:' + memberColor(m) + '" data-modal="switch-person" data-value="' + esc(m) + '">' + esc(m) + (m === state.name ? ' (我)' : '') + '</button>').join('')
+  const modeBar = draftBanner + '<div class="modal-mode-switch ck-form-type" role="group" aria-label="选择打卡类型">'
+    + '<button type="button" class="' + (!isStudy ? 'active' : '') + '" aria-pressed="' + (!isStudy) + '" data-modal="switch-mode" data-value="sport">🏃 运动打卡</button>'
+    + '<button type="button" class="' + (isStudy ? 'active' : '') + '" aria-pressed="' + isStudy + '" data-modal="switch-mode" data-value="study">📚 学习打卡</button>'
     + '</div>';
 
-  if (step !== 4) {
-    const minutes = isStudy ? studyMinutesOf(draft) : draft.minutes;
-    const levels = isStudy ? studyFocusLevels : feelings;
-    const choices = isStudy ? studyTags : tags;
-    const targets = state.studyTargets.map(target => `<option value="${esc(target.id)}" ${target.id === draft.targetId ? 'selected' : ''}>${esc(target.title)}</option>`).join('');
-    const quickMinutes = [25, 45, 60, 90].map(value => `<button type="button" class="pill ${value === minutes ? 'selected' : ''}" data-modal="minutes-set" data-value="${value}">${value} 分钟</button>`).join('');
-    return modeBar + `<div class="ck-core ${isStudy ? 'ck-study' : 'ck-sport'}">
-      <label>记录日期<input required id="checkin-date" type="date" max="${today()}" value="${esc(draft.date)}"></label>
-      <label>开始时间<input id="start-time" type="time" value="${esc(draft.time)}"></label>
-      ${isStudy ? `<label>学习目标<select id="study-target-select">${targets}</select></label>` : `<label>距离（公里）<input required id="distance-input" type="number" inputmode="decimal" min="0.1" max="300" step="0.01" value="${draft.km}"></label>`}
-      <label>时长（分钟）<input required id="minutes-input" type="number" inputmode="numeric" min="1" max="${isStudy ? 960 : 1440}" step="1" value="${minutes}"></label>
-      ${isStudy ? `<div class="pills">${quickMinutes}</div>` : `<div class="ck-pace">配速 <output id="checkin-pace">${pace(draft)} /km</output></div>`}
-    </div><details id="checkin-extras" ${draft.extrasOpen ? 'open' : ''}><summary>补充记录（体感 / 标签 / 备注 / 照片）</summary>
-      <p>${isStudy ? '专注度' : '运动体感'}</p><div class="feel-options">${levels.map(([icon, label], index) => `<button type="button" class="feel-option ${draft.feel === index ? 'selected' : ''}" data-modal="feel" data-value="${index}" aria-pressed="${draft.feel === index}">${icon} ${label}</button>`).join('')}</div>
-      <div class="pills">${choices.map(tag => `<button type="button" class="pill ${draft.tags.includes(tag) ? 'selected' : ''}" data-modal="tag" data-value="${esc(tag)}">${esc(tag)}</button>`).join('')}</div>
-      <label for="run-note">备注</label><textarea class="note-input" id="run-note" maxlength="200">${esc(draft.note)}</textarea>
-      <input type="file" id="photo-file" accept="image/*" hidden><input type="file" id="camera-file" accept="image/*" capture="environment" hidden>
-      ${draft.photo ? `<img class="ck-photo-preview" src="${esc(draft.photo)}" alt="打卡照片">` : ''}
-      <div class="photo-buttons"><button type="button" data-modal="camera">拍照</button><button type="button" data-modal="album">选择照片</button></div>
-      <p class="hint" role="status">${esc(photoStorageHint(draft))}</p></details>`;
-  }
+  const minutes = isStudy ? studyMinutesOf(draft) : draft.minutes;
+  const levels = isStudy ? studyFocusLevels : feelings;
+  const choices = isStudy ? studyTags : tags;
+  const targets = state.studyTargets.map(target => `<option value="${esc(target.id)}" ${target.id === draft.targetId ? 'selected' : ''}>${esc(target.title)}</option>`).join('');
+  const quickDistances = [3, 5, 10].map(value => `<button type="button" class="pill ${Number(draft.km) === value ? 'selected' : ''}" data-modal="distance-set" data-value="${value}">${value} km</button>`).join('');
+  const quickMinutes = [25, 45, 60, 90].map(value => `<button type="button" class="pill ${value === minutes ? 'selected' : ''}" data-modal="minutes-set" data-value="${value}">${value} 分钟</button>`).join('');
+
+  const filledExtras = [
+    draft.note && draft.note.trim() ? '备注' : '',
+    draft.photo ? '照片' : '',
+    draft.feel !== 3 ? (isStudy ? '专注度' : '体感') : '',
+    draft.tags && draft.tags.length ? '标签' : '',
+    draft.date && draft.date !== today() ? draft.date : '',
+    draft.person && draft.person !== state.name ? draft.person : ''
+  ].filter(Boolean);
+  const moreHintText = filledExtras.length
+    ? ('已填：' + filledExtras.slice(0, 3).join(' · ') + (filledExtras.length > 3 ? ' +' + (filledExtras.length - 3) : ''))
+    : (isStudy ? '备注 · 照片 · 专注度 · 日期' : '备注 · 照片 · 专注度/体感 · 日期');
+  const members = allMembers();
+  const personRowHtml = members.length > 1
+    ? '<div class="modal-person-row ck-more-person-row"><span>打卡人</span>'
+      + members.map(m => '<button type="button" class="mp-pill ' + (draft.person === m ? 'active' : '') + '" style="--mclr:' + memberColor(m) + '" data-modal="switch-person" data-value="' + esc(m) + '">' + esc(m) + (m === state.name ? ' (我)' : '') + '</button>').join('')
+      + '</div>'
+    : '';
+
   const syncBanner = draft.saveState === 'local-failed'
     ? '<div class="ck-sync-status is-failed" role="alert"><div><strong>本机保存失败</strong>：浏览器存储不可用或空间不足，已保留全部输入与操作编号（<code>' + esc(draft.operationId) + '</code>）。释放空间后可重试保存。</div></div>'
     : draft.saveState === 'failed'
-    ? '<div class="ck-sync-status is-failed ck-shake" role="alert"><div><strong>同步失败</strong>：' + esc(draft.saveError || '服务器未响应') + '（已保留全部输入与原操作编号 <code>' + esc(draft.operationId) + '</code>）</div><div class="ck-sync-actions"><button type="button" class="ck-btn ck-btn-retry" data-modal="save">重试同步</button><button type="button" class="ck-btn ck-btn-ghost" data-modal="save-local-pending">先存本机（等待同步）</button></div></div>'
-    : draft.saveState === 'pending'
-      ? '<div class="ck-sync-status is-pending" role="status"><strong>等待同步</strong>：正在提交到服务器，请勿重复操作…</div>'
-      : '<div class="ck-sync-status ' + (isServerOnline ? 'is-synced' : 'is-local') + '" role="status">' + (isServerOnline ? '在线模式：确认保存后将直接同步至服务器' : '离线模式：确认后将先保存在本机浏览器，联网后可同步') + '</div>';
+      ? '<div class="ck-sync-status is-failed ck-shake" role="alert"><div><strong>同步失败</strong>：' + esc(draft.saveError || '服务器未响应') + '（已保留全部输入与原操作编号 <code>' + esc(draft.operationId) + '</code>）</div><div class="ck-sync-actions"><button type="button" class="ck-btn ck-btn-retry" data-modal="save">重试同步</button><button type="button" class="ck-btn ck-btn-ghost" data-modal="save-local-pending">先存本机（等待同步）</button></div></div>'
+      : draft.saveState === 'pending'
+        ? '<div class="ck-sync-status is-pending" role="status"><strong>保存中</strong>：正在提交到服务器，请勿重复点击…</div>'
+        : (!isServerOnline ? '<div class="ck-sync-status is-local ck-sync-compact" role="status">离线模式：保存后先存本机，联网后可同步</div>' : '');
 
-  if (isStudy) {
-    const sSec = studySecondsOf(draft), sMin = studyMinutesOf(draft);
-    const fObj = studyFocusLevels[draft.feel] || ['🧠', '专注'];
-    return draftBanner + '<h3>确认记录</h3><div class="review-ticket is-study-ticket"><strong>' + sMin + ' <span style="font-size:25px;letter-spacing:0">分钟</span></strong><small>' + esc(draft.date) + ' / ' + esc(draft.person) + ' · ' + esc(findTargetTitle(draft.targetId)) + '</small><dl><dt>专注时长</dt><dd>' + sMin + ' MIN（' + sSec + ' 秒）</dd><dt>折合番茄</dt><dd>约 ' + Math.max(1, Math.round(sMin / 25)) + ' 个</dd><dt>专注度</dt><dd>' + fObj[0] + ' ' + fObj[1] + '</dd><dt>照片存储</dt><dd>' + photoTicketLabel(draft) + '</dd></dl></div>' + syncBanner;
-  }
-  const fObj = feelings[draft.feel] || ['🏃', '舒服'];
-  return draftBanner + '<h3>确认记录</h3><div class="review-ticket"><strong>' + draft.km.toFixed(2) + ' <span style="font-size:25px;letter-spacing:0">km</span></strong><small>' + esc(draft.date) + ' / ' + esc(draft.person) + '</small><dl><dt>时长</dt><dd>' + draft.minutes + ' MIN</dd><dt>配速</dt><dd>' + pace(draft) + ' /KM</dd><dt>感觉</dt><dd>' + fObj[0] + ' ' + fObj[1] + '</dd><dt>照片存储</dt><dd>' + photoTicketLabel(draft) + '</dd></dl></div>' + syncBanner;
+  return modeBar + `<div class="ck-core ck-form-tier1 ${isStudy ? 'ck-study' : 'ck-sport'}">
+    ${isStudy ? `<label class="ck-field-full">学习目标<select id="study-target-select">${targets}</select></label>` : `<label>距离（公里）<input required id="distance-input" type="number" inputmode="decimal" autocomplete="off" min="0.1" max="300" step="0.01" value="${draft.km}"></label>`}
+    <label class="${isStudy ? 'ck-field-full' : ''}">时长（分钟）<input required id="minutes-input" type="number" inputmode="numeric" autocomplete="off" min="1" max="${isStudy ? 960 : 1440}" step="1" value="${minutes}"></label>
+    ${isStudy
+      ? `<div class="pills ck-quick-pills" aria-label="快捷时长">${quickMinutes}</div>`
+      : `<div class="pills ck-quick-pills" aria-label="快捷距离">${quickDistances}</div><div class="ck-pace">配速 <output id="checkin-pace">${pace(draft)} /km</output></div>`}
+  </div>`
+  + syncBanner
+  + `<details id="checkin-extras" class="ck-more-options" ${(draft.extrasOpen || draft.photoRestoreWarning) ? 'open' : ''}>
+    <summary class="ck-more-options-summary"><span class="ck-more-options-title">更多选项</span><small class="ck-more-options-meta${filledExtras.length ? ' is-filled' : ''}">${esc(moreHintText)}</small></summary>
+    <div class="ck-more-options-body">
+      <div class="ck-more-field"><span class="ck-more-label">${isStudy ? '专注度' : '专注度 / 运动体感'}</span><div class="feel-options">${levels.map(([ic, label], index) => `<button type="button" class="feel-option ${draft.feel === index ? 'selected' : ''}" data-modal="feel" data-value="${index}" aria-pressed="${draft.feel === index}">${ic} ${label}</button>`).join('')}</div></div>
+      <div class="ck-more-field"><span class="ck-more-label">标签</span><div class="pills">${choices.map(tag => `<button type="button" class="pill ${draft.tags.includes(tag) ? 'selected' : ''}" data-modal="tag" data-value="${esc(tag)}">${esc(tag)}</button>`).join('')}</div></div>
+      <div class="ck-more-field"><label class="ck-more-label" for="run-note">备注</label><textarea class="note-input" id="run-note" maxlength="200" placeholder="写一句今日状态、路线或学习小结…">${esc(draft.note)}</textarea></div>
+      <div class="ck-more-field"><span class="ck-more-label">照片</span>
+        <input type="file" id="photo-file" accept="image/*" hidden><input type="file" id="camera-file" accept="image/*" capture="environment" hidden>
+        ${draft.photo ? `<img class="ck-photo-preview" src="${esc(draft.photo)}" alt="打卡照片">` : ''}
+        <div class="photo-buttons"><button type="button" data-modal="camera">拍照</button><button type="button" data-modal="album">选择照片</button></div>
+        <p class="hint" role="status">${esc(photoStorageHint(draft))}</p>
+      </div>
+      <div class="ck-more-datetime">
+        <label>记录日期<input required id="checkin-date" type="date" max="${today()}" value="${esc(draft.date)}"></label>
+        <label>开始时间<input id="start-time" type="time" value="${esc(draft.time)}"></label>
+      </div>
+      ${personRowHtml}
+    </div>
+  </details>`;
 }
 
 function drawModal() {
   const root = $('#modal-root');
-  const saveBtnText = draft.saving ? '同步中…' : (draft.saveState === 'failed' ? '重试同步 ↻' : (draft.saveState === 'local-failed' ? '重试保存 ↻' : '保存打卡 ✓'));
-  root.innerHTML = '<div class="modal-overlay"><section class="checkin-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-heading"><div class="sheet-grabber" aria-hidden="true"><span></span></div><div class="modal-header"><h2 id="checkin-heading">' + (draft.mode === 'study' ? '学习打卡' : '运动打卡') + ' · ' + esc(draft.person) + '</h2><button type="button" class="close-modal" data-modal="close" aria-label="关闭弹窗（保留草稿）"><span aria-hidden="true">×</span></button></div><div class="steps" aria-label="第 ' + (step === 4 ? 2 : 1) + ' 步，共 2 步">' + Array.from({ length: 2 }, (_, index) => '<i class="' + (index === 0 || step === 4 ? 'done' : '') + '"></i>').join('') + '</div><div class="step-content">' + stepMarkup() + '</div><div class="step-footer"><button type="button" data-modal="back">' + (step ? '← 上一步' : '× 暂存退出') + '</button><button type="button" data-modal="' + (step === 4 ? 'save' : 'next') + '" ' + (draft.photoUploading || draft.saving ? 'disabled' : '') + '>' + (step === 4 ? saveBtnText : '确认记录 →') + '</button></div></section></div>';
+  const isStudy = draft.mode === 'study';
+  const saveBtnText = draft.saving
+    ? (isServerOnline ? '同步中…' : '保存中…')
+    : (draft.saveState === 'failed' ? '重试同步 ↻' : (draft.saveState === 'local-failed' ? '重试保存 ↻' : '保存打卡 ✓'));
+  root.innerHTML = '<div class="modal-overlay"><section class="checkin-modal ck-checkin-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-heading"><div class="sheet-grabber" aria-hidden="true"><span></span></div><div class="modal-header"><h2 id="checkin-heading">' + (isStudy ? '学习打卡' : '运动打卡') + ' · ' + esc(draft.person) + '</h2><button type="button" class="close-modal" data-modal="close" aria-label="关闭弹窗（保留草稿）"><span aria-hidden="true">×</span></button></div><div class="step-content ck-step-content">' + stepMarkup() + '</div><div class="step-footer ck-form-footer"><button type="button" class="ck-cancel-btn" data-modal="back" ' + (draft.saving ? 'disabled' : '') + '>暂存退出</button><button type="button" class="ck-save-btn ' + (isStudy ? 'is-study' : 'is-sport') + '" data-modal="save" ' + (draft.photoUploading || draft.saving ? 'disabled' : '') + '>' + saveBtnText + '</button></div></section></div>';
   const overlay = $('.modal-overlay', root), sheet = $('.checkin-modal', root), grab = $('.sheet-grabber', root), header = $('.modal-header', root);
   if (overlay && sheet) {
     overlay.addEventListener('click', ev => { if (ev.target === overlay) closeCheckin(); });
@@ -4986,8 +5093,8 @@ function drawModal() {
       el.addEventListener('touchend', onEnd);
     });
   }
-  const focusTarget = (step === 4 ? $('[data-modal="save"]') : $('#checkin-date'))
-    || $('.step-content button, .step-content input, .step-content select')
+  const focusTarget = (draft.saveState === 'failed' || draft.saveState === 'local-failed' ? $('[data-modal="save"]') : $('.modal-mode-switch button.active'))
+    || $('.ck-core input, .ck-core select')
     || $('.close-modal');
   if (focusTarget && typeof focusTarget.focus === 'function') focusTarget.focus({ preventScroll: true });
 }
@@ -5124,8 +5231,7 @@ $('#modal-root').addEventListener('click', async e => {
     const savedOther = getSavedDraft(v);
     if (savedOther) {
       draft = { ...createFreshDraft(v, savedOther.targetId, savedOther.person), ...savedOther, feel: savedOther.feel ?? 3, mode: v, saving: false, restoredFromDraft: true };
-      step = Math.max(0, Math.min(4, Number(savedOther.step) || 0));
-      step = step === 4 ? 4 : 0;
+      step = 0;
       if (savedOther.photoInIdb && !draft.photo) {
         const k = draftStorageKey(v);
         const rop = draft.operationId;
@@ -5223,11 +5329,13 @@ $('#modal-root').addEventListener('click', async e => {
   if (a === 'save') {
     if (!draft || draft.saving || inFlightOpIds.has(draft.operationId)) return;
     if (draft.photoUploading) { toast('照片仍在上传中，请稍候完成后再保存。'); return; }
+    if (!readStep()) return;
     draft.saving = true;
     draft.saveState = isServerOnline ? 'pending' : 'local';
     draft.saveError = '';
     const opId = draft.operationId;
     inFlightOpIds.add(opId);
+    persistCheckinDraft(draft, 0);
     drawModal();
     const savedMode = draft.mode;
     const endpoint = savedMode === 'study' ? '/records/study' : '/records/sport';
@@ -5329,6 +5437,15 @@ document.addEventListener('keydown', e => {
     return;
   }
   if (e.target instanceof Element && e.target.matches('[data-point],[data-chart-node],[data-chart-row],[data-action]') && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); e.target.dispatchEvent(new MouseEvent('click', { bubbles: true })); }
+  if (e.key === 'Escape' && !draft && activeFilterSheet) {
+    const prevSheet = activeFilterSheet;
+    activeFilterSheet = '';
+    e.preventDefault();
+    if (prevSheet.startsWith('rec-') && view === 'records') updateRecordsPageInPlace();
+    else if (prevSheet.startsWith('rank-') && view === 'ranking') render(true);
+    restoreFocusBySelector('[data-action="toggle-filter-sheet"][data-value="' + prevSheet + '"]');
+    return;
+  }
   if (!draft) return;
   if (e.key === 'Escape') { e.preventDefault(); closeCheckin(); }
   if (e.key === 'Tab') {
@@ -5340,7 +5457,7 @@ document.addEventListener('keydown', e => {
 });
 
 function celebrate() {
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  if (document.body.classList.contains('motion-paused') || matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   $('#confetti').innerHTML = Array.from({ length: 60 }, () => '<i class="confetti-piece" style="left:' + Math.random() * 100 + '%;background:' + ['#e5492b', '#203f91', '#e4a334', '#f2f1e8'][Math.floor(Math.random() * 4)] + ';--drift:' + (Math.random() - .5) * 300 + 'px;animation-delay:' + Math.random() * .5 + 's;transform:rotate(' + Math.random() * 360 + 'deg)"></i>').join('');
   setTimeout(() => $('#confetti').innerHTML = '', 3500);
 }
@@ -7501,7 +7618,7 @@ function triggerCheckinFeedback(opts) {
   if (feedbackClearTimer) { clearTimeout(feedbackClearTimer); feedbackClearTimer = 0; }
   if (feedbackAnimId) { cancelAnimationFrame(feedbackAnimId); feedbackAnimId = 0; }
 
-  const isPaused = document.body.classList.contains('motion-paused') || (typeof reducedMotion !== 'undefined' && reducedMotion.matches);
+  const isPaused = document.body.classList.contains('motion-paused') || matchMedia('(prefers-reduced-motion: reduce)').matches || (typeof reducedMotion !== 'undefined' && reducedMotion.matches);
   const isStudy = opts.mode === 'study';
   const targetNum = parseFloat(opts.value) || 0;
   const decimals = String(opts.value).includes('.') ? String(opts.value).split('.')[1].length : 0;
@@ -7521,8 +7638,8 @@ function triggerCheckinFeedback(opts) {
   const prevFbFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
   const prevFbSelector = opts.returnFocusSelector || buildStableFocusSelector(prevFbFocus);
   const recDate = opts.date || today();
-  root.innerHTML = '<div class="fb-backdrop">'
-    + '<article class="fb-card ' + (isStudy ? 'is-study' : 'is-sport') + (isPaused ? ' is-instant' : '') + '" role="' + (syncMeta.key === 'failed' ? 'alert' : 'status') + '" aria-label="打卡完成小票">'
+  root.innerHTML = '<div class="fb-backdrop ck-save-backdrop">'
+    + '<article class="fb-card ck-save-feedback ' + (isStudy ? 'is-study' : 'is-sport') + (isPaused ? ' is-instant' : '') + '" role="' + (syncMeta.key === 'failed' ? 'alert' : 'status') + '" aria-label="打卡完成小票">'
     + '<canvas class="fb-particle-canvas" aria-hidden="true"></canvas>'
     + '<div class="fb-top"><span class="slash-chip">' + (isStudy ? '学习小票' : '运动小票') + '</span><span class="ck-sync-pill is-' + syncMeta.key + '">' + syncMeta.label + '</span><button type="button" class="fb-close" aria-label="关闭小票"><span aria-hidden="true">×</span></button></div>'
     + '<div class="fb-score-wrap"><strong id="fb-score-num">' + (isPaused ? esc(opts.value) : (0).toFixed(decimals)) + '</strong><em>' + esc(opts.unit) + '</em></div>'
