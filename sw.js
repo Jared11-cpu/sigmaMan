@@ -1,10 +1,11 @@
 const CACHE_PREFIX = 'run-study-log-shell:' + self.registration.scope + ':';
-const CACHE_NAME = CACHE_PREFIX + 'v20261128-mobile-ae';
+const CACHE_NAME = CACHE_PREFIX + 'v20261128-rd1';
 const SHELL_ASSETS = [
   './',
   './index.html',
   './style.css',
   './desktop.css',
+  './redesign.css',
   './pixel-progress.css',
   './pixel-progress.js',
   './shared/score.js',

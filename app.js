@@ -179,7 +179,41 @@ if (demo) {
 
 const POMO_KEY = STORE + '_pomo_session';
 const PENDING_OPS_KEY = STORE + '_pending_ops';
-const VALID_VIEWS = ['home', 'progress', 'plan', 'study', 'ranking', 'achievements', 'records', 'people', 'more'];
+const VALID_VIEWS = ['home', 'calendar', 'progress', 'plan', 'study', 'ranking', 'achievements', 'records', 'people', 'more'];
+const STATS_CARDS_KEY = STORE + '_stats_cards_v1';
+const DEFAULT_STATS_CARDS = {
+  summary: true,
+  yearDots: true,
+  metricBars: true,
+  monthCurve: true,
+  hourly: true,
+  horizontalRank: true,
+  habits: true,
+  quality: true,
+  yearCurve: true
+};
+let statsVisibleCards = (() => {
+  try {
+    const raw = JSON.parse(localStorage.getItem(STATS_CARDS_KEY) || 'null');
+    return raw && typeof raw === 'object' ? { ...DEFAULT_STATS_CARDS, ...raw } : { ...DEFAULT_STATS_CARDS };
+  } catch { return { ...DEFAULT_STATS_CARDS }; }
+})();
+function saveStatsVisibleCards() { try { localStorage.setItem(STATS_CARDS_KEY, JSON.stringify(statsVisibleCards)); } catch {} }
+let calAnchorDate = today();
+let calMiniMonth = today().slice(0, 7);
+let calViewMode = 'week'; // 'week' | 'day'
+let calLayoutMode = 'calendar'; // 'calendar' | 'list'
+let calMobileMode = 'list'; // 'list' | 'timeline'
+let calKindFilter = 'all'; // 'all' | 'sport' | 'study'
+let calPersonFilter = 'all'; // 'all' | memberName
+let calSearchQuery = '';
+let calMonthExpanded = false;
+let calSelectedTrack = '';
+let statsTab = 'all'; // 'all' | 'sport' | 'study' | 'rank'
+let statsPeriod = 'month'; // 'week' | 'month' | 'year' | 'all'
+let statsAnchorDate = today();
+let statsDayDate = today();
+let statsSelectedNode = '';
 const hashView = (typeof location !== 'undefined' && location.hash) ? location.hash.replace(/^#/, '').split('?')[0] : '';
 let view = params.get('view') || (VALID_VIEWS.includes(hashView) ? hashView : 'home');
 let showArchivedTargets = false, showArchivedHabits = false, pendingImportBackup = null;
@@ -277,16 +311,29 @@ if (!VALID_VIEWS.includes(view)) view = 'home';
 
 const nav = [
   ['home', '今天', 'track'],
-  ['records', '记录', 'chart'],
-  ['ranking', '排名', 'trophy'],
+  ['calendar', '日历', 'calendar'],
+  ['progress', '统计', 'chart'],
   ['more', '更多', 'more']
 ];
+const DESKTOP_NAV = [
+  ['home', '今天', 'track'],
+  ['calendar', '日历', 'calendar'],
+  ['progress', '统计', 'chart'],
+  ['records', '记录', 'pulse'],
+  ['ranking', '排名', 'trophy'],
+  ['__div__', '计划与自律', ''],
+  ['plan', '运动计划', 'shoe'],
+  ['study', '学习目标', 'book'],
+  ['achievements', '成就勋章', 'medal'],
+  ['people', '自律伙伴', 'sunrise']
+];
 const MORE_ITEMS = [
-  { id: 'progress', label: '进度', icon: 'pulse', sub: '目标完成率与趋势' },
-  { id: 'plan', label: '运动', icon: 'shoe', sub: '跑步计划与里程打卡' },
-  { id: 'study', label: '学习', icon: 'book', sub: '专注番茄与学习目标' },
-  { id: 'achievements', label: '成就', icon: 'medal', sub: '勋章与连续里程碑' },
-  { id: 'people', label: '自律', icon: 'sunrise', sub: '每日习惯与同行伙伴' }
+  { id: 'records', label: '记录明细', icon: 'pulse', sub: '全部运动与学习流水和凭证' },
+  { id: 'ranking', label: '竞技排名', icon: 'trophy', sub: '多人榜单与PK对比' },
+  { id: 'plan', label: '运动计划', icon: 'shoe', sub: '跑步计划与28天排程' },
+  { id: 'study', label: '学习目标', icon: 'book', sub: '专注番茄与目标拆解' },
+  { id: 'achievements', label: '成就勋章', icon: 'medal', sub: '勋章墙与连续里程碑' },
+  { id: 'people', label: '自律伙伴', icon: 'sunrise', sub: '每日习惯与同行伙伴' }
 ];
 const MORE_VIEWS = MORE_ITEMS.map(x => x.id);
 if (embedded) document.body.classList.add('embedded');
@@ -1407,89 +1454,157 @@ function track() {
     + '</div>';
 }
 
+/* ---------- Smooth Monotone Cubic Spline Builder (Fritsch-Carlson Hermite) ---------- */
+function smoothSplinePath(pts) {
+  if (!pts || !pts.length) return '';
+  if (pts.length === 1) return 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
+  if (pts.length === 2) {
+    const p0 = pts[0], p1 = pts[1];
+    const mx = (p0.x + p1.x) / 2;
+    return 'M' + p0.x.toFixed(1) + ',' + p0.y.toFixed(1)
+      + ' C' + mx.toFixed(1) + ',' + p0.y.toFixed(1)
+      + ' ' + mx.toFixed(1) + ',' + p1.y.toFixed(1)
+      + ' ' + p1.x.toFixed(1) + ',' + p1.y.toFixed(1);
+  }
+  const n = pts.length;
+  const dx = [], dy = [], m = [];
+  for (let i = 0; i < n - 1; i++) {
+    const dxi = Math.max(0.001, pts[i + 1].x - pts[i].x);
+    dx.push(dxi);
+    dy.push(pts[i + 1].y - pts[i].y);
+    m.push((pts[i + 1].y - pts[i].y) / dxi);
+  }
+  const tangents = new Array(n);
+  tangents[0] = m[0];
+  tangents[n - 1] = m[n - 2];
+  for (let i = 1; i < n - 1; i++) {
+    if (m[i - 1] * m[i] <= 0) {
+      tangents[i] = 0;
+    } else {
+      const w1 = dx[i - 1] + 2 * dx[i];
+      const w2 = 2 * dx[i - 1] + dx[i];
+      tangents[i] = (w1 + w2) / (w1 / m[i - 1] + w2 / m[i]);
+    }
+  }
+  for (let i = 0; i < n - 1; i++) {
+    if (Math.abs(m[i]) < 1e-6) {
+      tangents[i] = 0;
+      tangents[i + 1] = 0;
+    } else {
+      const a = tangents[i] / m[i];
+      const b = tangents[i + 1] / m[i];
+      const s = a * a + b * b;
+      if (s > 9) {
+        const t = 3 / Math.sqrt(s);
+        tangents[i] = t * a * m[i];
+        tangents[i + 1] = t * b * m[i];
+      }
+    }
+  }
+  let d = 'M' + pts[0].x.toFixed(1) + ',' + pts[0].y.toFixed(1);
+  for (let i = 0; i < n - 1; i++) {
+    const p0 = pts[i], p1 = pts[i + 1];
+    const h = dx[i] / 3;
+    const c1x = p0.x + h, c1y = p0.y + tangents[i] * h;
+    const c2x = p1.x - h, c2y = p1.y - tangents[i + 1] * h;
+    d += ' C' + c1x.toFixed(1) + ',' + c1y.toFixed(1)
+      + ' ' + c2x.toFixed(1) + ',' + c2y.toFixed(1)
+      + ' ' + p1.x.toFixed(1) + ',' + p1.y.toFixed(1);
+  }
+  return d;
+}
+
+function addDaysStr(dk, delta) {
+  const dt = new Date(dk + 'T12:00:00');
+  dt.setDate(dt.getDate() + delta);
+  return dateKey(dt);
+}
+function getMondayOfWeek(dk) {
+  const dt = new Date(dk + 'T12:00:00');
+  const dow = (dt.getDay() + 6) % 7; // Mon=0..Sun=6
+  dt.setDate(dt.getDate() - dow);
+  return dateKey(dt);
+}
+function parseTimeToMins(t) {
+  const m = String(t || '').match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return 8 * 60;
+  return Math.max(0, Math.min(23 * 60 + 59, Number(m[1]) * 60 + Number(m[2])));
+}
+function formatDurHm(totalMin) {
+  const m = Math.max(0, Math.round(totalMin || 0));
+  const h = Math.floor(m / 60), rem = m % 60;
+  if (!h) return rem + '分钟';
+  return rem ? (h + '小时' + rem + '分') : (h + '小时');
+}
+
 function homeTodayPanel() {
-  const dk = today();
+  const t = today();
   const rs = todaySportSummary(), ss = todayStudySummary();
   const totalCount = rs.count + ss.count;
+  const hb = habitRateForDate(t);
+  const doneHabits = state.habitLogs[t] || [];
+  const habitsList = activeHabits();
+  const todayItems = allUnifiedRecords('all', true).filter(r => r.date === t);
   const focusMeta = getStudyFocusEntryMeta();
   const entryBars = ckEntryBarsMarkup(['sport', 'study']);
+  const hasTodayRecord = totalCount > 0;
   const members = allMembers();
-  const habits = activeHabits();
-  const hb = habitRateForDate(dk);
-  const doneHabitIds = state.habitLogs[dk] || [];
-  const todayItems = allUnifiedRecords('all', true).filter(r => beijingDateOf(r) === dk);
 
-  const habitsHtml = habits.length
-    ? '<div class="today-sub-block today-habits-block">'
-      + '<div class="today-sub-head"><span class="today-sub-title">今日自律 <em>' + hb.done + '/' + hb.total + '</em></span>'
-      + '<button type="button" class="today-sub-link" data-action="go-view" data-value="people">管理 <span aria-hidden="true">→</span></button></div>'
-      + '<div class="today-habits-grid">'
-      + habits.map(h => {
-        const isDone = doneHabitIds.includes(h.id);
-        return '<button type="button" class="today-habit-btn ' + (isDone ? 'is-done' : '') + '" data-action="toggle-habit" data-value="' + esc(h.id) + '" aria-pressed="' + isDone + '">'
-          + '<span class="today-habit-check" aria-hidden="true">' + (isDone ? '✓' : '') + '</span>'
-          + '<span class="today-habit-label">' + esc(h.title) + '</span></button>';
+  const habitsCardHtml = habitsList.length
+    ? '<div class="rd-section-label"><span>今日自律 · ' + hb.done + '/' + hb.total + '</span><button type="button" data-action="go-view" data-value="people">管理 →</button></div>'
+      + '<div class="rd-card rd-checklist-card">'
+      + habitsList.map(h => {
+        const ok = doneHabits.includes(h.id);
+        return '<button type="button" class="rd-check-row' + (ok ? ' is-done' : '') + '" data-action="toggle-habit" data-value="' + esc(h.id) + '" data-focus-key="habit:' + esc(h.id) + '" aria-pressed="' + ok + '">'
+          + '<span class="rd-check-circle" aria-hidden="true">' + (ok ? '✓' : '') + '</span>'
+          + '<span class="rd-check-title">' + esc(h.title) + '</span>'
+          + '<span class="rd-check-meta">' + esc(h.tag || (ok ? '已完成' : '待完成')) + '</span>'
+          + '</button>';
       }).join('')
-      + '</div></div>'
+      + '</div>'
     : '';
 
   const feedRowsHtml = todayItems.length
-    ? '<div class="today-feed-list">' + todayItems.slice(0, 4).map(item => {
+    ? todayItems.slice(0, 5).map(item => {
       const isStudy = item._kind === 'study';
       const val = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
-      const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || (item.tags && item.tags[0]) || '');
-      const metaText = [item.time, detail].filter(Boolean).join(' · ');
+      const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || (item.tags && item.tags[0]) || ('配速 ' + pace(item)));
       const syncKey = recordSyncStateKey(item);
       const syncMeta = syncStatusMeta(syncKey);
-      return '<button type="button" class="today-feed-row ' + (isStudy ? 'is-study' : 'is-sport') + '" data-action="open-receipt-modal" data-value="' + esc(item._key) + '" data-focus-key="homefeed:' + esc(item._key) + '">'
-        + '<span class="today-feed-tag">' + (isStudy ? '学习' : '运动') + '</span>'
-        + '<strong>' + val + '</strong>'
-        + (metaText ? '<span class="today-feed-meta">' + esc(metaText) + '</span>' : '')
-        + (syncKey !== 'synced' ? '<span class="today-feed-sync is-' + syncMeta.key + '">' + syncMeta.label + '</span>' : '')
-        + '<span class="today-feed-arrow" aria-hidden="true">›</span></button>';
-    }).join('') + '</div>'
-    : '<p class="today-empty-hint">今天还没有运动或学习记录，点击上方按钮即可打卡。</p>';
+      return '<button type="button" class="rd-feed-row" data-action="open-receipt-modal" data-value="' + esc(item._key) + '" data-focus-key="homefeed:' + esc(item._key) + '">'
+        + '<span class="rd-feed-pill ' + (isStudy ? 'is-study' : 'is-sport') + '">' + (isStudy ? '学习' : '运动') + '</span>'
+        + '<span class="rd-feed-main"><strong>' + val + '</strong>' + (detail ? '<small>' + esc(detail) + '</small>' : '') + '</span>'
+        + '<span class="rd-feed-right">' + (syncKey !== 'synced' ? '<em class="today-feed-sync is-' + syncMeta.key + '">' + syncMeta.label + '</em>' : '') + '<span>' + esc(item.time || '--:--') + '</span><span aria-hidden="true">›</span></span>'
+        + '</button>';
+    }).join('')
+    : '<div class="rd-empty-box"><span>今天还没有运动或学习记录</span><button type="button" class="rd-pill-btn is-primary" data-action="checkin" data-mode="sport">+ 记下今天第一笔</button></div>';
 
-  const feedHtml = '<div class="today-sub-block today-feed-block">'
-    + '<div class="today-sub-head"><span class="today-sub-title">今日明细</span>'
-    + (todayItems.length > 4 ? '<button type="button" class="today-sub-link" data-action="go-today-records">全部 ' + todayItems.length + ' 条 <span aria-hidden="true">→</span></button>' : '')
+  return '<section class="home-today-panel ck-today-panel rd-today-panel" aria-labelledby="home-today-heading">'
+    + '<div class="rd-card rd-today-card">'
+    + '<div class="rd-today-top">'
+    + '<div class="rd-today-top-left"><h2 id="home-today-heading">今天</h2><span class="rd-today-badge">' + (hasTodayRecord ? ('已记 ' + totalCount + ' 次') : '0 次打卡') + '</span></div>'
+    + '<div class="rd-today-links">'
+    + '<button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="calendar">日历 →</button>'
+    + '<button type="button" class="rd-pill-btn is-ghost" data-action="go-today-records" data-focus-key="home:today-records">记录 →</button>'
     + '</div>'
-    + feedRowsHtml
-    + '</div>';
-
-  const hasTodayRecord = totalCount > 0;
-  const primaryCtaLabel = hasTodayRecord ? '再记一次' : '打卡';
-  const primaryDefaultMode = (!getSavedDraft('sport') && getSavedDraft('study')) ? 'study' : 'sport';
-  const primaryAria = primaryCtaLabel + '，今日已完成运动 ' + rs.km.toFixed(1) + ' 公里（' + rs.count + ' 次）、学习 ' + ss.minutes + ' 分钟（' + ss.count + ' 次），共 ' + totalCount + ' 次';
-
-  return '<section class="home-today-panel ck-today-panel" aria-labelledby="home-today-heading">'
-    + '<div class="ck-today-hero">'
-    + '<div class="ck-today-head">'
-    + '<div class="ck-today-title-wrap"><h2 id="home-today-heading">今天</h2><span class="ck-today-count" aria-label="今日打卡共 ' + totalCount + ' 次">' + (hasTodayRecord ? ('已记 ' + totalCount + ' 次') : '今日 0 次') + '</span></div>'
-    + '<button type="button" class="ck-today-link" data-action="go-today-records" data-focus-key="home:today-records">今日记录 <span aria-hidden="true">→</span></button>'
     + '</div>'
-    + '<div class="ck-today-summary" role="group" aria-label="今日完成量与次数">'
-    + '<div class="ck-today-stat is-sport"><span class="ck-today-stat-label">运动</span><strong>' + rs.km.toFixed(1) + ' <em>km</em></strong><span class="ck-today-stat-count">' + rs.count + ' 次</span></div>'
-    + '<div class="ck-today-stat is-study"><span class="ck-today-stat-label">学习</span><strong>' + ss.minutes + ' <em>分钟</em></strong><span class="ck-today-stat-count">' + ss.count + ' 次</span></div>'
+    + '<div class="rd-today-dual" role="group" aria-label="今日完成量与次数">'
+    + '<div class="rd-today-col"><span class="rd-today-col-lbl"><i class="rd-dot is-sport"></i>运动</span><strong>' + rs.km.toFixed(1) + '<em>km</em></strong><small>' + rs.count + ' 次 · 本月目标 ' + state.goal + ' km</small></div>'
+    + '<div class="rd-today-col"><span class="rd-today-col-lbl"><i class="rd-dot is-study"></i>学习</span><strong>' + ss.minutes + '<em>分钟</em></strong><small>' + ss.count + ' 次 · 本月目标 ' + state.studyGoal + ' h</small></div>'
     + '</div>'
-    + '<button type="button" class="ck-primary-cta ' + (hasTodayRecord ? 'is-again' : 'is-first') + '" data-action="checkin" data-mode="' + primaryDefaultMode + '" data-focus-key="home:primary-checkin" aria-label="' + esc(primaryAria) + '"><span>' + primaryCtaLabel + '</span><span class="ck-primary-cta-arrow" aria-hidden="true">→</span></button>'
-    + '<div class="ck-track-entries" role="group" aria-label="运动与学习独立入口">'
-    + '<button type="button" class="ck-track-entry is-sport" data-view="plan" aria-label="进入运动页，今日 ' + rs.km.toFixed(1) + ' 公里，' + rs.count + ' 次">' + icon('shoe', 'ck-entry-ico') + '<span class="ck-entry-body"><strong>运动</strong><small>' + rs.km.toFixed(1) + ' km · ' + rs.count + ' 次</small></span><span class="ck-entry-chevron" aria-hidden="true">›</span></button>'
-    + '<button type="button" class="ck-track-entry is-study" data-view="study" aria-label="进入学习页，今日 ' + ss.minutes + ' 分钟，' + ss.count + ' 次">' + icon('book', 'ck-entry-ico') + '<span class="ck-entry-body"><strong>学习</strong><small>' + ss.minutes + ' 分钟 · ' + ss.count + ' 次</small></span><span class="ck-entry-chevron" aria-hidden="true">›</span></button>'
+    + '<div class="rd-today-actions">'
+    + '<button type="button" class="rd-act-btn is-sport" data-action="checkin" data-mode="sport" data-focus-key="home:primary-checkin">记运动</button>'
+    + '<button type="button" class="rd-act-btn is-study" data-action="checkin" data-mode="study">记学习</button>'
+    + '<button type="button" class="rd-act-btn is-focus" data-action="go-focus" data-focus-key="home:go-focus" aria-label="' + esc(focusMeta.aria) + '">' + focusMeta.label + '</button>'
     + '</div>'
     + '</div>'
     + (focusMeta.stateText ? '<div class="today-focus-note" id="home-focus-note" role="status">专注计时：' + esc(findTargetTitle(pomodoroTargetId)) + ' · ' + esc(focusMeta.stateText) + '</div>' : '')
     + entryBars
-    + '<details class="ck-today-fold">'
-    + '<summary class="ck-today-fold-summary"><span>今日明细、自律与更多操作</span><small>自律 ' + hb.done + '/' + hb.total + ' · 明细 ' + todayItems.length + ' 条</small></summary>'
-    + '<div class="ck-today-fold-body">'
-    + '<div class="ck-today-tools">'
-    + '<button type="button" class="today-act-btn is-focus" data-action="go-focus" data-focus-key="home:go-focus" aria-label="' + esc(focusMeta.aria) + '">' + focusMeta.label + '</button>'
-    + '<button type="button" class="today-records-btn is-subtle" data-action="add-person" title="添加同行伙伴">' + (members.length === 1 ? '＋ 加人物' : '＋ 加人物 (' + members.length + '人)') + '</button>'
+    + habitsCardHtml
+    + '<div class="rd-section-label"><span>今日明细 (' + todayItems.length + ')</span>'
+    + (members.length ? '<button type="button" data-action="add-person">+ 伙伴 (' + members.length + '人)</button>' : '<button type="button" data-action="add-person">+ 加伙伴</button>')
     + '</div>'
-    + habitsHtml
-    + feedHtml
-    + '</div></details>'
+    + '<div class="rd-card rd-feed-card">' + feedRowsHtml + '</div>'
     + '</section>';
 }
 
@@ -1500,7 +1615,10 @@ function morePage() {
   const rs = todaySportSummary(), ss = todayStudySummary();
   const hb = habitRateForDate(today());
   const ds = dualStreak();
+  const allRecCount = allUnifiedRecords('all', true).length;
   const metaMap = {
+    records: '共 ' + allRecCount + ' 条打卡流水与电子凭证',
+    ranking: '查看多人竞技榜单与趋势对比',
     progress: '运动 ' + sPct + '% · 学习 ' + stPct + '%',
     plan: '今日 ' + rs.km.toFixed(1) + ' km · 本月 ' + mt.toFixed(1) + '/' + state.goal + ' km',
     study: '今日 ' + ss.minutes + ' 分钟 · 本月 ' + stH.toFixed(1) + '/' + state.studyGoal + ' h',
@@ -1537,7 +1655,7 @@ function home() {
   const studyLeadDelta = studyBoard[0] ? (studyBoard[0].hrs - stH).toFixed(1) : '0';
   const solo = board.length === 1;
 
-  return '<div class="home ck-home">'
+  return '<div class="home ck-home rd-home">'
     + quoteMarkup()
     + '<section class="home-metrics home-metrics-4 ck-home-metrics" aria-label="运动学习自律与核心进度">'
     + '<button class="metric-tile" data-action="go-view" data-value="plan"><div class="metric-top"><small>本月运动 / RUN</small><em class="metric-rank">' + (solo ? ('目标 ' + sPct + '%') : ('#' + mySportRank + (mySportRank === 1 ? ' 领跑' : ' 差' + sportLeadDelta + 'k'))) + '</em></div><strong>' + mt.toFixed(1) + '<em> KM</em></strong>' + PixelProgressBar.renderHtml({ progress: sPct, height: 12, width: '100%', bare: true, variant: 'orange', className: 'metric-ppb', ariaLabel: '本月运动目标进度' }) + '</button>'
@@ -2315,27 +2433,18 @@ function finishChartRender(seriesList, yLabels, yUnitTitle, ticks, targetRuleHtm
   const placedTags = [];
   const linesSvg = seriesList.map((s, si) => {
     if (!s.points.length) return '';
-    const d = s.points.map((p, i) => (i ? 'L' : 'M') + p.px.toFixed(1) + ',' + p.py.toFixed(1)).join(' ');
-    const area = s.areaGrad && s.points.length > 1
+    const d = smoothSplinePath(s.points.map(p => ({ x: p.px, y: p.py })));
+    const area = s.points.length > 1
       ? d + ' L' + s.points.at(-1).px.toFixed(1) + ',224 L' + s.points[0].px.toFixed(1) + ',224 Z'
       : '';
-    const patId = 'px-dither-' + si;
     const areaDef = area
-      ? '<defs>'
-        + '<linearGradient id="cg-' + si + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="' + s.color + '" stop-opacity=".18"/><stop offset="100%" stop-color="' + s.color + '" stop-opacity=".02"/></linearGradient>'
-        + '<pattern id="' + patId + '" width="8" height="8" patternUnits="userSpaceOnUse">'
-        + '<rect x="0" y="0" width="2" height="2" fill="' + s.color + '" opacity=".24"/>'
-        + '<rect x="4" y="2" width="2" height="2" fill="' + s.color + '" opacity=".18"/>'
-        + '<rect x="2" y="4" width="2" height="2" fill="' + s.color + '" opacity=".14"/>'
-        + '<rect x="6" y="6" width="2" height="2" fill="' + s.color + '" opacity=".2"/>'
-        + '</pattern></defs>'
-        + '<path d="' + area + '" fill="url(#cg-' + si + ')"/><path d="' + area + '" fill="url(#' + patId + ')"/>'
+      ? '<defs><linearGradient id="cg-' + si + '" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="' + s.color + '" stop-opacity="' + (s.areaGrad ? '.22' : '.10') + '"/><stop offset="100%" stop-color="' + s.color + '" stop-opacity=".01"/></linearGradient></defs>'
+        + '<path d="' + area + '" fill="url(#cg-' + si + ')"/>'
       : '';
-    const pathEl = s.points.length > 1 ? '<path class="comp-line" d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="2.4" stroke-linejoin="miter"/>' : '';
+    const pathEl = s.points.length > 1 ? '<path class="comp-line" d="' + d + '" fill="none" stroke="' + s.color + '" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>' : '';
     const dotsEl = s.points.map(p => {
       const isSel = activePt && p.nodeKey === activePt.nodeKey;
-      const sz = isSel ? 9.5 : 7;
-      const half = sz / 2;
+      const rad = isSel ? 5.2 : 3.6;
       let valTag = '';
       if (showAllPointValues && !isSel) {
         const tryOffsets = p.py < 54 ? [16, -9, 25] : [-9, 16, -19];
@@ -2352,9 +2461,9 @@ function finishChartRender(seriesList, yLabels, yUnitTitle, ticks, targetRuleHtm
         }
       }
       return '<g class="bp-hit chart-node-hit ' + (isSel ? 'is-selected' : '') + '" data-chart-node="' + esc(p.nodeKey) + '" tabindex="0" role="button" aria-label="' + esc(p.person) + ' ' + p.r.date + ' ' + esc(p.yExact) + '">'
-        + '<rect x="' + (p.px - 11).toFixed(1) + '" y="' + (p.py - 11).toFixed(1) + '" width="22" height="22" fill="transparent"/>'
-        + (isSel ? '<rect class="node-halo" x="' + (p.px - 8).toFixed(1) + '" y="' + (p.py - 8).toFixed(1) + '" width="16" height="16" fill="none" stroke="' + s.color + '" stroke-width="1.8" opacity=".72" shape-rendering="crispEdges"/>' : '')
-        + '<rect class="node-sq" x="' + (p.px - half).toFixed(1) + '" y="' + (p.py - half).toFixed(1) + '" width="' + sz + '" height="' + sz + '" fill="' + s.color + '" stroke="#f2f1e8" stroke-width="1.8" shape-rendering="crispEdges"/>'
+        + '<circle cx="' + p.px.toFixed(1) + '" cy="' + p.py.toFixed(1) + '" r="11" fill="transparent"/>'
+        + (isSel ? '<circle class="node-halo" cx="' + p.px.toFixed(1) + '" cy="' + p.py.toFixed(1) + '" r="9" fill="' + s.color + '" fill-opacity=".16" stroke="' + s.color + '" stroke-width="1.5"/>' : '')
+        + '<circle class="node-sq" cx="' + p.px.toFixed(1) + '" cy="' + p.py.toFixed(1) + '" r="' + rad + '" fill="' + s.color + '" stroke="#ffffff" stroke-width="2"/>'
         + valTag
         + '</g>';
     }).join('');
@@ -2363,9 +2472,9 @@ function finishChartRender(seriesList, yLabels, yUnitTitle, ticks, targetRuleHtm
     const ly = endLabelMap.get(s) ?? last.py;
     const tagTxt = s.endTag || s.name;
     const endBadge = '<g class="chart-end-tag" data-action="chart-person" data-value="' + esc(s.name === chartPersonFilter ? 'all' : s.name) + '" style="cursor:pointer">'
-      + '<polyline points="' + last.px.toFixed(1) + ',' + last.py.toFixed(1) + ' 494,' + ly.toFixed(1) + ' 502,' + ly.toFixed(1) + '" fill="none" stroke="' + s.color + '" stroke-width="1.2" stroke-dasharray="2.5 2"/>'
-      + '<rect x="502" y="' + (ly - 9.5).toFixed(1) + '" width="112" height="19" fill="' + s.color + '"/>'
-      + '<text x="508" y="' + (ly + 3.5).toFixed(1) + '" style="font:700 9.5px var(--body);fill:#f2f1e8">' + esc(tagTxt) + '</text>'
+      + '<path d="M' + last.px.toFixed(1) + ',' + last.py.toFixed(1) + ' C492,' + last.py.toFixed(1) + ' 494,' + ly.toFixed(1) + ' 502,' + ly.toFixed(1) + '" fill="none" stroke="' + s.color + '" stroke-width="1.2" stroke-dasharray="2.5 2" opacity=".75"/>'
+      + '<rect x="502" y="' + (ly - 9.5).toFixed(1) + '" width="112" height="19" rx="6" fill="' + s.color + '"/>'
+      + '<text x="510" y="' + (ly + 3.5).toFixed(1) + '" style="font:700 9.5px var(--body);fill:#ffffff">' + esc(tagTxt) + '</text>'
       + '</g>';
 
     return areaDef + pathEl + endBadge + dotsEl;
@@ -2396,56 +2505,833 @@ function finishChartRender(seriesList, yLabels, yUnitTitle, ticks, targetRuleHtm
   return blueprintChartCard(chartTitle, chartHint, splitBody, '', legend);
 }
 
-/* ---------- View 2: Progress ---------- */
-function progress() {
-  const wRuns = new Set(mine(weekly()).map(r => r.date)).size;
-  const mt = total(mine(monthly())), stH = totalStudy(monthly(mineStudy()));
-  const doneSport = runToday(), doneStudy = studyToday(), hb = habitRateForDate(today());
-  const sportPct = Math.round(mt / Math.max(1, state.goal) * 100);
-  const studyPct = Math.round(stH / Math.max(1, state.studyGoal) * 100);
-  const habitPct = weeklyHabitPct();
-  const pacePct = monthElapsedPct();
-  const members = allMembers(), solo = members.length === 1;
-  const curveTab = solo ? '双轨线性表' : '多人竞速曲线';
-  const activeProgTab = (progressTab === '双轨线性表' || progressTab === '多人竞速曲线') ? curveTab : progressTab;
+/* ---------- View: Calendar (OpenMausBot Desktop Time-Grid + TickTick Mobile 7-Day Strip) ---------- */
+function calendarFilteredRecords() {
+  const all = allUnifiedRecords(calKindFilter, false);
+  return all.filter(r => {
+    if (calPersonFilter !== 'all' && r.person !== calPersonFilter) return false;
+    if (calSelectedTrack) {
+      if (calSelectedTrack === 'track:sport') return r._kind === 'sport';
+      if (calSelectedTrack.startsWith('target:')) {
+        const tid = calSelectedTrack.slice(7);
+        return r._kind === 'study' && r.targetId === tid;
+      }
+      if (calSelectedTrack.startsWith('person:')) {
+        return r.person === calSelectedTrack.slice(7);
+      }
+    }
+    return true;
+  });
+}
 
-  const sportRem = Math.max(0, state.goal - mt), studyRem = Math.max(0, state.studyGoal - stH);
-  return '<div class="editorial-page">'
-    + '<div class="hero-split">'
-    + '<section class="poster-hero poster-flame" data-wm="' + sportPct + '%">'
-    + '<div class="poster-meta"><span>[ 02-A / 运动目标 · FLAME PIXEL ]</span><span>每周 ' + state.days.length + ' 跑 · ' + (doneSport ? '今日已跑 ✓' : '今日待跑') + '</span></div>'
-    + '<div class="plan-hero-row">'
-    + '<div class="poster-big-stat"><small>跑量达成</small><strong>' + sportPct + '<em>%</em></strong></div>'
-    + '<div class="poster-body">'
-    + '<h2>' + mt.toFixed(1) + ' <em>/ ' + state.goal + ' KM</em></h2>'
-    + '<p class="poster-cn">已跑 ' + mt.toFixed(1) + ' 公里 · ' + (sportRem ? '距目标还差 ' + sportRem.toFixed(1) + ' km 继续冲刺' : '本月跑量目标已达成 ✓') + '</p>'
+function buildMiniMonthMarkup(ym, anchorDk, weekDaysSet, byDate) {
+  const [yr, mo] = ym.split('-').map(Number);
+  const first = new Date(yr, mo - 1, 1, 12);
+  const startDow = (first.getDay() + 6) % 7; // Mon=0
+  const gridStart = new Date(yr, mo - 1, 1 - startDow, 12);
+  const t = today();
+  const dows = ['一', '二', '三', '四', '五', '六', '日'];
+  let cells = dows.map(d => '<span class="rd-mini-dow">' + d + '</span>').join('');
+  for (let i = 0; i < 42; i++) {
+    const cur = new Date(gridStart.getFullYear(), gridStart.getMonth(), gridStart.getDate() + i, 12);
+    const dk = dateKey(cur);
+    const isOther = cur.getMonth() !== (mo - 1);
+    const isToday = dk === t;
+    const isSel = dk === anchorDk;
+    const inWeek = weekDaysSet && weekDaysSet.has(dk);
+    const dayItems = byDate.get(dk) || [];
+    const hasSp = dayItems.some(x => x._kind === 'sport');
+    const hasSt = dayItems.some(x => x._kind === 'study');
+    const dots = (hasSp || hasSt)
+      ? '<span class="rd-mini-dots">'
+        + (hasSp ? '<i style="background:#e5492b"></i>' : '')
+        + (hasSt ? '<i style="background:#203f91"></i>' : '')
+        + '</span>'
+      : '';
+    cells += '<button type="button" class="rd-mini-day'
+      + (isOther ? ' is-other' : '')
+      + (inWeek ? ' is-in-week' : '')
+      + (isSel ? ' is-selected' : '')
+      + (isToday ? ' is-today' : '')
+      + '" data-action="cal-pick-date" data-value="' + dk + '" aria-label="' + dk + '">'
+      + cur.getDate() + dots + '</button>';
+  }
+  return '<div class="rd-mini-cal">'
+    + '<div class="rd-mini-cal-head">'
+    + '<strong>' + yr + '年' + mo + '月</strong>'
+    + '<div class="rd-mini-cal-arrows">'
+    + '<button type="button" data-action="cal-mini-shift" data-value="-1" aria-label="上个月">‹</button>'
+    + '<button type="button" data-action="cal-mini-shift" data-value="1" aria-label="下个月">›</button>'
     + '</div></div>'
-    + '<div class="poster-kpis poster-kpis-4">'
-    + '<div><small>完成率</small><strong>' + sportPct + '<em>%</em></strong></div>'
-    + '<div><small>本月已跑</small><strong>' + mt.toFixed(1) + '<em>KM</em></strong></div>'
-    + '<div><small>月度目标</small><strong>' + state.goal + '<em>KM</em></strong></div>'
-    + '<div><small>剩余里程</small><strong>' + sportRem.toFixed(1) + '<em>KM</em></strong></div>'
+    + '<div class="rd-mini-grid">' + cells + '</div>'
+    + '</div>';
+}
+
+function calendarPage() {
+  const t = today();
+  const now = chinaNow();
+  const nowMins = now.getHours() * 60 + now.getMinutes();
+  const mon = getMondayOfWeek(calAnchorDate);
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDaysStr(mon, i));
+  const weekSet = new Set(weekDays);
+  const visibleDays = calViewMode === 'day' ? [calAnchorDate] : weekDays;
+  const recs = calendarFilteredRecords();
+  const byDate = new Map();
+  recs.forEach(r => {
+    if (!byDate.has(r.date)) byDate.set(r.date, []);
+    byDate.get(r.date).push(r);
+  });
+
+  const members = allMembers();
+  const memberOpts = '<option value="all"' + (calPersonFilter === 'all' ? ' selected' : '') + '>全部成员 (' + members.length + ')</option>'
+    + members.map(m => '<option value="' + esc(m) + '"' + (calPersonFilter === m ? ' selected' : '') + '>' + esc(m) + (m === state.name ? ' (我)' : '') + '</option>').join('');
+  const kindOpts = [
+    ['all', '全部类型'],
+    ['sport', '仅运动'],
+    ['study', '仅学习']
+  ].map(([val, lbl]) => '<option value="' + val + '"' + (calKindFilter === val ? ' selected' : '') + '>' + lbl + '</option>').join('');
+
+  const rangeStart = visibleDays[0].replace(/-/g, '/');
+  const rangeEnd = visibleDays.at(-1).replace(/-/g, '/');
+  const rangeLabel = calViewMode === 'day' ? rangeStart : (rangeStart + ' – ' + rangeEnd);
+
+  // Draggable sidebar items (tracks + active study targets + members)
+  const sidebarItems = [
+    { key: 'track:sport', label: '跑步 / 运动', sub: '运动打卡 · 拖到时间槽', color: '#e5492b', badge: '跑', mode: 'sport', targetId: '', person: state.name },
+    ...activeStudyTargets().map(st => ({
+      key: 'target:' + st.id,
+      label: st.title,
+      sub: '学习目标 · ' + st.category,
+      color: st.color || '#203f91',
+      badge: '学',
+      mode: 'study',
+      targetId: st.id,
+      person: state.name
+    })),
+    ...members.map((m, idx) => ({
+      key: 'person:' + m,
+      label: m + (m === state.name ? ' (我)' : ''),
+      sub: '成员筛选 · 拖到时间槽代记',
+      color: MEMBER_PALETTE[idx % MEMBER_PALETTE.length],
+      badge: m.slice(0, 1),
+      mode: 'sport',
+      targetId: '',
+      person: m
+    }))
+  ];
+  const q = calSearchQuery.trim().toLowerCase();
+  const filteredSideItems = q
+    ? sidebarItems.filter(x => x.label.toLowerCase().includes(q) || x.sub.toLowerCase().includes(q))
+    : sidebarItems;
+
+  const sideListHtml = filteredSideItems.map(it => {
+    const active = calSelectedTrack === it.key;
+    return '<button type="button" class="rd-track-item' + (active ? ' is-active' : '') + '" draggable="true"'
+      + ' data-action="cal-toggle-track" data-value="' + esc(it.key) + '"'
+      + ' data-cal-drag-mode="' + it.mode + '" data-cal-drag-target="' + esc(it.targetId) + '" data-cal-drag-person="' + esc(it.person) + '">'
+      + '<span class="rd-drag-grip" aria-hidden="true">⋮⋮</span>'
+      + '<span class="rd-track-badge" style="background:' + it.color + '">' + esc(it.badge) + '</span>'
+      + '<span class="rd-track-text"><strong>' + esc(it.label) + '</strong><small>' + esc(it.sub) + '</small></span>'
+      + '</button>';
+  }).join('') || '<div class="rd-empty-box" style="padding:14px">无匹配项目</div>';
+
+  // Desktop Grid Header + All-day + Hourly Lanes (05:00 - 23:00 -> 18 hours)
+  const START_HOUR = 5;
+  const END_HOUR = 23;
+  const HOUR_PX = 54;
+  const dowNames = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const gridCls = calViewMode === 'day' ? 'is-day' : 'is-week';
+
+  const dayHeadsHtml = visibleDays.map(dk => {
+    const dt = new Date(dk + 'T12:00:00');
+    const isT = dk === t;
+    return '<button type="button" class="rd-day-col-head' + (isT ? ' is-today' : '') + '" data-action="cal-pick-date" data-value="' + dk + '">'
+      + '<small>' + dowNames[dt.getDay()] + '</small>'
+      + '<span class="rd-day-num">' + dt.getDate() + '</span>'
+      + '</button>';
+  }).join('');
+
+  const allDayCellsHtml = visibleDays.map(dk => {
+    const isT = dk === t;
+    const spPlan = state.sportDatePlan && state.sportDatePlan[dk];
+    const stPlan = state.studyDatePlan && state.studyDatePlan[dk];
+    const hbRate = habitRateForDate(dk);
+    const chips = [];
+    if (spPlan) chips.push('<button type="button" class="rd-allday-chip is-sport" data-action="cal-slot-add" data-date="' + dk + '" data-time="07:00" data-mode="sport">跑 ' + spPlan + 'k</button>');
+    if (stPlan) chips.push('<button type="button" class="rd-allday-chip is-study" data-action="cal-slot-add" data-date="' + dk + '" data-time="09:00" data-mode="study">学 ' + stPlan + 'h</button>');
+    if (hbRate.done > 0) chips.push('<button type="button" class="rd-allday-chip is-habit" data-action="go-view" data-value="people">自律 ' + hbRate.done + '/' + hbRate.total + '</button>');
+    return '<div class="rd-allday-cell' + (isT ? ' is-today' : '') + '">' + chips.join('') + '</div>';
+  }).join('');
+
+  const hourAxisHtml = '<div class="rd-hour-axis">'
+    + Array.from({ length: END_HOUR - START_HOUR }, (_, idx) => {
+      const hr = START_HOUR + idx;
+      return '<div class="rd-hour-lbl">' + pad(hr) + '时</div>';
+    }).join('')
+    + '</div>';
+
+  function buildDayLaneHtml(dk) {
+    const isT = dk === t;
+    const slotsHtml = Array.from({ length: END_HOUR - START_HOUR }, (_, idx) => {
+      const hr = START_HOUR + idx;
+      const tStr = pad(hr) + ':00';
+      return '<div class="rd-hour-slot" data-action="cal-slot-add" data-date="' + dk + '" data-time="' + tStr + '" data-cal-drop-date="' + dk + '" data-cal-drop-time="' + tStr + '" title="点击或拖入项目安排 ' + dk + ' ' + tStr + '"></div>';
+    }).join('');
+
+    const dayRecs = (byDate.get(dk) || []).slice().sort((a, b) => parseTimeToMins(a.time) - parseTimeToMins(b.time));
+    const evsHtml = dayRecs.map((item, idx) => {
+      const startM = parseTimeToMins(item.time);
+      const durM = item._kind === 'study' ? Math.max(25, studyMinutesOf(item)) : Math.max(25, Number(item.minutes) || 30);
+      const clampedStart = Math.max(START_HOUR * 60, Math.min((END_HOUR - 0.5) * 60, startM));
+      const topPx = ((clampedStart - START_HOUR * 60) / 60) * HOUR_PX;
+      const heightPx = Math.max(28, Math.min(((END_HOUR * 60 - clampedStart) / 60) * HOUR_PX, (durM / 60) * HOUR_PX));
+      const isStudy = item._kind === 'study';
+      const title = isStudy ? (item.subject || findTargetTitle(item.targetId) || '专注学习') : ('跑步 ' + Number(item.km).toFixed(1) + ' km');
+      const sub = (item.time || '--:--') + ' · ' + (isStudy ? (studyMinutesOf(item) + 'min') : ((item.minutes || 0) + 'min')) + (calPersonFilter === 'all' && members.length > 1 ? (' · ' + item.person) : '');
+      // Simple overlap offset if same hour slot has >1 items
+      const overlapCount = dayRecs.filter(other => Math.abs(parseTimeToMins(other.time) - startM) < 35).length;
+      const overlapRank = dayRecs.slice(0, idx).filter(other => Math.abs(parseTimeToMins(other.time) - startM) < 35).length;
+      let horizStyle = '';
+      if (overlapCount > 1) {
+        const pctW = (100 / overlapCount);
+        horizStyle = 'left:calc(' + (overlapRank * pctW).toFixed(1) + '% + 2px);width:calc(' + pctW.toFixed(1) + '% - 4px);right:auto;';
+      }
+      return '<button type="button" class="rd-cal-ev ' + (isStudy ? 'is-study' : 'is-sport') + '"'
+        + ' style="top:' + topPx.toFixed(1) + 'px;height:' + heightPx.toFixed(1) + 'px;' + horizStyle + '"'
+        + ' data-action="open-receipt-modal" data-value="' + esc(item._key) + '">'
+        + '<strong>' + esc(title) + '</strong>'
+        + '<small>' + esc(sub) + '</small>'
+        + '</button>';
+    }).join('');
+
+    let nowLineHtml = '';
+    if (isT && nowMins >= START_HOUR * 60 && nowMins <= END_HOUR * 60) {
+      const nowTop = ((nowMins - START_HOUR * 60) / 60) * HOUR_PX;
+      nowLineHtml = '<div class="rd-now-line" style="top:' + nowTop.toFixed(1) + 'px" aria-label="当前时间"></div>';
+    }
+    return '<div class="rd-day-lane' + (isT ? ' is-today' : '') + '">' + slotsHtml + evsHtml + nowLineHtml + '</div>';
+  }
+
+  const desktopMainContent = calLayoutMode === 'list'
+    ? '<div class="rd-cal-list-wrap">'
+      + visibleDays.map(dk => {
+        const dt = new Date(dk + 'T12:00:00');
+        const list = byDate.get(dk) || [];
+        if (!list.length && calViewMode === 'week') return '';
+        const rows = list.length
+          ? list.map(item => {
+            const isStudy = item._kind === 'study';
+            const val = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
+            const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || ('配速 ' + pace(item)));
+            return '<button type="button" class="rd-feed-row" data-action="open-receipt-modal" data-value="' + esc(item._key) + '">'
+              + '<span class="rd-feed-pill ' + (isStudy ? 'is-study' : 'is-sport') + '">' + (isStudy ? '学习' : '运动') + '</span>'
+              + '<span class="rd-feed-main"><strong>' + val + '</strong><small>' + esc(item.person + ' · ' + detail) + '</small></span>'
+              + '<span class="rd-feed-right"><span>' + esc(item.time || '--:--') + '</span><span aria-hidden="true">›</span></span>'
+              + '</button>';
+          }).join('')
+          : '<div class="rd-empty-box">该日暂无记录</div>';
+        return '<div class="rd-section-label"><span>' + dk + ' · ' + dowNames[dt.getDay()] + (dk === t ? ' (今天)' : '') + '</span><button type="button" data-action="cal-slot-add" data-date="' + dk + '" data-time="08:00">+ 补卡</button></div>'
+          + '<div class="rd-card rd-feed-card">' + rows + '</div>';
+      }).filter(Boolean).join('')
+      + (visibleDays.every(dk => !(byDate.get(dk) || []).length)
+        ? '<div class="rd-card rd-empty-box"><span>当前周期还没有运动或学习记录</span><button type="button" class="rd-pill-btn is-primary" data-action="cal-slot-add" data-date="' + calAnchorDate + '" data-time="08:00">+ 新建打卡</button></div>'
+        : '')
+      + '</div>'
+    : '<div class="rd-grid-head ' + gridCls + '"><div class="rd-tz-cell">GMT+8</div>' + dayHeadsHtml + '</div>'
+      + '<div class="rd-allday-row ' + gridCls + '"><div class="rd-allday-lbl">全天</div>' + allDayCellsHtml + '</div>'
+      + '<div class="rd-timegrid-scroll"><div class="rd-timegrid ' + gridCls + '">' + hourAxisHtml + visibleDays.map(buildDayLaneHtml).join('') + '</div></div>';
+
+  // Mobile TickTick Calendar
+  const anchorDt = new Date(calAnchorDate + 'T12:00:00');
+  const mobileMonthLabel = anchorDt.getFullYear() + '年' + (anchorDt.getMonth() + 1) + '月';
+  const mobileWeekHtml = weekDays.map(dk => {
+    const dt = new Date(dk + 'T12:00:00');
+    const isSel = dk === calAnchorDate;
+    const isT = dk === t;
+    const items = byDate.get(dk) || [];
+    const hasSp = items.some(x => x._kind === 'sport');
+    const hasSt = items.some(x => x._kind === 'study');
+    return '<button type="button" class="rd-wday-btn' + (isT ? ' is-today' : '') + (isSel ? ' is-selected' : '') + '" data-action="cal-pick-date" data-value="' + dk + '">'
+      + '<small>' + '日一二三四五六'[dt.getDay()] + '</small>'
+      + '<span class="rd-wday-num">' + dt.getDate() + '</span>'
+      + '<span class="rd-wday-dots">' + (hasSp ? '<i style="background:#e5492b"></i>' : '') + (hasSt ? '<i style="background:#203f91"></i>' : '') + '</span>'
+      + '</button>';
+  }).join('');
+
+  const selDayItems = byDate.get(calAnchorDate) || [];
+  const selSpKm = selDayItems.filter(x => x._kind === 'sport').reduce((s, r) => s + Number(r.km || 0), 0);
+  const selStMin = selDayItems.filter(x => x._kind === 'study').reduce((s, r) => s + studyMinutesOf(r), 0);
+  const selHb = habitRateForDate(calAnchorDate);
+
+  const mobileBodyHtml = calMobileMode === 'timeline'
+    ? '<div class="rd-card rd-mcal-timeline"><div class="rd-timegrid is-day">' + hourAxisHtml + buildDayLaneHtml(calAnchorDate) + '</div></div>'
+    : (selDayItems.length
+      ? '<div class="rd-card rd-feed-card">'
+        + selDayItems.map(item => {
+          const isStudy = item._kind === 'study';
+          const val = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
+          const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || ('配速 ' + pace(item)));
+          return '<button type="button" class="rd-feed-row" data-action="open-receipt-modal" data-value="' + esc(item._key) + '">'
+            + '<span class="rd-feed-pill ' + (isStudy ? 'is-study' : 'is-sport') + '">' + (isStudy ? '学习' : '运动') + '</span>'
+            + '<span class="rd-feed-main"><strong>' + val + '</strong><small>' + esc(detail) + '</small></span>'
+            + '<span class="rd-feed-right"><span>' + esc(item.time || '--:--') + '</span><span aria-hidden="true">›</span></span>'
+            + '</button>';
+        }).join('')
+        + '</div>'
+      : '<div class="rd-card rd-empty-box"><span>' + calAnchorDate + ' 暂无运动或学习记录</span><button type="button" class="rd-pill-btn is-primary" data-action="cal-slot-add" data-date="' + calAnchorDate + '" data-time="08:00">+ 为这一天补记</button></div>');
+
+  const kindLabelShort = calKindFilter === 'all' ? '全部' : (calKindFilter === 'sport' ? '运动' : '学习');
+
+  return '<section class="rd-cal-page" aria-label="日历与时间表">'
+    + '<div class="rd-cal-topbar">'
+    + '<div class="rd-cal-title-group"><h2>日历与排程</h2><span class="rd-today-badge">' + recs.length + ' 条记录</span></div>'
+    + '<div class="rd-cal-controls">'
+    + '<select class="rd-select" id="cal-person-select" aria-label="按成员筛选">' + memberOpts + '</select>'
+    + '<select class="rd-select" id="cal-kind-select" aria-label="按类型筛选">' + kindOpts + '</select>'
+    + '<div class="rd-seg" role="tablist" aria-label="视图切换">'
+    + '<button type="button" class="' + (calLayoutMode === 'list' ? 'active' : '') + '" data-action="cal-layout" data-value="list">列表</button>'
+    + '<button type="button" class="' + (calLayoutMode === 'calendar' ? 'active' : '') + '" data-action="cal-layout" data-value="calendar">日历</button>'
     + '</div>'
-    + '</section>'
-    + '<section class="poster-hero poster-lightning" data-wm="' + studyPct + '%">'
-    + '<div class="poster-meta"><span>[ 02-B / 学习目标 · LIGHTNING PIXEL ]</span><span>每周 ' + state.studyDays.length + ' 学 · ' + (doneStudy ? '今日已学 ✓' : '今日待学') + '</span></div>'
-    + '<div class="plan-hero-row">'
-    + '<div class="poster-big-stat"><small>学时达成</small><strong>' + studyPct + '<em>%</em></strong></div>'
-    + '<div class="poster-body">'
-    + '<h2>' + stH.toFixed(1) + ' <em>/ ' + state.studyGoal + ' H</em></h2>'
-    + '<p class="poster-cn">已学 ' + stH.toFixed(1) + ' 小时 · ' + (studyRem ? '距目标还差 ' + studyRem.toFixed(1) + ' h 保持专注' : '本月学习目标已达成 ✓') + '</p>'
+    + '<button type="button" class="rd-pill-btn is-primary" data-action="cal-slot-add" data-date="' + calAnchorDate + '" data-time="' + pad(now.getHours()) + ':00">+ 新建打卡</button>'
     + '</div></div>'
-    + '<div class="poster-kpis poster-kpis-4">'
-    + '<div><small>完成率</small><strong>' + studyPct + '<em>%</em></strong></div>'
-    + '<div><small>本月已学</small><strong>' + stH.toFixed(1) + '<em>H</em></strong></div>'
-    + '<div><small>月度目标</small><strong>' + state.studyGoal + '<em>H</em></strong></div>'
-    + '<div><small>剩余学时</small><strong>' + studyRem.toFixed(1) + '<em>H</em></strong></div>'
+    + '<div class="rd-cal-subbar">'
+    + '<div class="rd-cal-nav-left">'
+    + '<button type="button" class="rd-icon-btn" data-action="cal-shift" data-value="-1" aria-label="上一周期">‹</button>'
+    + '<button type="button" class="rd-icon-btn" data-action="cal-shift" data-value="1" aria-label="下一周期">›</button>'
+    + '<span class="rd-cal-range-label">' + rangeLabel + '</span>'
+    + '<button type="button" class="rd-pill-btn" data-action="cal-today">今天</button>'
     + '</div>'
-    + '</section>'
+    + '<div class="rd-seg" role="tablist" aria-label="日周切换">'
+    + '<button type="button" class="' + (calViewMode === 'day' ? 'active' : '') + '" data-action="cal-viewmode" data-value="day">日</button>'
+    + '<button type="button" class="' + (calViewMode === 'week' ? 'active' : '') + '" data-action="cal-viewmode" data-value="week">周</button>'
+    + '</div></div>'
+    + '<div class="rd-cal-body">'
+    + '<aside class="rd-cal-sidebar">'
+    + buildMiniMonthMarkup(calMiniMonth, calAnchorDate, weekSet, byDate)
+    + '<div class="rd-track-panel">'
+    + '<div class="rd-track-head"><span>我的项目与成员</span><span class="rd-track-count">' + filteredSideItems.length + '</span></div>'
+    + '<input type="search" id="cal-track-search" class="rd-track-search" placeholder="搜索项目或成员…" value="' + esc(calSearchQuery) + '">'
+    + '<div class="rd-track-list">' + sideListHtml + '</div>'
+    + '<div class="rd-track-hint">把项目拖到右侧任意时间槽即可快速安排/补卡。</div>'
+    + '</div></aside>'
+    + '<div class="rd-cal-main">' + desktopMainContent + '</div>'
     + '</div>'
-    + cta(true)
-    + subtabs(['双轨总览', curveTab, '28天三合一热力', '7天双柱对比'], activeProgTab, 'progress-tab', 'equal', { '双轨总览': 'users', [curveTab]: 'chart', '28天三合一热力': 'calendar', '7天双柱对比': 'pulse' })
-    + progressBody()
+    + '<div class="rd-mcal-wrap">'
+    + '<div class="rd-mcal-header">'
+    + '<div class="rd-mcal-toprow">'
+    + '<button type="button" class="rd-mcal-month-btn" data-action="cal-toggle-mmonth"><strong>' + mobileMonthLabel + ' <span>' + (calMonthExpanded ? '▴' : '▾') + '</span></strong><small>' + (calAnchorDate === t ? '今天 · 点此展开月历' : '点击月历或点右侧回今天') + '</small></button>'
+    + '<div class="rd-mcal-tools">'
+    + (calAnchorDate !== t ? '<button type="button" class="rd-pill-btn" data-action="cal-today">今天</button>' : '')
+    + '<button type="button" class="rd-pill-btn" data-action="cal-cycle-kind">' + kindLabelShort + '</button>'
+    + '<div class="rd-seg">'
+    + '<button type="button" class="' + (calMobileMode === 'list' ? 'active' : '') + '" data-action="cal-mobile-mode" data-value="list">清单</button>'
+    + '<button type="button" class="' + (calMobileMode === 'timeline' ? 'active' : '') + '" data-action="cal-mobile-mode" data-value="timeline">时间轴</button>'
+    + '</div></div></div>'
+    + (calMonthExpanded
+      ? buildMiniMonthMarkup(calMiniMonth, calAnchorDate, weekSet, byDate)
+      : '<div class="rd-week-strip"><button type="button" class="rd-week-arrow" data-action="cal-shift" data-value="-1" aria-label="上一周">‹</button>' + mobileWeekHtml + '<button type="button" class="rd-week-arrow" data-action="cal-shift" data-value="1" aria-label="下一周">›</button></div>')
+    + '</div>'
+    + '<div class="rd-mcal-body">'
+    + '<div class="rd-card rd-mcal-summary">'
+    + '<span style="font-size:12.5px;font-weight:700;color:var(--ink-deep)">' + calAnchorDate + '</span>'
+    + '<span style="font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums">运动 ' + selSpKm.toFixed(1) + ' km · 学习 ' + selStMin + ' 分钟 · 自律 ' + selHb.done + '/' + selHb.total + '</span>'
+    + '</div>'
+    + mobileBodyHtml
+    + '</div></div>'
+    + '</section>';
+}
+
+/* ---------- View 2: Statistics Dashboard (Usage + Full TomatoToDo + Running-App 12-Month Dot Matrix & Crisp Metric Bars + Smooth Splines) ---------- */
+function renderSlimBarChartSvg(buckets, color, unitLabel, formatVal) {
+  const W = 440, H = 156, padL = 10, padR = 48, padT = 14, padB = 24;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const rawMax = Math.max(0, ...buckets.map(b => b.val));
+  const niceMax = rawMax <= 0 ? 10 : Math.ceil(rawMax * 1.15);
+  const ticks = [0, niceMax / 2, niceMax];
+  const gridSvg = ticks.map(tv => {
+    const y = padT + plotH - (tv / niceMax) * plotH;
+    return '<line class="rd-grid-dash" x1="' + padL + '" y1="' + y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + y.toFixed(1) + '"/>'
+      + '<text class="rd-axis-txt" x="' + (W - padR + 6) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="start">' + esc(formatVal ? formatVal(tv) : String(Math.round(tv))) + '</text>';
+  }).join('');
+
+  const n = Math.max(1, buckets.length);
+  const colW = plotW / n;
+  const bw = Math.max(4, Math.min(18, colW * 0.44));
+  const barsSvg = buckets.map((b, i) => {
+    const cx = padL + i * colW + colW / 2;
+    const h = b.val > 0 ? Math.max(4, (b.val / niceMax) * plotH) : 0;
+    const y = padT + plotH - h;
+    const showLbl = n <= 12 || i === 0 || i === n - 1 || i % Math.ceil(n / 7) === 0;
+    return '<g>'
+      + (h > 0
+        ? '<rect class="rd-bar-rect" x="' + (cx - bw / 2).toFixed(1) + '" y="' + y.toFixed(1) + '" width="' + bw.toFixed(1) + '" height="' + h.toFixed(1) + '" rx="2.5" fill="' + color + '"><title>' + esc(b.tip || (b.label + ': ' + b.val + unitLabel)) + '</title></rect>'
+        : '<rect x="' + (cx - bw / 2).toFixed(1) + '" y="' + (padT + plotH - 2) + '" width="' + bw.toFixed(1) + '" height="2" rx="1" fill="rgba(38,38,36,.10)"/>')
+      + (showLbl ? '<text class="rd-axis-txt" x="' + cx.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(b.label) + '</text>' : '')
+      + '</g>';
+  }).join('');
+
+  return '<svg class="rd-svg-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img">' + gridSvg + barsSvg + '</svg>';
+}
+
+function renderSmoothSplineCardSvg(points, color, gradId, formatY) {
+  const W = 440, H = 164, padL = 38, padR = 14, padT = 16, padB = 26;
+  const plotW = W - padL - padR, plotH = H - padT - padB;
+  const rawMax = Math.max(0, ...points.map(p => p.val));
+  const niceMax = rawMax <= 0 ? 10 : Math.ceil(rawMax * 1.18 * 10) / 10;
+  const ticks = [0, niceMax / 2, niceMax];
+  const gridSvg = ticks.map(tv => {
+    const y = padT + plotH - (tv / niceMax) * plotH;
+    return '<line class="rd-grid-dash" x1="' + padL + '" y1="' + y.toFixed(1) + '" x2="' + (W - padR) + '" y2="' + y.toFixed(1) + '"/>'
+      + '<text class="rd-axis-txt" x="' + (padL - 6) + '" y="' + (y + 3.5).toFixed(1) + '" text-anchor="end">' + esc(formatY(tv)) + '</text>';
+  }).join('');
+
+  const n = Math.max(1, points.length);
+  const coords = points.map((p, i) => ({
+    ...p,
+    x: n === 1 ? (padL + plotW / 2) : (padL + (i / (n - 1)) * plotW),
+    y: padT + plotH - (p.val / niceMax) * plotH
+  }));
+
+  const d = smoothSplinePath(coords);
+  const area = coords.length > 1
+    ? d + ' L' + coords.at(-1).x.toFixed(1) + ',' + (padT + plotH) + ' L' + coords[0].x.toFixed(1) + ',' + (padT + plotH) + ' Z'
+    : '';
+  const defs = '<defs><linearGradient id="' + gradId + '" x1="0" y1="0" x2="0" y2="1">'
+    + '<stop offset="0%" stop-color="' + color + '" stop-opacity=".26"/>'
+    + '<stop offset="100%" stop-color="' + color + '" stop-opacity=".01"/>'
+    + '</linearGradient></defs>';
+
+  const nodesSvg = coords.map((p, i) => {
+    const isSel = statsSelectedNode === p.key;
+    const showLbl = n <= 12 || i === 0 || i === n - 1 || i % Math.ceil(n / 6) === 0 || isSel;
+    const showDot = p.val > 0 || isSel || n <= 14;
+    return '<g class="rd-spline-node" data-action="stats-pick-node" data-value="' + esc(p.key) + '">'
+      + '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="10" fill="transparent"><title>' + esc(p.tip) + '</title></circle>'
+      + (isSel ? '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="8" fill="' + color + '" fill-opacity=".18" stroke="' + color + '" stroke-width="1.4"/>' : '')
+      + (showDot ? '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="' + (isSel ? 4.6 : 3.2) + '" fill="' + color + '" stroke="#ffffff" stroke-width="1.8"/>' : '')
+      + (showLbl ? '<text class="rd-axis-txt" x="' + p.x.toFixed(1) + '" y="' + (H - 6) + '" text-anchor="middle">' + esc(p.label) + '</text>' : '')
+      + '</g>';
+  }).join('');
+
+  return '<svg class="rd-svg-chart" viewBox="0 0 ' + W + ' ' + H + '" role="img">'
+    + defs + gridSvg
+    + (area ? '<path d="' + area + '" fill="url(#' + gradId + ')"/>' : '')
+    + (d ? '<path d="' + d + '" fill="none" stroke="' + color + '" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>' : '')
+    + nodesSvg
+    + '</svg>';
+}
+
+function renderYearDotMatrixCard(yearNum, mySport, myStudy) {
+  const dayMap = new Map();
+  mySport.forEach(r => {
+    if (String(r.date).startsWith(yearNum + '-')) {
+      const cur = dayMap.get(r.date) || { sp: false, st: false };
+      cur.sp = true;
+      dayMap.set(r.date, cur);
+    }
+  });
+  myStudy.forEach(r => {
+    if (String(r.date).startsWith(yearNum + '-')) {
+      const cur = dayMap.get(r.date) || { sp: false, st: false };
+      cur.st = true;
+      dayMap.set(r.date, cur);
+    }
+  });
+  const activeDates = [...dayMap.keys()].filter(dk => {
+    const v = dayMap.get(dk);
+    if (statsTab === 'sport') return v.sp;
+    if (statsTab === 'study') return v.st;
+    return v.sp || v.st;
+  }).sort();
+
+  // Compute max streak in year
+  let bestStreak = 0, curS = 0;
+  for (let i = 0; i < activeDates.length; i++) {
+    if (i === 0 || addDaysStr(activeDates[i - 1], 1) === activeDates[i]) curS++;
+    else curS = 1;
+    if (curS > bestStreak) bestStreak = curS;
+  }
+
+  const monthsHtml = Array.from({ length: 12 }, (_, mIdx) => {
+    const first = new Date(yearNum, mIdx, 1, 12);
+    const daysInMo = new Date(yearNum, mIdx + 1, 0, 12).getDate();
+    const lead = (first.getDay() + 6) % 7;
+    let cells = '';
+    for (let k = 0; k < lead; k++) cells += '<span class="rd-dot-cell is-pad"></span>';
+    for (let d = 1; d <= daysInMo; d++) {
+      const dk = yearNum + '-' + pad(mIdx + 1) + '-' + pad(d);
+      const st = dayMap.get(dk);
+      let cls = '';
+      if (st) {
+        if (statsTab === 'sport') cls = st.sp ? 'is-sport' : '';
+        else if (statsTab === 'study') cls = st.st ? 'is-study' : '';
+        else cls = (st.sp && st.st) ? 'is-both' : (st.sp ? 'is-sport' : 'is-study');
+      }
+      cells += '<span class="rd-dot-cell ' + cls + '" title="' + dk + '"></span>';
+    }
+    return '<div class="rd-dot-month"><span class="rd-dot-month-lbl">' + (mIdx + 1) + '月</span><div class="rd-dot-month-cells">' + cells + '</div></div>';
+  }).join('');
+
+  return '<article class="rd-card rd-stat-card is-wide">'
+    + '<div class="rd-stat-card-head">'
+    + '<div class="rd-stat-card-title"><h3>' + yearNum + ' 年度打卡圆点矩阵</h3><small>绿=双轨 · 橙=运动 · 蓝=学习</small></div>'
+    + '<div class="rd-stat-arrows">'
+    + '<button type="button" data-action="stats-shift-period" data-value="-1" aria-label="上一年">‹</button>'
+    + '<button type="button" data-action="stats-shift-period" data-value="1" aria-label="下一年">›</button>'
+    + '</div></div>'
+    + '<div class="rd-dot-year-headline"><strong>' + activeDates.length + ' 天</strong><span>最长连续 ' + bestStreak + ' 天 · 当前双轨连胜 ' + dualStreak() + ' 天</span></div>'
+    + '<div class="rd-dot-year-grid">' + monthsHtml + '</div>'
+    + '</article>';
+}
+
+function progress() {
+  const mySport = mine(state.records);
+  const myStudy = mineStudy(state.studyRecords);
+  const anchorDt = new Date(statsAnchorDate + 'T12:00:00');
+  const yr = anchorDt.getFullYear();
+  const mo = anchorDt.getMonth() + 1;
+  const ymStr = yr + '-' + pad(mo);
+  const monWeek = getMondayOfWeek(statsAnchorDate);
+  const weekDays = Array.from({ length: 7 }, (_, i) => addDaysStr(monWeek, i));
+
+  // Filter records for selected period
+  function inPeriod(dk) {
+    if (statsPeriod === 'all') return true;
+    if (statsPeriod === 'year') return String(dk).startsWith(yr + '-');
+    if (statsPeriod === 'month') return String(dk).startsWith(ymStr + '-');
+    return weekDays.includes(dk);
+  }
+  const periodLabel = statsPeriod === 'all' ? '全部历史'
+    : statsPeriod === 'year' ? (yr + '年')
+    : statsPeriod === 'month' ? (yr + '年' + mo + '月')
+    : (weekDays[0].slice(5) + ' ~ ' + weekDays[6].slice(5));
+
+  const pSport = mySport.filter(r => inPeriod(r.date));
+  const pStudy = myStudy.filter(r => inPeriod(r.date));
+
+  const topCardHtml = '<section class="rd-card rd-stats-topbar">'
+    + '<div class="rd-stats-head-row">'
+    + '<h2>统计数据</h2>'
+    + '<div class="rd-stats-head-icons">'
+    + '<button type="button" class="rd-icon-btn" data-action="go-view" data-value="calendar" title="日历时间表" aria-label="打开日历">' + icon('calendar') + '</button>'
+    + '<button type="button" class="rd-icon-btn" data-action="go-view" data-value="records" title="打卡流水" aria-label="打开记录">' + icon('pulse') + '</button>'
+    + '<button type="button" class="rd-icon-btn" data-action="go-view" data-value="achievements" title="成就勋章" aria-label="打开成就">' + icon('medal') + '</button>'
+    + '<button type="button" class="rd-icon-btn" data-action="stats-open-settings" title="统计图表设置" aria-label="统计图表设置">⚙</button>'
+    + '</div></div>'
+    + '<div class="rd-seg is-stretch" role="tablist" aria-label="统计维度">'
+    + [['all', '总览'], ['sport', '运动'], ['study', '学习'], ['rank', '排名']].map(([id, lbl]) =>
+      '<button type="button" class="' + (statsTab === id ? 'active' : '') + '" data-action="stats-tab" data-value="' + id + '">' + lbl + '</button>'
+    ).join('')
+    + '</div>'
+    + (statsTab !== 'rank'
+      ? '<div class="rd-stats-filter-row">'
+        + '<div class="rd-seg" role="tablist" aria-label="时间周期">'
+        + [['week', '周'], ['month', '月'], ['year', '年'], ['all', '全部']].map(([id, lbl]) =>
+          '<button type="button" class="' + (statsPeriod === id ? 'active' : '') + '" data-action="stats-period" data-value="' + id + '">' + lbl + '</button>'
+        ).join('')
+        + '</div>'
+        + (statsPeriod !== 'all'
+          ? '<div class="rd-period-nav">'
+            + '<button type="button" class="rd-icon-btn" data-action="stats-shift-period" data-value="-1" aria-label="上一周期">‹</button>'
+            + '<span class="rd-period-label">' + periodLabel + '</span>'
+            + '<button type="button" class="rd-icon-btn" data-action="stats-shift-period" data-value="1" aria-label="下一周期">›</button>'
+            + '</div>'
+          : '<span class="rd-period-label">全部历史</span>')
+        + '</div>'
+      : '')
+    + '</section>';
+
+  if (statsTab === 'rank') {
+    return '<div class="rd-stats-page">' + topCardHtml + '<div class="rd-card" style="overflow:hidden">' + ranking() + '</div></div>';
+  }
+
+  // Card 1 & 2: Cumulative & Single-Day Overview (TomatoToDo top cards)
+  const totalCountAll = (statsTab === 'sport' ? mySport.length : statsTab === 'study' ? myStudy.length : mySport.length + myStudy.length);
+  const totalSportKmAll = total(mySport);
+  const totalStudyMinAll = myStudy.reduce((s, r) => s + studyMinutesOf(r), 0);
+  const totalSportMinAll = mySport.reduce((s, r) => s + Number(r.minutes || 0), 0);
+  const uniqueDaysAll = new Set([
+    ...(statsTab === 'study' ? [] : mySport.map(r => r.date)),
+    ...(statsTab === 'sport' ? [] : myStudy.map(r => r.date))
+  ]).size || 1;
+  const avgDailyMin = Math.round(((statsTab === 'sport' ? totalSportMinAll : statsTab === 'study' ? totalStudyMinAll : totalSportMinAll + totalStudyMinAll)) / uniqueDaysAll);
+
+  const daySp = mySport.filter(r => r.date === statsDayDate);
+  const daySt = myStudy.filter(r => r.date === statsDayDate);
+  const dayCount = (statsTab === 'sport' ? daySp.length : statsTab === 'study' ? daySt.length : daySp.length + daySt.length);
+  const daySportKm = total(daySp);
+  const dayStudyMin = daySt.reduce((s, r) => s + studyMinutesOf(r), 0);
+
+  const summaryCardsHtml = statsVisibleCards.summary
+    ? '<article class="rd-card rd-stat-card">'
+      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>累计总览</h3><small>全周期真实汇总</small></div></div>'
+      + '<div class="rd-kpi-row">'
+      + '<div class="rd-kpi-cell"><small>累计次数</small><strong>' + totalCountAll + '<em>次</em></strong></div>'
+      + '<div class="rd-kpi-cell"><small>' + (statsTab === 'study' ? '累计学习' : '累计跑量') + '</small><strong>' + (statsTab === 'study' ? (totalStudyMinAll / 60).toFixed(1) + '<em>h</em>' : totalSportKmAll.toFixed(1) + '<em>km</em>') + '</strong></div>'
+      + '<div class="rd-kpi-cell"><small>' + (statsTab === 'all' ? '累计学习' : '日均时长') + '</small><strong>' + (statsTab === 'all' ? (totalStudyMinAll / 60).toFixed(1) + '<em>h</em>' : formatDurHm(avgDailyMin)) + '</strong></div>'
+      + '</div></article>'
+      + '<article class="rd-card rd-stat-card">'
+      + '<div class="rd-stat-card-head">'
+      + '<div class="rd-stat-card-title"><h3>当日统计</h3><small>' + statsDayDate + '</small></div>'
+      + '<div class="rd-stat-arrows">'
+      + '<button type="button" data-action="stats-shift-day" data-value="-1" aria-label="前一天">‹</button>'
+      + '<button type="button" data-action="stats-shift-day" data-value="1" aria-label="后一天">›</button>'
+      + '</div></div>'
+      + '<div class="rd-kpi-row is-2">'
+      + '<div class="rd-kpi-cell"><small>当日次数</small><strong>' + dayCount + '<em>次</em></strong></div>'
+      + '<div class="rd-kpi-cell"><small>' + (statsTab === 'sport' ? '当日里程' : statsTab === 'study' ? '当日专注' : '运动 / 学习') + '</small><strong>'
+      + (statsTab === 'sport' ? (daySportKm.toFixed(1) + '<em>km</em>') : statsTab === 'study' ? (dayStudyMin + '<em>分钟</em>') : (daySportKm.toFixed(1) + '<em>km</em> / ' + dayStudyMin + '<em>m</em>'))
+      + '</strong></div></div></article>'
+    : '';
+
+  // Card 3: 12-Month Dot Matrix Calendar
+  const yearDotsHtml = statsVisibleCards.yearDots ? renderYearDotMatrixCard(yr, mySport, myStudy) : '';
+
+  // Card 4: Multi-Metric Slim Vertical Bar Cards (Running-App screenshot inspired!)
+  function buildPeriodBuckets() {
+    if (statsPeriod === 'week') {
+      const dows = ['一', '二', '三', '四', '五', '六', '日'];
+      return weekDays.map((dk, i) => ({ key: dk, label: dows[i], match: r => r.date === dk }));
+    }
+    if (statsPeriod === 'month') {
+      const daysInMo = new Date(yr, mo, 0, 12).getDate();
+      return Array.from({ length: daysInMo }, (_, i) => {
+        const dk = ymStr + '-' + pad(i + 1);
+        return { key: dk, label: String(i + 1), match: r => r.date === dk };
+      });
+    }
+    // year or all -> 12 months of yr
+    return Array.from({ length: 12 }, (_, i) => {
+      const mKey = yr + '-' + pad(i + 1);
+      return { key: mKey, label: String(i + 1), match: r => String(r.date).startsWith(mKey + '-') };
+    });
+  }
+  const periodBuckets = buildPeriodBuckets();
+  const metricBarsHtml = statsVisibleCards.metricBars ? (() => {
+    const cards = [];
+    if (statsTab !== 'study') {
+      const distBuckets = periodBuckets.map(b => {
+        const v = Number(pSport.filter(b.match).reduce((s, r) => s + Number(r.km || 0), 0).toFixed(2));
+        return { label: b.label, val: v, tip: b.key + ' · ' + v.toFixed(2) + ' km' };
+      });
+      cards.push('<article class="rd-card rd-stat-card">'
+        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>跑步里程 · Distance</h3><small>' + periodLabel + '</small></div></div>'
+        + '<div class="rd-mbar-headline">' + total(pSport).toFixed(2) + '<small>km</small></div>'
+        + renderSlimBarChartSvg(distBuckets, '#0ea5a4', ' km', v => v.toFixed(1))
+        + '</article>');
+    }
+    const durBuckets = periodBuckets.map(b => {
+      const spM = statsTab === 'study' ? 0 : pSport.filter(b.match).reduce((s, r) => s + Number(r.minutes || 0), 0);
+      const stM = statsTab === 'sport' ? 0 : pStudy.filter(b.match).reduce((s, r) => s + studyMinutesOf(r), 0);
+      const v = Math.round(spM + stM);
+      return { label: b.label, val: v, tip: b.key + ' · ' + formatDurHm(v) };
+    });
+    const totalDurMin = durBuckets.reduce((s, b) => s + b.val, 0);
+    cards.push('<article class="rd-card rd-stat-card">'
+      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>总投入时长 · Duration</h3><small>' + periodLabel + '</small></div></div>'
+      + '<div class="rd-mbar-headline">' + formatDurHm(totalDurMin) + '</div>'
+      + renderSlimBarChartSvg(durBuckets, '#16a34a', ' 分钟', v => Math.round(v) + 'm')
+      + '</article>');
+
+    const sessBuckets = periodBuckets.map(b => {
+      const spC = statsTab === 'study' ? 0 : pSport.filter(b.match).length;
+      const stC = statsTab === 'sport' ? 0 : pStudy.filter(b.match).length;
+      const v = spC + stC;
+      return { label: b.label, val: v, tip: b.key + ' · ' + v + ' 次' };
+    });
+    const totalSess = sessBuckets.reduce((s, b) => s + b.val, 0);
+    cards.push('<article class="rd-card rd-stat-card">'
+      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>打卡频次 · Sessions</h3><small>' + periodLabel + '</small></div></div>'
+      + '<div class="rd-mbar-headline">' + totalSess + '<small>次</small></div>'
+      + renderSlimBarChartSvg(sessBuckets, '#2563eb', ' 次', v => String(Math.round(v)))
+      + '</article>');
+
+    if (statsTab !== 'study') {
+      const paceBuckets = periodBuckets.map(b => {
+        const list = pSport.filter(b.match);
+        const km = total(list), min = list.reduce((s, r) => s + Number(r.minutes || 0), 0);
+        const v = km > 0 ? Number((min / km).toFixed(2)) : 0;
+        return { label: b.label, val: v, tip: b.key + ' · 配速 ' + (v ? v.toFixed(1) + ' min/km' : '—') };
+      });
+      cards.push('<article class="rd-card rd-stat-card">'
+        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>平均配速 · Average Pace</h3><small>' + periodLabel + '</small></div></div>'
+        + '<div class="rd-mbar-headline">' + (pSport.length ? avgPace(pSport) : '--') + '<small>/km</small></div>'
+        + renderSlimBarChartSvg(paceBuckets, '#65a30d', ' min/km', v => v ? (Math.floor(v) + "'" + pad(Math.round((v % 1) * 60)) + '"') : '0')
+        + '</article>');
+    } else {
+      const focusBuckets = periodBuckets.map(b => {
+        const list = pStudy.filter(b.match);
+        const v = list.length ? Number((list.reduce((s, r) => s + Number(r.focus || 3), 0) / list.length).toFixed(2)) : 0;
+        return { label: b.label, val: v, tip: b.key + ' · 专注 ' + v + '/5' };
+      });
+      const avgF = pStudy.length ? (pStudy.reduce((s, r) => s + Number(r.focus || 3), 0) / pStudy.length).toFixed(1) : '0.0';
+      cards.push('<article class="rd-card rd-stat-card">'
+        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>平均专注度 · Focus</h3><small>' + periodLabel + '</small></div></div>'
+        + '<div class="rd-mbar-headline">' + avgF + '<small>/ 5.0</small></div>'
+        + renderSlimBarChartSvg(focusBuckets, '#e5492b', ' 分', v => v.toFixed(1))
+        + '</article>');
+    }
+    return '<div class="rd-metric-bars-grid is-wide">' + cards.join('') + '</div>';
+  })() : '';
+
+  // Card 5: Smooth Monthly Spline Curve (replaces stiff line chart!)
+  const monthCurveHtml = statsVisibleCards.monthCurve ? (() => {
+    const daysInMo = new Date(yr, mo, 0, 12).getDate();
+    const pts = Array.from({ length: daysInMo }, (_, i) => {
+      const dk = ymStr + '-' + pad(i + 1);
+      const spKm = total(mySport.filter(r => r.date === dk));
+      const stMin = myStudy.filter(r => r.date === dk).reduce((s, r) => s + studyMinutesOf(r), 0);
+      const val = statsTab === 'sport' ? Number(spKm.toFixed(2)) : statsTab === 'study' ? stMin : Math.round(spKm * 10 + stMin);
+      const tip = dk + ' · 运动 ' + spKm.toFixed(1) + ' km · 学习 ' + stMin + ' 分钟';
+      return { key: 'mo:' + dk, label: (i + 1) + '日', val, tip };
+    });
+    const activePt = pts.find(p => p.key === statsSelectedNode) || pts.filter(p => p.val > 0).at(-1) || pts.at(-1);
+    const col = statsTab === 'study' ? '#203f91' : '#e5492b';
+    const unitFn = v => statsTab === 'sport' ? (v.toFixed(1) + 'k') : statsTab === 'study' ? (Math.round(v) + 'm') : String(Math.round(v));
+    return '<article class="rd-card rd-stat-card">'
+      + '<div class="rd-stat-card-head">'
+      + '<div class="rd-stat-card-title"><h3>月度丝滑趋势曲线</h3><small>' + yr + '年' + mo + '月</small></div>'
+      + '<div class="rd-stat-arrows">'
+      + '<button type="button" data-action="stats-shift-period" data-value="-1">‹</button>'
+      + '<button type="button" data-action="stats-shift-period" data-value="1">›</button>'
+      + '</div></div>'
+      + renderSmoothSplineCardSvg(pts, col, 'rd-mo-grad', unitFn)
+      + '<div class="rd-spline-readout"><span>' + esc(activePt ? activePt.tip : '点击曲线圆点查看单日详情') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看明细 →</button></div>'
+      + '</article>';
+  })() : '';
+
+  // Card 6: 24h Hourly Period Distribution (TomatoToDo 本月专注时段分布)
+  const hourlyHtml = statsVisibleCards.hourly ? (() => {
+    const monthRecs = [
+      ...(statsTab === 'study' ? [] : mySport.filter(r => String(r.date).startsWith(ymStr + '-'))),
+      ...(statsTab === 'sport' ? [] : myStudy.filter(r => String(r.date).startsWith(ymStr + '-')))
+    ];
+    const hourBuckets = Array.from({ length: 12 }, (_, idx) => {
+      const h0 = idx * 2, h1 = h0 + 2;
+      const list = monthRecs.filter(r => {
+        const hh = Math.floor(parseTimeToMins(r.time) / 60);
+        return hh >= h0 && hh < h1;
+      });
+      const mins = list.reduce((s, r) => s + (r.km !== undefined ? Number(r.minutes || 30) : studyMinutesOf(r)), 0);
+      return { label: pad(h0) + 'h', val: Math.round(mins), tip: pad(h0) + ':00-' + pad(h1) + ':00 · ' + list.length + ' 次 · ' + formatDurHm(mins) };
+    });
+    const peak = hourBuckets.slice().sort((a, b) => b.val - a.val)[0];
+    return '<article class="rd-card rd-stat-card">'
+      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>本月时段分布</h3><small>' + yr + '年' + mo + '月</small></div>'
+      + '<small style="color:var(--muted);font-size:11.5px">' + (peak && peak.val > 0 ? ('高峰 ' + peak.label) : '暂无时段数据') + '</small></div>'
+      + renderSlimBarChartSvg(hourBuckets, '#203f91', ' 分钟', v => Math.round(v) + 'm')
+      + '</article>';
+  })() : '';
+
+  // Card 7: Horizontal Rounded Bar Ranking (TomatoToDo App Foreground Time inspired!)
+  const hbarHtml = statsVisibleCards.horizontalRank ? (() => {
+    const rows = [];
+    if (statsTab === 'study') {
+      activeStudyTargets().forEach(t => {
+        const mins = pStudy.filter(r => r.targetId === t.id).reduce((s, r) => s + studyMinutesOf(r), 0);
+        rows.push({ name: t.title, val: mins, display: formatDurHm(mins), color: t.color || '#203f91' });
+      });
+    } else {
+      const board = teamLeaderboard(statsPeriod === 'week' ? '本周' : statsPeriod === 'all' ? '总榜' : '本月', statsTab === 'sport' ? '按公里' : '综合积分');
+      board.forEach((b, i) => {
+        const val = statsTab === 'sport' ? b.km : b.score;
+        const disp = statsTab === 'sport' ? (b.km.toFixed(1) + ' km') : (b.score + ' 分 · ' + b.km.toFixed(1) + 'k/' + (Number(b.hrs) || 0).toFixed(1) + 'h');
+        rows.push({ name: b.name, val, display: disp, color: MEMBER_PALETTE[i % MEMBER_PALETTE.length] });
+      });
+    }
+    rows.sort((a, b) => b.val - a.val);
+    const maxV = Math.max(1, ...rows.map(r => r.val));
+    const axisTicks = [0, 0.25, 0.5, 0.75, 1].map(f => Math.round(maxV * f));
+    return '<article class="rd-card rd-stat-card">'
+      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>' + (statsTab === 'study' ? '学习目标耗时排行' : '成员投入横向排行') + '</h3><small>' + periodLabel + '</small></div></div>'
+      + '<div class="rd-hbar-axis">' + axisTicks.map(v => '<span>' + v + '</span>').join('') + '</div>'
+      + '<div class="rd-hbar-list">'
+      + (rows.length ? rows.map(r => {
+        const pct = Math.max(6, Math.round((r.val / maxV) * 100));
+        return '<div class="rd-hbar-row">'
+          + '<div class="rd-hbar-top"><span class="rd-hbar-name"><i class="rd-dot" style="background:' + r.color + '"></i>' + esc(r.name) + '</span></div>'
+          + '<div class="rd-hbar-track"><div class="rd-hbar-fill" style="width:' + pct + '%;background:' + r.color + '"></div><span class="rd-hbar-val">' + esc(r.display) + '</span></div>'
+          + '</div>';
+      }).join('') : '<div class="rd-empty-box">当前周期暂无排行数据</div>')
+      + '</div></article>';
+  })() : '';
+
+  // Card 8: Autonomy / Wake-Sleep & Feel/Focus Distribution
+  const habitsQualityHtml = (statsVisibleCards.habits || statsVisibleCards.quality) ? (() => {
+    let out = '';
+    if (statsVisibleCards.habits) {
+      const daysInMo = new Date(yr, mo, 0, 12).getDate();
+      const hbList = activeHabits();
+      const hbRows = hbList.map((h, i) => {
+        let cnt = 0;
+        for (let d = 1; d <= daysInMo; d++) {
+          const dk = ymStr + '-' + pad(d);
+          if ((state.habitLogs[dk] || []).includes(h.id)) cnt++;
+        }
+        const pct = Math.round((cnt / Math.max(1, daysInMo)) * 100);
+        return '<div class="rd-hbar-row">'
+          + '<div class="rd-hbar-top"><span class="rd-hbar-name">' + esc(h.title) + '</span><span class="rd-hbar-val">' + cnt + ' 天 (' + pct + '%)</span></div>'
+          + '<div class="rd-hbar-track" style="min-height:14px"><div class="rd-hbar-fill" style="height:10px;width:' + Math.max(4, pct) + '%;background:' + MEMBER_PALETTE[i % MEMBER_PALETTE.length] + '"></div></div>'
+          + '</div>';
+      }).join('');
+      out += '<article class="rd-card rd-stat-card">'
+        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>作息与自律达成分布</h3><small>' + yr + '年' + mo + '月</small></div><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="people">去打卡 →</button></div>'
+        + '<div class="rd-hbar-list">' + (hbRows || '<div class="rd-empty-box">暂无自律项</div>') + '</div>'
+        + '</article>';
+    }
+    if (statsVisibleCards.quality) {
+      const levels = statsTab === 'study' ? studyFocusLevels : feelings;
+      const src = statsTab === 'study' ? pStudy : pSport;
+      const qRows = levels.map((lv, idx) => {
+        const star = idx + 1;
+        const cnt = src.filter(r => Number(statsTab === 'study' ? r.focus : r.feel) === star).length;
+        const pct = src.length ? Math.round((cnt / src.length) * 100) : 0;
+        return '<div class="rd-hbar-row">'
+          + '<div class="rd-hbar-top"><span class="rd-hbar-name">' + lv[0] + ' ' + lv[1] + '</span><span class="rd-hbar-val">' + cnt + ' 次 (' + pct + '%)</span></div>'
+          + '<div class="rd-hbar-track" style="min-height:14px"><div class="rd-hbar-fill" style="height:10px;width:' + Math.max(cnt ? 8 : 2, pct) + '%;background:' + (statsTab === 'study' ? '#203f91' : '#e5492b') + '"></div></div>'
+          + '</div>';
+      }).join('');
+      out += '<article class="rd-card rd-stat-card">'
+        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>' + (statsTab === 'study' ? '学习专注度分布' : '运动体感分布') + '</h3><small>' + periodLabel + '</small></div></div>'
+        + '<div class="rd-hbar-list">' + qRows + '</div>'
+        + '</article>';
+    }
+    return out;
+  })() : '';
+
+  // Card 9: Smooth Annual Curve (12 months)
+  const yearCurveHtml = statsVisibleCards.yearCurve ? (() => {
+    const pts = Array.from({ length: 12 }, (_, i) => {
+      const mKey = yr + '-' + pad(i + 1);
+      const spKm = total(mySport.filter(r => String(r.date).startsWith(mKey + '-')));
+      const stH = totalStudy(myStudy.filter(r => String(r.date).startsWith(mKey + '-')));
+      const val = statsTab === 'sport' ? Number(spKm.toFixed(1)) : statsTab === 'study' ? Number(stH.toFixed(1)) : Number((spKm + stH * 3).toFixed(1));
+      return { key: 'yr:' + mKey, label: (i + 1) + '月', val, tip: yr + '年' + (i + 1) + '月 · 跑 ' + spKm.toFixed(1) + ' km · 学 ' + stH.toFixed(1) + ' h' };
+    });
+    const activePt = pts.find(p => p.key === statsSelectedNode) || pts.filter(p => p.val > 0).at(-1) || pts[mo - 1];
+    return '<article class="rd-card rd-stat-card is-wide">'
+      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>年度丝滑趋势曲线</h3><small>' + yr + ' 年 1–12 月</small></div></div>'
+      + renderSmoothSplineCardSvg(pts, '#0ea5a4', 'rd-yr-grad', v => statsTab === 'sport' ? (v.toFixed(0) + 'k') : statsTab === 'study' ? (v.toFixed(0) + 'h') : String(Math.round(v)))
+      + '<div class="rd-spline-readout"><span>' + esc(activePt ? activePt.tip : '点击月份节点查看汇总') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看 ' + yr + ' 年全部记录 →</button></div>'
+      + '</article>';
+  })() : '';
+
+  return '<div class="rd-stats-page">'
+    + topCardHtml
+    + '<div class="rd-stats-grid">'
+    + summaryCardsHtml
+    + yearDotsHtml
+    + metricBarsHtml
+    + monthCurveHtml
+    + hourlyHtml
+    + hbarHtml
+    + habitsQualityHtml
+    + yearCurveHtml
+    + '</div>'
+    + '<div class="rd-stats-footer">'
+    + '<button type="button" class="rd-pill-btn" data-action="go-view" data-value="records">查看打卡记录</button>'
+    + '<button type="button" class="rd-pill-btn" data-action="stats-open-settings">⚙ 统计图表设置</button>'
+    + '</div>'
     + '</div>';
 }
 
@@ -3097,19 +3983,28 @@ function recordsTrendChart(dataset) {
     const getYKm = v => plotBottom - (v / maxKm) * plotH;
     const getYMin = v => plotBottom - (v / maxMin) * plotH;
 
-    let linesHtml = '';
+    let linesHtml = '<defs>'
+      + '<linearGradient id="rec-sp-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#e5492b" stop-opacity=".22"/><stop offset="100%" stop-color="#e5492b" stop-opacity=".01"/></linearGradient>'
+      + '<linearGradient id="rec-st-grad" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#203f91" stop-opacity=".18"/><stop offset="100%" stop-color="#203f91" stop-opacity=".01"/></linearGradient>'
+      + '</defs>';
     if (showSport) {
-      const pts = days.map((d, i) => getX(i).toFixed(1) + ',' + getYKm(d.cumKm).toFixed(1)).join(' ');
+      const spPts = days.map((d, i) => ({ x: getX(i), y: getYKm(d.cumKm) }));
+      const spD = smoothSplinePath(spPts);
+      const spArea = spD + ' L' + spPts.at(-1).x.toFixed(1) + ',' + plotBottom + ' L' + spPts[0].x.toFixed(1) + ',' + plotBottom + ' Z';
       const lastD = days[numDays - 1];
-      linesHtml += '<polyline points="' + pts + '" fill="none" stroke="#e5492b" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round"/>';
+      linesHtml += '<path d="' + spArea + '" fill="url(#rec-sp-grad)"/>';
+      linesHtml += '<path class="rd-smooth-line" d="' + spD + '" fill="none" stroke="#e5492b" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>';
       if (lastD.cumKm > 0) {
         linesHtml += '<text x="' + (getX(numDays - 1) - 4).toFixed(1) + '" y="' + Math.max(plotTop + 10, getYKm(lastD.cumKm) - 7).toFixed(1) + '" text-anchor="end" class="bar-val-s">' + lastD.cumKm.toFixed(1) + 'km</text>';
       }
     }
     if (showStudy) {
-      const pts = days.map((d, i) => getX(i).toFixed(1) + ',' + getYMin(d.cumMin).toFixed(1)).join(' ');
+      const stPts = days.map((d, i) => ({ x: getX(i), y: getYMin(d.cumMin) }));
+      const stD = smoothSplinePath(stPts);
+      const stArea = stD + ' L' + stPts.at(-1).x.toFixed(1) + ',' + plotBottom + ' L' + stPts[0].x.toFixed(1) + ',' + plotBottom + ' Z';
       const lastD = days[numDays - 1];
-      linesHtml += '<polyline points="' + pts + '" fill="none" stroke="#203f91" stroke-width="2.4" stroke-linejoin="round" stroke-linecap="round" stroke-dasharray="' + (showSport ? '5 2' : 'none') + '"/>';
+      linesHtml += '<path d="' + stArea + '" fill="url(#rec-st-grad)"/>';
+      linesHtml += '<path class="rd-smooth-line" d="' + stD + '" fill="none" stroke="#203f91" stroke-width="2.6" stroke-linejoin="round" stroke-linecap="round"/>';
       if (lastD.cumMin > 0) {
         linesHtml += '<text x="' + (getX(numDays - 1) - 4).toFixed(1) + '" y="' + Math.min(plotBottom - 5, getYMin(lastD.cumMin) + 12).toFixed(1) + '" text-anchor="end" class="bar-val-l">' + lastD.cumMin + 'min</text>';
       }
@@ -3127,7 +4022,7 @@ function recordsTrendChart(dataset) {
 
       let dots = '';
       if (showSport) dots += '<circle cx="' + cx.toFixed(1) + '" cy="' + getYKm(v.cumKm).toFixed(1) + '" r="' + (isCur ? 4.8 : (is30d ? 2.4 : 3.4)) + '" fill="#e5492b" stroke="#f2f1e8" stroke-width="1.5"/>';
-      if (showStudy) dots += '<rect x="' + (cx - (isCur ? 4 : (is30d ? 2.2 : 3))).toFixed(1) + '" y="' + (getYMin(v.cumMin) - (isCur ? 4 : (is30d ? 2.2 : 3))).toFixed(1) + '" width="' + (isCur ? 8 : (is30d ? 4.4 : 6)) + '" height="' + (isCur ? 8 : (is30d ? 4.4 : 6)) + '" fill="#203f91" stroke="#f2f1e8" stroke-width="1.4"/>';
+      if (showStudy) dots += '<circle cx="' + cx.toFixed(1) + '" cy="' + getYMin(v.cumMin).toFixed(1) + '" r="' + (isCur ? 4.6 : (is30d ? 2.4 : 3.4)) + '" fill="#203f91" stroke="#ffffff" stroke-width="1.8"/>';
 
       return '<g class="bp-hit bar-col ' + (isPinned ? 'is-selected is-pinned' : isCur ? 'is-selected' : '') + '" data-action="select-date-bar" data-value="' + v.dk + '" data-focus-key="bar:' + v.dk + '" role="button" tabindex="0" aria-pressed="' + isPinned + '" aria-label="' + v.dk + ' 累计运动 ' + v.cumKm.toFixed(1) + ' 公里，累计学习 ' + v.cumMin + ' 分钟，当日 ' + v.items.length + ' 条记录">'
         + '<rect class="bar-hit-bg" x="' + (plotLeft + i * colW).toFixed(1) + '" y="' + plotTop + '" width="' + colW.toFixed(1) + '" height="' + (plotH + 38).toFixed(1) + '" fill="' + (isPinned ? 'rgba(26,26,24,.10)' : isCur ? 'rgba(228,163,52,.14)' : 'transparent') + '" stroke="' + (isPinned ? '#1a1a18' : isCur ? 'rgba(26,26,24,.45)' : 'none') + '" stroke-width="' + (isPinned ? '1.5' : '1') + '"/>'
@@ -3688,7 +4583,7 @@ function people() {
     + '</aside></div>';
 }
 
-const renderers = { home, progress, plan, study, ranking, achievements, records: recordsPage, people, more: morePage };
+const renderers = { home, calendar: calendarPage, progress, plan, study, ranking, achievements, records: recordsPage, people, more: morePage };
 function render(preserveScroll = false) {
   const page = $('#page');
   const prevTop = preserveScroll && page ? page.scrollTop : 0;
@@ -3701,14 +4596,36 @@ function render(preserveScroll = false) {
   page.innerHTML = '<div class="' + (preserveScroll ? 'page-stay' : 'page-enter') + '" style="display:flex;flex-direction:column;flex:1;min-height:0">' + renderers[view]() + '</div>';
   if (preserveScroll) page.scrollTop = prevTop;
   if (restoreAction) page.querySelector(restoreAction)?.focus({ preventScroll: true });
+  const isDesktopNav = !embedded && typeof window !== 'undefined' && window.innerWidth >= 760;
   const isMoreSubView = MORE_VIEWS.includes(view);
   const activeMoreItem = isMoreSubView ? MORE_ITEMS.find(x => x.id === view) : null;
-  $('.bottom-nav').innerHTML = nav.map(([id, label, ico]) => {
+  const activeNavList = isDesktopNav ? DESKTOP_NAV : nav;
+  $('.bottom-nav').innerHTML = activeNavList.map(([id, label, ico]) => {
+    if (id === '__div__') return '<div class="rd-nav-divider" aria-hidden="true">' + label + '</div>';
     const isExact = id === view;
-    const isActive = isExact || (id === 'more' && isMoreSubView);
-    const ariaLabel = (id === 'more' && activeMoreItem) ? ('更多，当前在' + activeMoreItem.label + '页') : label;
+    const isActive = isExact || (!isDesktopNav && id === 'more' && isMoreSubView);
+    const ariaLabel = (!isDesktopNav && id === 'more' && activeMoreItem) ? ('更多，当前在' + activeMoreItem.label + '页') : label;
     return '<button type="button" data-view="' + id + '" class="ck-nav-btn' + (isActive ? ' active' : '') + '" aria-label="' + esc(ariaLabel) + '"' + (isExact ? ' aria-current="page"' : (isActive ? ' aria-current="true"' : '')) + '>' + icon(ico, 'nav-ico') + '<span class="nav-label ck-nav-label">' + label + '</span></button>';
   }).join('');
+  // Floating + FAB (TickTick style) on core daily views
+  let fab = $('#rd-quick-fab');
+  const showFab = !embedded && ['home', 'calendar', 'records', 'progress'].includes(view);
+  if (showFab) {
+    if (!fab) {
+      fab = document.createElement('button');
+      fab.type = 'button';
+      fab.id = 'rd-quick-fab';
+      fab.className = 'rd-fab';
+      fab.setAttribute('data-action', 'checkin');
+      fab.setAttribute('data-mode', 'sport');
+      fab.setAttribute('aria-label', '快速新建打卡');
+      fab.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+      $('#app')?.appendChild(fab);
+    }
+    fab.hidden = false;
+  } else if (fab) {
+    fab.hidden = true;
+  }
   clearInterval(quoteTimer);
   if (view === 'home' && !matchMedia('(prefers-reduced-motion: reduce)').matches) quoteTimer = setInterval(nextQuote, 7000);
   if (view === 'records') refreshReceiptDialog();
@@ -4296,6 +5213,85 @@ document.addEventListener('click', async e => {
   if (a === 'discard-draft') { clearSavedDraft(b.dataset.mode || 'sport'); render(true); toast('已丢弃未完成草稿'); return; }
   if (a === 'retry-sync') { await retryPendingOps(v || null); return; }
   if (a === 'go-view') { navigate(v); return; }
+  // Calendar actions
+  if (a === 'cal-layout') { calLayoutMode = v === 'list' ? 'list' : 'calendar'; render(true); return; }
+  if (a === 'cal-viewmode') { calViewMode = v === 'day' ? 'day' : 'week'; render(true); return; }
+  if (a === 'cal-mobile-mode') { calMobileMode = v === 'timeline' ? 'timeline' : 'list'; render(true); return; }
+  if (a === 'cal-toggle-mmonth') { calMonthExpanded = !calMonthExpanded; render(true); return; }
+  if (a === 'cal-today') { calAnchorDate = today(); calMiniMonth = calAnchorDate.slice(0, 7); render(true); return; }
+  if (a === 'cal-pick-date' && v) { calAnchorDate = v; calMiniMonth = v.slice(0, 7); calMonthExpanded = false; render(true); return; }
+  if (a === 'cal-shift') {
+    const delta = Number(v) * (calViewMode === 'day' ? 1 : 7);
+    calAnchorDate = addDaysStr(calAnchorDate, delta);
+    calMiniMonth = calAnchorDate.slice(0, 7);
+    render(true);
+    return;
+  }
+  if (a === 'cal-mini-shift') {
+    const [yy, mm] = calMiniMonth.split('-').map(Number);
+    const d = new Date(yy, mm - 1 + Number(v), 1, 12);
+    calMiniMonth = d.getFullYear() + '-' + pad(d.getMonth() + 1);
+    render(true);
+    return;
+  }
+  if (a === 'cal-cycle-kind') {
+    const order = ['all', 'sport', 'study'];
+    calKindFilter = order[(order.indexOf(calKindFilter) + 1) % order.length];
+    render(true);
+    return;
+  }
+  if (a === 'cal-toggle-track') {
+    calSelectedTrack = calSelectedTrack === v ? '' : v;
+    render(true);
+    return;
+  }
+  if (a === 'cal-slot-add') {
+    const dt = b.dataset.date || calAnchorDate;
+    const tm = b.dataset.time || '08:00';
+    const md = b.dataset.mode || (calKindFilter === 'study' ? 'study' : 'sport');
+    openCheckin(md, null, calPersonFilter !== 'all' ? calPersonFilter : state.name, { fresh: true, date: dt, time: tm });
+    return;
+  }
+  // Statistics actions
+  if (a === 'stats-tab') { statsTab = v; render(true); return; }
+  if (a === 'stats-period') { statsPeriod = v; render(true); return; }
+  if (a === 'stats-pick-node') { statsSelectedNode = v; render(true); return; }
+  if (a === 'stats-shift-day') { statsDayDate = addDaysStr(statsDayDate, Number(v)); render(true); return; }
+  if (a === 'stats-shift-period') {
+    const delta = Number(v);
+    const dt = new Date(statsAnchorDate + 'T12:00:00');
+    if (statsPeriod === 'week') dt.setDate(dt.getDate() + delta * 7);
+    else if (statsPeriod === 'month') dt.setMonth(dt.getMonth() + delta);
+    else dt.setFullYear(dt.getFullYear() + delta);
+    statsAnchorDate = dateKey(dt);
+    render(true);
+    return;
+  }
+  if (a === 'stats-open-settings') {
+    const items = [
+      ['summary', '累计总览与当日统计卡'],
+      ['yearDots', '年度 12 个月圆点矩阵卡'],
+      ['metricBars', '多维度竖柱分析卡组 (里程/时长/频次/配速)'],
+      ['monthCurve', '月度丝滑趋势曲线卡'],
+      ['hourly', '本月 24 小时时段分布卡'],
+      ['horizontalRank', '横向圆角大条形排行卡'],
+      ['habits', '作息与自律达成分布卡'],
+      ['quality', '体感与专注质量分布卡'],
+      ['yearCurve', '年度丝滑趋势曲线卡']
+    ];
+    const body = '<div class="rd-settings-list">' + items.map(([k, lbl]) =>
+      '<label class="rd-settings-toggle"><span>' + lbl + '</span><input type="checkbox" data-stat-card="' + k + '"' + (statsVisibleCards[k] ? ' checked' : '') + '></label>'
+    ).join('') + '</div>';
+    openEditor('统计图表显示设置', body, () => {
+      $$('#editor-body [data-stat-card]').forEach(inp => {
+        statsVisibleCards[inp.dataset.statCard] = inp.checked;
+      });
+      saveStatsVisibleCards();
+      render(true);
+      toast('统计图表设置已保存');
+    }, '应用设置 →');
+    return;
+  }
   if (a === 'go-today-records') {
     const t = today();
     recordKindFilter = 'all';
@@ -4911,6 +5907,8 @@ function openCheckin(mode = 'sport', targetId = null, personName = state.name, o
     step = 0;
     draft = createFreshDraft(mode, targetId, personName);
   }
+  if (opts && opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) draft.date = opts.date;
+  if (opts && opts.time && /^\d{2}:\d{2}$/.test(opts.time)) draft.time = opts.time;
   $('#app').inert = true; drawModal();
 }
 
@@ -7901,6 +8899,64 @@ if (!embedded && !demo && typeof window !== 'undefined') {
     }
     render(true);
   });
+}
+
+// Calendar select/search, drag-and-drop scheduling & responsive nav sync
+document.addEventListener('change', e => {
+  if (e.target.id === 'cal-person-select') { calPersonFilter = e.target.value; render(true); }
+  if (e.target.id === 'cal-kind-select') { calKindFilter = e.target.value; render(true); }
+});
+document.addEventListener('input', e => {
+  if (e.target.id === 'cal-track-search') {
+    calSearchQuery = e.target.value;
+    const pos = e.target.selectionStart;
+    render(true);
+    const inp = $('#cal-track-search');
+    if (inp) { inp.focus(); try { inp.setSelectionRange(pos, pos); } catch {} }
+  }
+});
+let calDragPayload = null;
+document.addEventListener('dragstart', e => {
+  const item = e.target.closest('.rd-track-item[draggable="true"]');
+  if (!item) return;
+  calDragPayload = {
+    mode: item.dataset.calDragMode || 'sport',
+    targetId: item.dataset.calDragTarget || null,
+    person: item.dataset.calDragPerson || state.name
+  };
+  try { e.dataTransfer.setData('text/plain', JSON.stringify(calDragPayload)); } catch {}
+});
+document.addEventListener('dragover', e => {
+  const slot = e.target.closest('[data-cal-drop-date]');
+  if (!slot || !calDragPayload) return;
+  e.preventDefault();
+  slot.classList.add('is-drop-over');
+});
+document.addEventListener('dragleave', e => {
+  const slot = e.target.closest('[data-cal-drop-date]');
+  if (slot) slot.classList.remove('is-drop-over');
+});
+document.addEventListener('drop', e => {
+  const slot = e.target.closest('[data-cal-drop-date]');
+  if (!slot) return;
+  e.preventDefault();
+  slot.classList.remove('is-drop-over');
+  let payload = calDragPayload;
+  if (!payload) {
+    try { payload = JSON.parse(e.dataTransfer.getData('text/plain') || 'null'); } catch {}
+  }
+  calDragPayload = null;
+  if (!payload) return;
+  openCheckin(payload.mode, payload.targetId || null, payload.person || state.name, {
+    fresh: true,
+    date: slot.dataset.calDropDate,
+    time: slot.dataset.calDropTime
+  });
+});
+if (typeof window !== 'undefined' && window.matchMedia) {
+  const mqDesk = window.matchMedia('(min-width: 760px)');
+  const onMqChange = () => render(true);
+  if (mqDesk.addEventListener) mqDesk.addEventListener('change', onMqChange);
 }
 
 // Startup server health check & state sync (guarded against embedded/demo iframe)
