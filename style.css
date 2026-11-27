@@ -6591,3 +6591,53 @@ body.motion-paused .ck-form-footer .ck-save-btn {
   opacity: 1 !important;
 }
 
+
+
+/* Accessible Chart Stepper Navigation (Touch Targets >= 44x44px) */
+.rd-chart-step-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  width: 100%;
+}
+.rd-chart-step-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  min-height: 44px;
+  padding: 0;
+  border-radius: 8px;
+  border: 1px solid rgba(38, 38, 36, 0.18);
+  background: #ffffff;
+  color: #232320;
+  font-size: 18px;
+  font-weight: 700;
+  cursor: pointer;
+  touch-action: manipulation;
+  flex-shrink: 0;
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.rd-chart-step-btn:hover:not(:disabled) {
+  background: rgba(38, 38, 36, 0.06);
+  border-color: rgba(38, 38, 36, 0.32);
+}
+.rd-chart-step-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.rd-chart-step-info {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+}
+.rd-spline-readout-txt {
+  flex: 1 1 auto;
+  min-width: 0;
+  text-align: center;
+}

@@ -62,7 +62,9 @@ async function runVerification() {
     '当页面处于 embedded 或 demo 模式时，严禁连接后端及开启 /api/events SSE，彻底避免 6-连接池耗尽死锁');
 
   record('FIX-07', 'app.js 数据从备份 JSON 恢复时同步云端 SQLite', '前后端协同',
-    appJs.includes("if (isServerOnline) serverFetch('/import', 'POST', backup);"),
+    appJs.includes('const synced = await pushBackupToCloudImport(backup);') &&
+    appJs.includes("const res = await serverFetch('/import', 'POST', backup);") &&
+    appJs.includes("cloudState: 'synced'") && appJs.includes("cloudState: 'failed'"),
     '用户通过设置导入本地备份时，在在线模式下主动调用 POST /api/import 同步全量数据至 SQLite');
 
   // Start Server

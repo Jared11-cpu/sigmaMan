@@ -230,7 +230,9 @@ let recordsMoreOpen = false;
 let activeFilterSheet = ''; // '' | 'rec-range' | 'rec-kind' | 'rec-more' | 'rank-period' | 'rank-metric'
 let recordsMoreChartType = '28天热力'; // '28天热力' | '黄金时段' | '强度分布' | '状态感觉'
 let externalFilterNotice = '';
+let statsRecordsReturn = null;
 let lastReceiptFocusSelector = '';
+let lastReceiptFallbackSelector = '';
 let lastEditorOpener = null;
 let lastEditorFocusSelector = '';
 let recordSelectKey = ''; // 'sport:id' or 'study:id'
@@ -254,31 +256,84 @@ let newlyArchivedRecordKey = '';
 let feedbackClearTimer = 0;
 let feedbackAnimId = 0;
 
-// Real-timestamp Pomodoro timer state (persisted across reloads)
-function loadPomoSession() {
+const STRICT_STUDY_KEY = STORE + '_strict_study_mode_v1';
+const PRE_RESTORE_KEY = STORE + '_pre_restore_snapshot_v1';
+function loadStrictStudyMode() {
+  try { return localStorage.getItem(STRICT_STUDY_KEY) === '1'; } catch { return false; }
+}
+let strictStudyMode = loadStrictStudyMode();
+function saveStrictStudyMode(enabled) {
+  strictStudyMode = Boolean(enabled);
+  try { localStorage.setItem(STRICT_STUDY_KEY, strictStudyMode ? '1' : '0'); } catch {}
+}
+function isStrictStudyMode() { return Boolean(strictStudyMode); }
+function setStrictStudyMode(enabled) { saveStrictStudyMode(enabled); }
+let pendingCloudImportBackup = null;
+let lastImportStatus = null; // { localOk, cloudState: 'idle'|'syncing'|'synced'|'offline'|'failed', cloudError }
+function loadPreRestoreSnapshot() {
   try {
-    const raw = JSON.parse(localStorage.getItem(POMO_KEY) || 'null');
-    if (raw && typeof raw === 'object' && Number.isFinite(raw.totalSec)) {
-      if (raw.state === 'saving') return { ...raw, state: 'paused', errorMsg: '保存中断，请重试同步' };
-      return raw;
-    }
+    const raw = JSON.parse(localStorage.getItem(PRE_RESTORE_KEY) || 'null');
+    if (raw && raw.backup && validateBackup(raw.backup)) return raw;
   } catch {}
+  return null;
+}
+function savePreRestoreSnapshot(currentState) {
+  const snap = {
+    savedAt: new Date().toISOString(),
+    backup: JSON.parse(JSON.stringify({ ...currentState, schemaVersion: 2 }))
+  };
+  try { localStorage.setItem(PRE_RESTORE_KEY, JSON.stringify(snap)); } catch {}
+  return snap;
+}
+function clearPreRestoreSnapshot() {
+  try { localStorage.removeItem(PRE_RESTORE_KEY); } catch {}
+}
+
+// Real-timestamp Pomodoro timer state (persisted across reloads)
+function createIdlePomoSession(totalSec = 25 * 60, targetId = state.studyTargets[0]?.id || 'st-1') {
   return {
     sessionId: 'pomo-' + Date.now() + '-' + Math.random().toString(36).slice(2, 7),
-    targetId: state.studyTargets[0]?.id || 'st-1',
-    totalSec: 25 * 60,
+    targetId,
+    totalSec,
     state: 'idle',
     startedAt: 0,
     pausedAccumMs: 0,
     pauseStartedAt: 0,
     completedAt: 0,
-    errorMsg: ''
+    errorMsg: '',
+    voidReason: ''
   };
+}
+function loadPomoSession() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(POMO_KEY) || 'null');
+    if (raw && typeof raw === 'object' && Number.isFinite(raw.totalSec)) {
+      if (raw.state === 'saving') return { ...raw, state: 'paused', errorMsg: '保存中断，请重试同步', voidReason: '' };
+      if (raw.state === 'running' && isStrictStudyMode()) {
+        const voided = {
+          ...createIdlePomoSession(raw.totalSec, raw.targetId || state.studyTargets[0]?.id || 'st-1'),
+          state: 'voided',
+          voidReason: '刷新或关闭了页面，严厉打卡模式下本次未保存计时已作废，请重新开始。'
+        };
+        try { localStorage.setItem(POMO_KEY, JSON.stringify(voided)); } catch {}
+        return voided;
+      }
+      if (raw.state === 'voided') {
+        return {
+          ...createIdlePomoSession(raw.totalSec, raw.targetId || state.studyTargets[0]?.id || 'st-1'),
+          state: 'voided',
+          voidReason: raw.voidReason || '严厉打卡模式下离开了计时页面，本轮已作废。'
+        };
+      }
+      return { voidReason: '', ...raw };
+    }
+  } catch {}
+  return createIdlePomoSession();
 }
 let pomoSession = loadPomoSession();
 function savePomoSession() { try { localStorage.setItem(POMO_KEY, JSON.stringify(pomoSession)); } catch {} }
 function getPomoElapsedSec() {
-  if (pomoSession.state === 'idle') return 0;
+  if (pomoSession.state === 'idle' || pomoSession.state === 'voided') return 0;
   if (pomoSession.state === 'completed' || pomoSession.state === 'saved') {
     if (pomoSession.completedAt && pomoSession.startedAt) {
       return Math.min(pomoSession.totalSec, Math.max(0, Math.round((pomoSession.completedAt - pomoSession.startedAt - (pomoSession.pausedAccumMs || 0)) / 1000)));
@@ -301,7 +356,10 @@ function getStudyFocusEntryMeta() {
     return { label: '继续专注', stateText: '已暂停 · 剩余 ' + leftText, aria: '继续专注，' + targetTitle + '，剩余 ' + leftText };
   }
   if (pomoSession.state === 'completed') {
-    return { label: '查看专注', stateText: '待记入 · ' + Math.floor(getPomoElapsedSec() / 60) + ' 分钟', aria: '查看专注，本轮已完成待记入' };
+    return { label: '查看专注', stateText: '待保存 · ' + Math.floor(getPomoElapsedSec() / 60) + ' 分钟', aria: '查看专注，本轮已完成待保存' };
+  }
+  if (pomoSession.state === 'voided') {
+    return { label: '重新专注', stateText: '上轮已作废 · 需重来', aria: '重新开始专注计时' };
   }
   return { label: '开始专注', stateText: '', aria: '开始专注，当前目标 ' + targetTitle };
 }
@@ -309,8 +367,17 @@ function getPomoLeftSec() { return Math.max(0, pomoSession.totalSec - getPomoEla
 let pomodoroTotal = pomoSession.totalSec, pomodoroLeft = getPomoLeftSec(), pomodoroRunning = pomoSession.state === 'running', pomodoroTick = null;
 let pomodoroTargetId = pomoSession.targetId || state.studyTargets[0]?.id || 'st-1';
 
+let recordsMainTab = 'records';
+let studyTimerLeaveHandler = null;
+function notifyStudyTimerContextLeave(reason) {
+  if (typeof studyTimerLeaveHandler === 'function') studyTimerLeaveHandler(reason);
+}
 let quoteIndex = params.has('quote') ? Number(params.get('quote')) : 0, quoteTimer, step = 0, draft = null, modalPreviousFocus = null, modalPreviousFocusSelector = '', toastTimer, dialogSave = null;
-if (view === 'people') view = 'progress';
+if (view === 'plan') { statsTab = 'sport'; view = 'progress'; }
+else if (view === 'study') { statsTab = 'study'; view = 'progress'; }
+else if (view === 'ranking') { recordsMainTab = 'ranking'; view = 'records'; }
+else if (view === 'people') { view = 'progress'; }
+if (statsTab === 'rank') statsTab = 'all';
 if (!VALID_VIEWS.includes(view)) view = 'home';
 
 const nav = [
@@ -324,18 +391,12 @@ const DESKTOP_NAV = [
   ['calendar', '日历', 'calendar'],
   ['progress', '统计', 'chart'],
   ['records', '记录', 'pulse'],
-  ['ranking', '排名', 'trophy'],
-  ['__div__', '计划与成就', ''],
-  ['plan', '运动计划', 'shoe'],
-  ['study', '学习目标', 'book'],
+  ['__div__', '成就与扩展', ''],
   ['achievements', '成就勋章', 'medal']
 ];
 const MORE_ITEMS = [
-  { id: 'records', label: '记录明细', icon: 'pulse', sub: '全部运动与学习流水和凭证' },
-  { id: 'ranking', label: '竞技排名', icon: 'trophy', sub: '榜单数据与趋势对比' },
-  { id: 'plan', label: '运动计划', icon: 'shoe', sub: '跑步目标与28天排程' },
-  { id: 'study', label: '学习目标', icon: 'book', sub: '专注番茄与目标拆解' },
-  { id: 'achievements', label: '成就勋章', icon: 'medal', sub: '勋章墙与连续里程碑' }
+  { id: 'records', label: '记录与排名', icon: 'pulse', sub: '打卡流水、电子凭证与多人竞技榜单' },
+  { id: 'achievements', label: '成就勋章', icon: 'medal', sub: '已获勋章、下一项冲刺与解锁条件' }
 ];
 const MORE_VIEWS = MORE_ITEMS.map(x => x.id);
 if (embedded) document.body.classList.add('embedded');
@@ -375,14 +436,14 @@ function icon(name, cls = '') {
 
 const hasLocalStorage = (() => {
   try { const k = '__rl_chk'; localStorage.setItem(k, '1'); localStorage.removeItem(k); return true; } catch { return false; }
+})();
 
 // Register PWA Service Worker for offline static shell (never intercepts /api/*)
 if (!embedded && !demo && typeof navigator !== 'undefined' && 'serviceWorker' in navigator && location.protocol.startsWith('http')) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(() => {});
-  });
+  const registerSw = () => { navigator.serviceWorker.register('sw.js').catch(() => {}); };
+  if (document.readyState === 'complete') registerSw();
+  else window.addEventListener('load', registerSw);
 }
-})();
 
 /* ---------- Dual-Mode Server Sync Client (Online REST+SSE + PendingOps + Structured Errors) ---------- */
 let isServerOnline = false;
@@ -448,10 +509,10 @@ if (!demo) {
 }
 function removePendingOp(opId) { pendingOps = pendingOps.filter(x => x.operationId !== opId); savePendingOps(); }
 function syncStatusMeta(status) {
-  if (status === 'synced') return { key: 'synced', label: '已同步', detail: '已同步至服务器' };
-  if (status === 'pending') return { key: 'pending', label: '等待同步', detail: '已存本机，等待同步' };
-  if (status === 'failed') return { key: 'failed', label: '同步失败', detail: '同步失败，可点击重试' };
-  return { key: 'local', label: '本机已保存', detail: '离线已保存在本机浏览器' };
+  if (status === 'synced') return { key: 'synced', label: '已同步', detail: '已同步至云端服务器' };
+  if (status === 'pending') return { key: 'pending', label: '待同步', detail: '已存本机，正在等待同步到云端' };
+  if (status === 'failed') return { key: 'failed', label: '同步失败', detail: '已存本机，云端同步失败，可点击重试' };
+  return { key: 'local', label: '已存本机', detail: '离线已存本机浏览器，联网后可同步' };
 }
 function syncPillMarkup(rec) {
   const op = rec && rec.operationId ? pendingOps.find(x => x.operationId === rec.operationId) : null;
@@ -537,6 +598,10 @@ async function flushPendingOps(onlyOpId = null) {
         op.status = 'failed';
         op.lastError = errText;
         op.updatedAt = Date.now();
+        if (res && res.status === 409) {
+          op.conflict = true;
+          if (res.currentRecord) op.currentRecord = res.currentRecord;
+        }
         savePendingOps();
         updateLocalRecordSyncStatus(op.kind, op.operationId, op.recordId, 'failed', errText);
         lastSyncError = errText;
@@ -594,20 +659,103 @@ function mergeRemoteState(remoteRaw) {
   const prevSport = state ? [...state.records] : [];
   const prevStudy = state ? [...state.studyRecords] : [];
   const next = hydrateState(remoteRaw, { fromServer: true });
-  const pendingIds = new Set(roomPendingOps().map(x => x.operationId));
-  if (pendingIds.size) {
-    prevSport.forEach(r => {
-      if (r.operationId && pendingIds.has(r.operationId) && !next.records.some(x => x.id === r.id || (x.operationId && x.operationId === r.operationId))) {
-        next.records.unshift(r);
-      }
-    });
-    prevStudy.forEach(r => {
-      if (r.operationId && pendingIds.has(r.operationId) && !next.studyRecords.some(x => x.id === r.id || (x.operationId && x.operationId === r.operationId))) {
-        next.studyRecords.unshift(normalizeStudyRecord(r));
-      }
-    });
-    recomputeStudyTargetDoneHours(next);
+  const pendingList = roomPendingOps();
+  const pendingIds = new Set(pendingList.map(x => x.operationId));
+  const pendingRecIds = new Set(pendingList.map(x => x.recordId).filter(id => id !== undefined && id !== null));
+  const pendingDeleteKeys = new Set(
+    pendingList.filter(x => x.method === 'DELETE' || x.kind === 'delete').map(x => {
+      const m = x.endpoint && x.endpoint.match(/^\/records\/(sport|study)\/(\d+)$/);
+      if (m) return m[1] + ':' + m[2];
+      if (x.recordId) return (x.kind || 'sport') + ':' + x.recordId;
+      return null;
+    }).filter(Boolean)
+  );
+
+  // 1. Guard against remote state resurrecting pending deleted records
+  if (pendingDeleteKeys.size) {
+    next.records = next.records.filter(r => !pendingDeleteKeys.has('sport:' + r.id));
+    next.studyRecords = next.studyRecords.filter(r => !pendingDeleteKeys.has('study:' + r.id));
   }
+
+  // 2. Identify records with pending local modifications
+  const isPendingLocalRecord = (r, kind) => {
+    if (!r) return false;
+    if (r.syncStatus === 'local' || r.syncStatus === 'pending' || r.syncStatus === 'failed') return true;
+    if (r.operationId && pendingIds.has(r.operationId)) return true;
+    if (pendingRecIds.has(r.id)) {
+      const hasOp = pendingList.some(x => x.recordId === r.id && (x.kind === kind || (x.endpoint && x.endpoint.includes('/' + kind + '/'))));
+      if (hasOp) return true;
+    }
+    return false;
+  };
+
+  // 3. Merge sport records: preserve local actual modified fields & pending status
+  prevSport.forEach(r => {
+    if (!isPendingLocalRecord(r, 'sport')) return;
+    const existing = next.records.find(x => x.id === r.id || (x.operationId && x.operationId === r.operationId));
+    if (existing) {
+      Object.assign(existing, r);
+    } else {
+      next.records.unshift(r);
+    }
+  });
+
+  // 4. Merge study records: preserve local actual modified fields & pending status
+  prevStudy.forEach(r => {
+    if (!isPendingLocalRecord(r, 'study')) return;
+    const existing = next.studyRecords.find(x => x.id === r.id || (x.operationId && x.operationId === r.operationId));
+    if (existing) {
+      Object.assign(existing, normalizeStudyRecord(r));
+    } else {
+      next.studyRecords.unshift(normalizeStudyRecord(r));
+    }
+  });
+
+  // 5. Preserve pending plans modifications if not yet flushed
+  if (state && pendingList.some(x => x.kind === 'plans' || x.endpoint === '/plans')) {
+    if (Number.isFinite(state.goal)) next.goal = state.goal;
+    if (Array.isArray(state.days)) next.days = state.days;
+    if (Number.isFinite(state.studyGoal)) next.studyGoal = state.studyGoal;
+    if (Array.isArray(state.studyDays)) next.studyDays = state.studyDays;
+    next.sportDatePlan = { ...(state.sportDatePlan || {}) };
+    next.studyDatePlan = { ...(state.studyDatePlan || {}) };
+  }
+
+  // 6. Preserve pending habit definitions & habit logs
+  if (state) {
+    const pendingHabitAddIds = new Set(pendingList.filter(x => x.kind === 'habit' && x.method === 'POST').map(x => x.payload?.id).filter(Boolean));
+    pendingHabitAddIds.forEach(hid => {
+      if (!next.habits.some(h => h.id === hid)) {
+        const localH = state.habits.find(h => h.id === hid);
+        if (localH) next.habits.push({ ...localH });
+      }
+    });
+    const pendingHabitEditOps = pendingList.filter(x => x.kind === 'habit' && x.method === 'PATCH');
+    pendingHabitEditOps.forEach(op => {
+      const hid = op.payload?.id || (op.endpoint && op.endpoint.replace('/habits/', ''));
+      const localH = state.habits.find(h => h.id === hid);
+      const targetH = next.habits.find(h => h.id === hid);
+      if (localH && targetH) {
+        Object.assign(targetH, { title: localH.title, tag: localH.tag, archived: localH.archived });
+      }
+    });
+    const pendingHabitDelIds = new Set(pendingList.filter(x => x.kind === 'habit' && x.method === 'DELETE').map(x => (x.payload?.id || (x.endpoint && x.endpoint.replace('/habits/', '')))).filter(Boolean));
+    if (pendingHabitDelIds.size) {
+      next.habits = next.habits.filter(h => !pendingHabitDelIds.has(h.id));
+    }
+    if (pendingList.some(x => x.endpoint === '/habits/order')) {
+      const orderMap = new Map(state.habits.map((h, i) => [h.id, i]));
+      next.habits.sort((a, b) => (orderMap.get(a.id) ?? 999) - (orderMap.get(b.id) ?? 999));
+    }
+    pendingList.filter(x => x.kind === 'habit-log' || x.endpoint === '/habit-logs').forEach(op => {
+      if (op.payload && op.payload.date) {
+        next.habitLogs[op.payload.date] = [...(state.habitLogs[op.payload.date] || [])];
+      }
+    });
+  }
+
+  // 7. Unified derivation of records, study targets and charts
+  recomputeStudyTargetDoneHours(next);
   return next;
 }
 
@@ -1596,8 +1744,8 @@ function homeTodayPanel() {
     + '</div>'
     + '<div class="rd-today-actions">'
     + '<button type="button" class="rd-act-btn is-sport" data-action="checkin" data-mode="sport" data-focus-key="home:primary-checkin">记运动</button>'
-    + '<button type="button" class="rd-act-btn is-study" data-action="checkin" data-mode="study">记学习</button>'
-    + '<button type="button" class="rd-act-btn is-focus" data-action="go-focus" data-focus-key="home:go-focus" aria-label="' + esc(focusMeta.aria) + '">' + focusMeta.label + '</button>'
+    + '<button type="button" class="rd-act-btn is-study" data-action="go-focus" data-focus-key="home:go-focus" aria-label="' + esc(focusMeta.aria) + '">' + (pomoSession.state === 'running' ? '查看学习专注' : '学习专注计时') + '</button>'
+    + '<button type="button" class="rd-act-btn is-backfill" data-action="checkin" data-mode="study" data-subtab="backfill">补录学习</button>'
     + '</div>'
     + '</div>'
     + (focusMeta.stateText ? '<div class="today-focus-note" id="home-focus-note" role="status">专注计时：' + esc(findTargetTitle(pomodoroTargetId)) + ' · ' + esc(focusMeta.stateText) + '</div>' : '')
@@ -1636,14 +1784,16 @@ function morePage() {
       + '</button></li>';
   }).join('');
   return '<section class="ck-more-page" aria-labelledby="ck-more-heading">'
-    + '<header class="ck-more-header"><h2 id="ck-more-heading">更多</h2><p>记录、排名、计划、学习与成就</p></header>'
-    + '<ul class="ck-more-list" aria-label="全部扩展页面入口">' + rows + '</ul>'
+    + '<header class="ck-more-header"><h2 id="ck-more-heading">更多</h2><p>记录与排名、成就勋章及快捷管理</p></header>'
+    + '<ul class="ck-more-list" aria-label="扩展页面入口">' + rows + '</ul>'
     + '<div class="rd-card rd-more-tools">'
-    + '<div class="rd-more-tools-head"><strong>快捷管理与设置</strong><small>作息习惯、计划同步与图表配置</small></div>'
+    + '<div class="rd-more-tools-head"><strong>快捷入口与设置</strong><small>运动与学习计划已整合至「统计」，排名已整合至「记录」</small></div>'
     + '<div class="rd-more-tools-actions">'
+    + '<button type="button" class="rd-pill-btn" data-action="go-stats-plan" data-value="sport">🏃 运动计划与28天排程</button>'
+    + '<button type="button" class="rd-pill-btn" data-action="go-stats-plan" data-value="study">⚡ 学习计时与目标拆解</button>'
+    + '<button type="button" class="rd-pill-btn" data-action="go-ranking">🏆 多人竞技排名</button>'
     + '<button type="button" class="rd-pill-btn" data-action="stats-edit-habits-modal">✎ 作息与自律管理</button>'
-    + '<button type="button" class="rd-pill-btn" data-action="go-stats-plan" data-value="sport">⚡ 统计页计划同步</button>'
-    + '<button type="button" class="rd-pill-btn" data-action="stats-open-settings">⚙ 统计图表设置</button>'
+    + '<button type="button" class="rd-pill-btn" data-action="settings">⚙ 系统与严厉打卡设置</button>'
     + '</div></div>'
     + '</section>';
 }
@@ -1653,24 +1803,35 @@ function home() {
   const sPct = Math.round(mt / Math.max(1, state.goal) * 100);
   const stPct = Math.round(stH / Math.max(1, state.studyGoal) * 100);
   const hb = habitRateForDate(today());
+  const ds = dualStreak();
   const board = teamLeaderboard('本月', '综合积分');
   const myRank = board.findIndex(x => x.name === state.name) + 1;
   const myRow = board[myRank - 1] || { score: 0, km: mt, hrs: stH };
-  const sportBoard = [...board].sort((a, b) => b.km - a.km);
-  const mySportRank = sportBoard.findIndex(x => x.name === state.name) + 1;
-  const sportLeadDelta = sportBoard[0] ? (sportBoard[0].km - mt).toFixed(1) : '0';
-  const studyBoard = [...board].sort((a, b) => b.hrs - a.hrs);
-  const myStudyRank = studyBoard.findIndex(x => x.name === state.name) + 1;
-  const studyLeadDelta = studyBoard[0] ? (studyBoard[0].hrs - stH).toFixed(1) : '0';
   const solo = board.length === 1;
 
   return '<div class="home ck-home rd-home">'
     + quoteMarkup()
-    + '<section class="home-metrics home-metrics-4 ck-home-metrics" aria-label="运动学习自律与核心进度">'
-    + '<button class="metric-tile" data-action="go-view" data-value="plan"><div class="metric-top"><small>本月运动 / RUN</small><em class="metric-rank">' + (solo ? ('目标 ' + sPct + '%') : ('#' + mySportRank + (mySportRank === 1 ? ' 领跑' : ' 差' + sportLeadDelta + 'k'))) + '</em></div><strong>' + mt.toFixed(1) + '<em> KM</em></strong>' + PixelProgressBar.renderHtml({ progress: sPct, height: 12, width: '100%', bare: true, variant: 'orange', className: 'metric-ppb', ariaLabel: '本月运动目标进度' }) + '</button>'
-    + '<button class="metric-tile" data-action="go-view" data-value="study"><div class="metric-top"><small>本月学习 / STUDY</small><em class="metric-rank is-blue">' + (solo ? ('目标 ' + stPct + '%') : ('#' + myStudyRank + (myStudyRank === 1 ? ' 领跑' : ' 差' + studyLeadDelta + 'h'))) + '</em></div><strong>' + stH.toFixed(1) + '<em> H</em></strong>' + PixelProgressBar.renderHtml({ progress: stPct, height: 12, width: '100%', bare: true, variant: 'blue', className: 'metric-ppb', ariaLabel: '本月学习目标进度' }) + '</button>'
-    + (() => { const ds = dualStreak(); const ct = comboTier(ds); const nextGoal = ct.nextAt || 30; const cPct = ct.nextAt ? Math.min(100, Math.round(ds / nextGoal * 100)) : 100; return '<button class="metric-tile is-combo-tile tier-' + ct.tier + '" data-action="go-view" data-value="progress"><div class="metric-top"><small>COMBO 连击 / STREAK</small><em class="metric-rank is-gold">' + ct.code + ' · ' + hb.done + '/' + hb.total + '</em></div><strong>COMBO ×' + ds + '</strong>' + PixelProgressBar.renderHtml({ progress: cPct, height: 12, width: '100%', bare: true, variant: 'gold', className: 'metric-ppb', ariaLabel: 'COMBO 连击进度' }) + '</button>'; })()
-    + '<button class="metric-tile" data-action="go-view" data-value="progress"><div class="metric-top"><small>' + (solo ? '综合积分 / SCORE' : '多人竞技 / PK榜') + '</small><em class="metric-rank is-ink">' + (solo ? '单人基准' : (board.length + '人同榜')) + '</em></div><strong>' + (solo ? (myRow.score + '<em> 分</em>') : ('第' + myRank + '<em>名 · ' + myRow.score + '分</em>')) + '</strong>' + PixelProgressBar.renderHtml({ progress: solo ? Math.max(sPct, stPct) : Math.round(myRow.score / Math.max(1, board[0]?.score || 1) * 100), height: 12, width: '100%', bare: true, variant: 'ink', className: 'metric-ppb', ariaLabel: '综合竞技进度' }) + '</button>'
+    + '<section class="rd-home-tickers" aria-label="快捷核心状态与分流入口">'
+    + '<button type="button" class="rd-card rd-home-ticker" data-action="go-stats-plan" data-value="sport">'
+    + '<div class="rd-ticker-top"><small>本月运动</small><em class="is-sport">' + sPct + '%</em></div>'
+    + '<strong>' + mt.toFixed(1) + '<em>/' + state.goal + 'km</em></strong>'
+    + PixelProgressBar.renderHtml({ progress: Math.min(100, sPct), height: 10, width: '100%', bare: true, variant: 'orange', className: 'rd-ticker-ppb', ariaLabel: '本月运动进度' })
+    + '<span class="rd-ticker-link">运动计划 →</span></button>'
+    + '<button type="button" class="rd-card rd-home-ticker" data-action="go-stats-plan" data-value="study">'
+    + '<div class="rd-ticker-top"><small>本月学习</small><em class="is-study">' + stPct + '%</em></div>'
+    + '<strong>' + stH.toFixed(1) + '<em>/' + state.studyGoal + 'h</em></strong>'
+    + PixelProgressBar.renderHtml({ progress: Math.min(100, stPct), height: 10, width: '100%', bare: true, variant: 'blue', className: 'rd-ticker-ppb', ariaLabel: '本月学习进度' })
+    + '<span class="rd-ticker-link">学习专注 →</span></button>'
+    + '<button type="button" class="rd-card rd-home-ticker" data-action="go-view" data-value="progress">'
+    + '<div class="rd-ticker-top"><small>双轨连胜</small><em class="is-gold">自律 ' + hb.done + '/' + hb.total + '</em></div>'
+    + '<strong>' + ds + '<em> 天</em></strong>'
+    + '<span class="rd-ticker-sub">查看全历史统计与曲线</span>'
+    + '<span class="rd-ticker-link">统计总览 →</span></button>'
+    + '<button type="button" class="rd-card rd-home-ticker" data-action="go-ranking">'
+    + '<div class="rd-ticker-top"><small>' + (solo ? '本月综合分' : '多人竞技榜') + '</small><em class="is-ink">' + (solo ? '单人' : (board.length + '人')) + '</em></div>'
+    + '<strong>' + (solo ? (myRow.score + '<em>分</em>') : ('#' + myRank + '<em> · ' + myRow.score + '分</em>')) + '</strong>'
+    + '<span class="rd-ticker-sub">' + (solo ? '与记录共用统一榜单视图' : '查看同榜趋势与对比') + '</span>'
+    + '<span class="rd-ticker-link">查看排名 →</span></button>'
     + '</section>'
     + homeTodayPanel()
     + '</div>';
@@ -2661,13 +2822,20 @@ function calendarPage() {
 
   const allDayCellsHtml = visibleDays.map(dk => {
     const isT = dk === t;
-    const spPlan = state.sportDatePlan && state.sportDatePlan[dk];
-    const stPlan = state.studyDatePlan && state.studyDatePlan[dk];
+    const spPlanned = isSportPlanned(dk);
+    const stPlanned = isStudyPlanned(dk);
+    const dayItems = byDate.get(dk) || [];
+    const spDone = dayItems.some(x => x._kind === 'sport');
+    const stDone = dayItems.some(x => x._kind === 'study');
     const hbRate = habitRateForDate(dk);
     const chips = [];
-    if (spPlan) chips.push('<button type="button" class="rd-allday-chip is-sport" data-action="cal-slot-add" data-date="' + dk + '" data-time="07:00" data-mode="sport">跑 ' + spPlan + 'k</button>');
-    if (stPlan) chips.push('<button type="button" class="rd-allday-chip is-study" data-action="cal-slot-add" data-date="' + dk + '" data-time="09:00" data-mode="study">学 ' + stPlan + 'h</button>');
-    if (hbRate.done > 0) chips.push('<button type="button" class="rd-allday-chip is-habit" data-action="stats-edit-habits-modal">自律 ' + hbRate.done + '/' + hbRate.total + '</button>');
+    if (spPlanned && calKindFilter !== 'study') {
+      chips.push('<button type="button" class="rd-allday-chip is-plan-badge is-sport' + (spDone ? ' is-done' : '') + '" data-action="cal-slot-add" data-date="' + dk + '" data-time="07:00" data-mode="sport" title="跑步计划">' + (spDone ? '✓ 计划·跑' : '📅 计划·跑') + '</button>');
+    }
+    if (stPlanned && calKindFilter !== 'sport') {
+      chips.push('<button type="button" class="rd-allday-chip is-plan-badge is-study' + (stDone ? ' is-done' : '') + '" data-action="cal-slot-add" data-date="' + dk + '" data-time="09:00" data-mode="study" title="学习计划">' + (stDone ? '✓ 计划·学' : '📅 计划·学') + '</button>');
+    }
+    if (hbRate.done > 0) chips.push('<button type="button" class="rd-allday-chip is-habit" data-action="stats-edit-habits-modal">✓ 自律 ' + hbRate.done + '/' + hbRate.total + '</button>');
     return '<div class="rd-allday-cell' + (isT ? ' is-today' : '') + '">' + chips.join('') + '</div>';
   }).join('');
 
@@ -2704,11 +2872,11 @@ function calendarPage() {
         const pctW = (100 / overlapCount);
         horizStyle = 'left:calc(' + (overlapRank * pctW).toFixed(1) + '% + 2px);width:calc(' + pctW.toFixed(1) + '% - 4px);right:auto;';
       }
-      return '<button type="button" class="rd-cal-ev ' + (isStudy ? 'is-study' : 'is-sport') + '"'
+      return '<button type="button" class="rd-cal-ev is-actual-ev ' + (isStudy ? 'is-study' : 'is-sport') + '"'
         + ' style="top:' + topPx.toFixed(1) + 'px;height:' + heightPx.toFixed(1) + 'px;' + horizStyle + '"'
         + ' data-action="open-receipt-modal" data-value="' + esc(item._key) + '">'
-        + '<strong>' + esc(title) + '</strong>'
-        + '<small>' + esc(sub) + '</small>'
+        + '<strong>✓ ' + esc(title) + '</strong>'
+        + '<small>实绩 · ' + esc(sub) + '</small>'
         + '</button>';
     }).join('');
 
@@ -2720,29 +2888,48 @@ function calendarPage() {
     return '<div class="rd-day-lane' + (isT ? ' is-today' : '') + '">' + slotsHtml + evsHtml + nowLineHtml + '</div>';
   }
 
+  function buildCalPlanAgendaRows(dk) {
+    const out = [];
+    const dayRecs = byDate.get(dk) || [];
+    if (isSportPlanned(dk) && calKindFilter !== 'study') {
+      const done = dayRecs.some(x => x._kind === 'sport');
+      out.push('<button type="button" class="rd-feed-row rd-cal-plan-row' + (done ? ' is-plan-done' : '') + '" data-action="cal-slot-add" data-date="' + dk + '" data-time="06:30" data-mode="sport">'
+        + '<span class="rd-feed-pill is-plan-pill">📅 计划</span>'
+        + '<span class="rd-feed-main"><strong>跑步计划' + (done ? '（已完成）' : '') + '</strong><small>点击安排或补记跑步实绩</small></span>'
+        + '<span class="rd-feed-right"><span>06:30</span><span aria-hidden="true">›</span></span></button>');
+    }
+    if (isStudyPlanned(dk) && calKindFilter !== 'sport') {
+      const done = dayRecs.some(x => x._kind === 'study');
+      out.push('<button type="button" class="rd-feed-row rd-cal-plan-row' + (done ? ' is-plan-done' : '') + '" data-action="cal-slot-add" data-date="' + dk + '" data-time="09:00" data-mode="study">'
+        + '<span class="rd-feed-pill is-plan-pill is-study">📅 计划</span>'
+        + '<span class="rd-feed-main"><strong>学习计划' + (done ? '（已完成）' : '') + '</strong><small>点击开始专注或补记学习实绩</small></span>'
+        + '<span class="rd-feed-right"><span>09:00</span><span aria-hidden="true">›</span></span></button>');
+    }
+    return out.join('');
+  }
   const desktopMainContent = calLayoutMode === 'list'
     ? '<div class="rd-cal-list-wrap">'
       + visibleDays.map(dk => {
         const dt = new Date(dk + 'T12:00:00');
-        const list = byDate.get(dk) || [];
-        if (!list.length && calViewMode === 'week') return '';
-        const rows = list.length
-          ? list.map(item => {
-            const isStudy = item._kind === 'study';
-            const val = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
-            const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || ('配速 ' + pace(item)));
-            return '<button type="button" class="rd-feed-row" data-action="open-receipt-modal" data-value="' + esc(item._key) + '">'
-              + '<span class="rd-feed-pill ' + (isStudy ? 'is-study' : 'is-sport') + '">' + (isStudy ? '学习' : '运动') + '</span>'
-              + '<span class="rd-feed-main"><strong>' + val + '</strong><small>' + esc(item.person + ' · ' + detail) + '</small></span>'
-              + '<span class="rd-feed-right"><span>' + esc(item.time || '--:--') + '</span><span aria-hidden="true">›</span></span>'
-              + '</button>';
-          }).join('')
-          : '<div class="rd-empty-box">该日暂无记录</div>';
-        return '<div class="rd-section-label"><span>' + dk + ' · ' + dowNames[dt.getDay()] + (dk === t ? ' (今天)' : '') + '</span><button type="button" data-action="cal-slot-add" data-date="' + dk + '" data-time="08:00">+ 补卡</button></div>'
+        const list = (byDate.get(dk) || []).slice().sort((a, b) => parseTimeToMins(a.time) - parseTimeToMins(b.time));
+        const planRows = buildCalPlanAgendaRows(dk);
+        if (!list.length && !planRows && calViewMode === 'week') return '';
+        const actualRows = list.map(item => {
+          const isStudy = item._kind === 'study';
+          const val = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
+          const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || ('配速 ' + pace(item)));
+          return '<button type="button" class="rd-feed-row rd-cal-actual-row" data-action="open-receipt-modal" data-value="' + esc(item._key) + '">'
+            + '<span class="rd-feed-pill ' + (isStudy ? 'is-study' : 'is-sport') + '">✓ 实绩·' + (isStudy ? '学习' : '运动') + '</span>'
+            + '<span class="rd-feed-main"><strong>' + val + '</strong><small>' + esc(item.person + ' · ' + detail) + '</small></span>'
+            + '<span class="rd-feed-right"><span>' + esc(item.time || '--:--') + '</span><span aria-hidden="true">›</span></span>'
+            + '</button>';
+        }).join('');
+        const rows = (planRows + actualRows) || '<div class="rd-empty-box">该日暂无计划或实绩</div>';
+        return '<div class="rd-section-label"><span>' + dk + ' · ' + dowNames[dt.getDay()] + (dk === t ? ' (今天 · 北京时间)' : '') + '</span><button type="button" data-action="cal-slot-add" data-date="' + dk + '" data-time="08:00">+ 补记实绩</button></div>'
           + '<div class="rd-card rd-feed-card">' + rows + '</div>';
       }).filter(Boolean).join('')
-      + (visibleDays.every(dk => !(byDate.get(dk) || []).length)
-        ? '<div class="rd-card rd-empty-box"><span>当前周期还没有运动或学习记录</span><button type="button" class="rd-pill-btn is-primary" data-action="cal-slot-add" data-date="' + calAnchorDate + '" data-time="08:00">+ 新建打卡</button></div>'
+      + (visibleDays.every(dk => !(byDate.get(dk) || []).length && !isSportPlanned(dk) && !isStudyPlanned(dk))
+        ? '<div class="rd-card rd-empty-box rd-actionable-empty"><p>当前周期还没有计划或打卡实绩</p><div class="ck-empty-actions"><button type="button" class="rd-pill-btn is-primary" data-action="cal-slot-add" data-date="' + calAnchorDate + '" data-time="08:00">+ 新建打卡</button><button type="button" class="rd-pill-btn" data-action="go-stats-plan" data-value="sport">去配置计划 →</button></div></div>'
         : '')
       + '</div>'
     : '<div class="rd-grid-head ' + gridCls + '"><div class="rd-tz-cell">GMT+8</div>' + dayHeadsHtml + '</div>'
@@ -2766,33 +2953,33 @@ function calendarPage() {
       + '</button>';
   }).join('');
 
-  const selDayItems = byDate.get(calAnchorDate) || [];
+  const selDayItems = (byDate.get(calAnchorDate) || []).slice().sort((a, b) => parseTimeToMins(a.time) - parseTimeToMins(b.time));
   const selSpKm = selDayItems.filter(x => x._kind === 'sport').reduce((s, r) => s + Number(r.km || 0), 0);
   const selStMin = selDayItems.filter(x => x._kind === 'study').reduce((s, r) => s + studyMinutesOf(r), 0);
   const selHb = habitRateForDate(calAnchorDate);
+  const selPlanRowsHtml = buildCalPlanAgendaRows(calAnchorDate);
+  const selActualRowsHtml = selDayItems.map(item => {
+    const isStudy = item._kind === 'study';
+    const val = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
+    const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || ('配速 ' + pace(item)));
+    return '<button type="button" class="rd-feed-row rd-cal-actual-row" data-action="open-receipt-modal" data-value="' + esc(item._key) + '">'
+      + '<span class="rd-feed-pill ' + (isStudy ? 'is-study' : 'is-sport') + '">✓ 实绩·' + (isStudy ? '学习' : '运动') + '</span>'
+      + '<span class="rd-feed-main"><strong>' + val + '</strong><small>' + esc(detail) + '</small></span>'
+      + '<span class="rd-feed-right"><span>' + esc(item.time || '--:--') + '</span><span aria-hidden="true">›</span></span>'
+      + '</button>';
+  }).join('');
 
   const mobileBodyHtml = calMobileMode === 'timeline'
     ? '<div class="rd-card rd-mcal-timeline"><div class="rd-timegrid is-day">' + hourAxisHtml + buildDayLaneHtml(calAnchorDate) + '</div></div>'
-    : (selDayItems.length
-      ? '<div class="rd-card rd-feed-card">'
-        + selDayItems.map(item => {
-          const isStudy = item._kind === 'study';
-          const val = isStudy ? (studyMinutesOf(item) + ' 分钟') : (Number(item.km).toFixed(2) + ' km');
-          const detail = isStudy ? (item.subject || findTargetTitle(item.targetId)) : (item.note || ('配速 ' + pace(item)));
-          return '<button type="button" class="rd-feed-row" data-action="open-receipt-modal" data-value="' + esc(item._key) + '">'
-            + '<span class="rd-feed-pill ' + (isStudy ? 'is-study' : 'is-sport') + '">' + (isStudy ? '学习' : '运动') + '</span>'
-            + '<span class="rd-feed-main"><strong>' + val + '</strong><small>' + esc(detail) + '</small></span>'
-            + '<span class="rd-feed-right"><span>' + esc(item.time || '--:--') + '</span><span aria-hidden="true">›</span></span>'
-            + '</button>';
-        }).join('')
-        + '</div>'
-      : '<div class="rd-card rd-empty-box"><span>' + calAnchorDate + ' 暂无运动或学习记录</span><button type="button" class="rd-pill-btn is-primary" data-action="cal-slot-add" data-date="' + calAnchorDate + '" data-time="08:00">+ 为这一天补记</button></div>');
+    : ((selPlanRowsHtml || selActualRowsHtml)
+      ? '<div class="rd-card rd-feed-card">' + selPlanRowsHtml + selActualRowsHtml + '</div>'
+      : '<div class="rd-card rd-empty-box rd-actionable-empty"><p>' + calAnchorDate + '（北京时间）暂无计划或实绩</p><div class="ck-empty-actions"><button type="button" class="rd-pill-btn is-primary" data-action="cal-slot-add" data-date="' + calAnchorDate + '" data-time="08:00">+ 为这一天补记</button><button type="button" class="rd-pill-btn" data-action="go-stats-plan" data-value="sport">调整计划 →</button></div></div>');
 
   const kindLabelShort = calKindFilter === 'all' ? '全部' : (calKindFilter === 'sport' ? '运动' : '学习');
 
   return '<section class="rd-cal-page" aria-label="日历与时间表">'
     + '<div class="rd-cal-topbar">'
-    + '<div class="rd-cal-title-group"><h2>日历与排程</h2><span class="rd-today-badge">' + recs.length + ' 条记录</span></div>'
+    + '<div class="rd-cal-title-group"><h2>日历与排程</h2><span class="rd-today-badge">' + recs.length + ' 条实绩 · 北京时间</span><span class="rd-cal-legend-inline"><em>📅 虚线=计划</em><em>✓ 实色=实绩</em></span></div>'
     + '<div class="rd-cal-controls">'
     + '<select class="rd-select" id="cal-person-select" aria-label="按成员筛选">' + memberOpts + '</select>'
     + '<select class="rd-select" id="cal-kind-select" aria-label="按类型筛选">' + kindOpts + '</select>'
@@ -2887,7 +3074,7 @@ function renderSlimBarChartSvg(chartId, buckets, color, unitLabel, formatVal) {
     const ringH = (val > 0 ? (h + 5) : 10).toFixed(1);
     return '<g class="rd-bar-col' + (isSel ? ' is-selected' : '') + (val === 0 ? ' is-zero' : '') + '"'
       + ' data-action="stats-pick-bar" data-chart-id="' + esc(chartId) + '" data-value="' + esc(barKey) + '"'
-      + ' data-focus-key="bar:' + esc(barKey) + '" tabindex="0" role="button" aria-pressed="' + isSel + '" aria-label="' + esc(ariaTxt) + '">'
+      + ' data-focus-key="bar:' + esc(barKey) + '" tabindex="' + (isSel || (!matchedBucket && i === 0) ? '0' : '-1') + '" role="button" aria-pressed="' + isSel + '" aria-label="' + esc(ariaTxt) + '">'
       + '<rect class="rd-bar-hit" x="' + hitX + '" y="' + padT + '" width="' + hitW + '" height="' + (plotH + 4) + '" fill="transparent"><title>' + esc(b.tip || ariaTxt) + '</title></rect>'
       + '<rect class="rd-bar-focus-ring" x="' + ringX + '" y="' + ringY + '" width="' + (bw + 5).toFixed(1) + '" height="' + ringH + '" rx="4" fill="none" stroke="#1a1a18" stroke-width="1.8" stroke-dasharray="2.5 2"/>'
       + (isSel ? '<rect class="rd-bar-sel-bg" x="' + (padL + i * colW + 1).toFixed(1) + '" y="' + padT + '" width="' + Math.max(6, colW - 2).toFixed(1) + '" height="' + plotH + '" rx="4" fill="' + color + '" fill-opacity=".10"/>' : '')
@@ -2900,20 +3087,31 @@ function renderSlimBarChartSvg(chartId, buckets, color, unitLabel, formatVal) {
 
   const peakB = safeBuckets.slice().sort((a, b) => (Number(b.val) || 0) - (Number(a.val) || 0))[0];
   let readoutHtml = '';
+  const curBarIdx = matchedBucket ? safeBuckets.findIndex(b => b.key === matchedBucket.key) : -1;
+  const prevBarDisabled = curBarIdx === 0 ? ' disabled' : '';
+  const nextBarDisabled = curBarIdx === safeBuckets.length - 1 ? ' disabled' : '';
   if (matchedBucket) {
     const valStr = matchedBucket.valDisplay || (String(matchedBucket.val) + (unitLabel || ''));
     readoutHtml = '<div class="rd-bar-readout is-active" data-bar-readout="' + esc(chartId) + '" role="status" aria-live="polite">'
+      + '<div class="rd-chart-step-nav" role="group" aria-label="切换柱条日期">'
+      + '<button type="button" class="rd-chart-step-btn" data-action="stats-step-bar" data-chart-id="' + esc(chartId) + '" data-dir="-1" aria-label="前一天/项"' + prevBarDisabled + '>‹</button>'
+      + '<div class="rd-chart-step-info">'
       + '<span class="rd-bar-readout-key">' + esc(matchedBucket.fullLabel || matchedBucket.label) + '</span>'
       + '<strong class="rd-bar-readout-val">' + esc(valStr) + '</strong>'
       + (matchedBucket.extra ? '<span class="rd-bar-readout-extra">' + esc(matchedBucket.extra) + '</span>' : '')
-      + '</div>';
+      + '</div>'
+      + '<button type="button" class="rd-chart-step-btn" data-action="stats-step-bar" data-chart-id="' + esc(chartId) + '" data-dir="1" aria-label="后一天/项"' + nextBarDisabled + '>›</button>'
+      + '</div></div>';
   } else {
     const peakTxt = peakB && Number(peakB.val) > 0
       ? ('峰值 ' + (peakB.fullLabel || peakB.label) + ' · ' + (peakB.valDisplay || (peakB.val + (unitLabel || ''))))
       : '当前周期暂无数值，点击任意柱条可查看零值明细';
     readoutHtml = '<div class="rd-bar-readout" data-bar-readout="' + esc(chartId) + '" role="status" aria-live="polite">'
-      + '<span class="rd-bar-readout-hint">点击或方向键选中柱条 · ' + esc(peakTxt) + '</span>'
-      + '</div>';
+      + '<div class="rd-chart-step-nav" role="group" aria-label="切换柱条日期">'
+      + '<button type="button" class="rd-chart-step-btn" data-action="stats-step-bar" data-chart-id="' + esc(chartId) + '" data-dir="-1" aria-label="选择柱条">‹</button>'
+      + '<span class="rd-bar-readout-hint">点击柱条或用 ‹ › 切换查看 · ' + esc(peakTxt) + '</span>'
+      + '<button type="button" class="rd-chart-step-btn" data-action="stats-step-bar" data-chart-id="' + esc(chartId) + '" data-dir="1" aria-label="选择柱条">›</button>'
+      + '</div></div>';
   }
 
   return '<div class="rd-bar-chart-wrap">'
@@ -2970,7 +3168,7 @@ function renderSmoothSplineCardSvg(points, color, gradId, formatY) {
     const isSel = statsSelectedNode === p.key;
     const showLbl = n <= 12 || i === 0 || i === n - 1 || i % Math.ceil(n / 6) === 0 || isSel;
     const showDot = p.val > 0 || isSel || n <= 14;
-    return '<g class="rd-spline-node' + (isSel ? ' is-selected' : '') + '" data-action="stats-pick-node" data-value="' + esc(p.key) + '" data-focus-key="spline:' + esc(p.key) + '" tabindex="0" role="button" aria-pressed="' + isSel + '" aria-label="' + esc(p.tip) + '">'
+    return '<g class="rd-spline-node' + (isSel ? ' is-selected' : '') + '" data-action="stats-pick-node" data-value="' + esc(p.key) + '" data-focus-key="spline:' + esc(p.key) + '" tabindex="' + (isSel || (!coords.some(q => q.key === statsSelectedNode) && i === 0) ? '0' : '-1') + '" role="button" aria-pressed="' + isSel + '" aria-label="' + esc(p.tip) + '">'
       + '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="10" fill="transparent"><title>' + esc(p.tip) + '</title></circle>'
       + '<circle class="rd-spline-focus-ring" cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="9.5" fill="none" stroke="#1a1a18" stroke-width="2" stroke-dasharray="2 2"/>'
       + (isSel ? '<circle cx="' + p.x.toFixed(1) + '" cy="' + p.y.toFixed(1) + '" r="8" fill="' + color + '" fill-opacity=".18" stroke="' + color + '" stroke-width="1.4"/>' : '')
@@ -2988,6 +3186,7 @@ function renderSmoothSplineCardSvg(points, color, gradId, formatY) {
 }
 
 function renderYearDotMatrixCard(yearNum, mySport, myStudy) {
+  const bjToday = today();
   const dayMap = new Map();
   mySport.forEach(r => {
     if (String(r.date).startsWith(yearNum + '-')) {
@@ -3010,7 +3209,6 @@ function renderYearDotMatrixCard(yearNum, mySport, myStudy) {
     return v.sp || v.st;
   }).sort();
 
-  // Compute max streak in year
   let bestStreak = 0, curS = 0;
   for (let i = 0; i < activeDates.length; i++) {
     if (i === 0 || addDaysStr(activeDates[i - 1], 1) === activeDates[i]) curS++;
@@ -3023,7 +3221,7 @@ function renderYearDotMatrixCard(yearNum, mySport, myStudy) {
     const daysInMo = new Date(yearNum, mIdx + 1, 0, 12).getDate();
     const lead = (first.getDay() + 6) % 7;
     let cells = '';
-    for (let k = 0; k < lead; k++) cells += '<span class="rd-dot-cell is-pad"></span>';
+    for (let k = 0; k < lead; k++) cells += '<span class="rd-dot-cell is-pad" aria-hidden="true"></span>';
     for (let d = 1; d <= daysInMo; d++) {
       const dk = yearNum + '-' + pad(mIdx + 1) + '-' + pad(d);
       const st = dayMap.get(dk);
@@ -3033,27 +3231,106 @@ function renderYearDotMatrixCard(yearNum, mySport, myStudy) {
         else if (statsTab === 'study') cls = st.st ? 'is-study' : '';
         else cls = (st.sp && st.st) ? 'is-both' : (st.sp ? 'is-sport' : 'is-study');
       }
-      cells += '<span class="rd-dot-cell ' + cls + '" title="' + dk + '"></span>';
+      if (!cls && dk > bjToday) cls = 'is-future';
+      if (dk === bjToday) cls = (cls ? cls + ' ' : '') + 'is-today';
+      const tipState = cls.includes('is-both') ? '双轨完成' : cls.includes('is-sport') ? '已完成运动' : cls.includes('is-study') ? '已完成学习' : cls.includes('is-future') ? '未来日期' : '未打卡';
+      cells += '<span class="rd-dot-cell ' + cls + '" title="' + dk + ' · ' + tipState + '"></span>';
     }
     return '<div class="rd-dot-month"><span class="rd-dot-month-lbl">' + (mIdx + 1) + '月</span><div class="rd-dot-month-cells">' + cells + '</div></div>';
   }).join('');
 
-  return '<article class="rd-card rd-stat-card is-wide">'
+  return '<article class="rd-card rd-stat-card is-wide rd-dot-year-card">'
     + '<div class="rd-stat-card-head">'
-    + '<div class="rd-stat-card-title"><h3>' + yearNum + ' 年度打卡圆点矩阵</h3><small>绿=双轨 · 橙=运动 · 蓝=学习</small></div>'
+    + '<div class="rd-stat-card-title"><h3>' + yearNum + ' 年度打卡圆点矩阵</h3><small>12 个月总览 · 大圆点高对比展示</small></div>'
     + '<div class="rd-stat-arrows">'
-    + '<button type="button" data-action="stats-shift-period" data-value="-1" aria-label="上一年">‹</button>'
-    + '<button type="button" data-action="stats-shift-period" data-value="1" aria-label="下一年">›</button>'
+    + '<button type="button" data-action="stats-shift-year" data-unit="year" data-value="-1" aria-label="上一年">‹</button>'
+    + '<button type="button" data-action="stats-shift-year" data-unit="year" data-value="1" aria-label="下一年">›</button>'
     + '</div></div>'
     + '<div class="rd-dot-year-headline"><strong>' + activeDates.length + ' 天</strong><span>最长连续 ' + bestStreak + ' 天 · 当前双轨连胜 ' + dualStreak() + ' 天</span></div>'
+    + '<div class="rd-dot-legend" aria-label="图例">'
+    + '<span><i class="rd-dot-cell is-both"></i>双轨</span>'
+    + '<span><i class="rd-dot-cell is-sport"></i>运动</span>'
+    + '<span><i class="rd-dot-cell is-study"></i>学习</span>'
+    + '<span><i class="rd-dot-cell"></i>未打卡</span>'
+    + '<span><i class="rd-dot-cell is-future"></i>未来</span>'
+    + '</div>'
     + '<div class="rd-dot-year-grid">' + monthsHtml + '</div>'
     + '</article>';
 }
 
+function renderStudyTimerPanel(opts = {}) {
+  const compact = !!opts.compact;
+  const strictOn = isStrictStudyMode();
+  const fc = getStudyFocusCharge();
+  const sweepOn = performance.now() < electricSweepUntil;
+  const sweepFxHtml = '<div class="electric-border-fx" aria-hidden="true"><i class="eb-top"></i><i class="eb-right"></i><i class="eb-bottom"></i><i class="eb-left"></i></div>';
+  const elapsed = getPomoElapsedSec();
+  const leftSec = getPomoLeftSec();
+  const isVoided = pomoSession.state === 'voided';
+  const canSave = !isVoided && elapsed >= 60 && pomoSession.state !== 'saving';
+  const stateLabel = pomoSession.state === 'running' ? '专注进行中'
+    : pomoSession.state === 'paused' ? '已暂停（可继续）'
+    : pomoSession.state === 'completed' ? '本轮已完成 · 待保存'
+    : pomoSession.state === 'saving' ? '正在保存记录…'
+    : pomoSession.state === 'saved' ? '已保存'
+    : isVoided ? '本轮已作废'
+    : '就绪';
+  const primaryBtnLabel = pomoSession.state === 'running'
+    ? (strictOn ? '严厉专注中' : '暂停')
+    : pomoSession.state === 'paused' ? '继续专注'
+    : isVoided ? '重新开始计时'
+    : '开始专注';
+  const targets = activeStudyTargets().length ? activeStudyTargets() : state.studyTargets;
+  const targetOptions = targets.length
+    ? targets.map(t => '<option value="' + esc(t.id) + '" ' + (t.id === pomodoroTargetId ? 'selected' : '') + '>' + esc(t.title) + '</option>').join('')
+    : '<option value="">自由学习</option>';
+  const panelIdAttr = compact ? ' id="modal-pomodoro-panel"' : ' id="pomodoro-panel"';
+  return '<section' + panelIdAttr + ' tabindex="-1" class="pomodoro-panel rd-unified-timer' + (compact ? ' is-compact' : '') + (fc.isFocusing ? ' is-charging' : '') + (sweepOn ? ' electric-sweep-active' : '') + (isVoided ? ' is-voided' : '') + '" aria-label="学习专注计时器">'
+    + sweepFxHtml
+    + '<div class="pomo-head">'
+    + '<div class="pomo-head-title"><h3>学习专注计时</h3><span class="pomo-mode-pill ' + (strictOn ? 'is-strict' : 'is-normal') + '">' + (strictOn ? '🔒 严厉打卡已开启' : '⏱ 普通计时') + '</span><span class="pomo-state-pill is-' + esc(pomoSession.state) + '">' + stateLabel + '</span></div>'
+    + '<div class="pomo-presets" role="group" aria-label="专注时长预设">'
+    + '<button type="button" class="' + (pomodoroTotal === 1500 ? 'active' : '') + '" data-action="pomo-set" data-value="25">25 分钟</button>'
+    + '<button type="button" class="' + (pomodoroTotal === 3000 ? 'active' : '') + '" data-action="pomo-set" data-value="50">50 分钟</button>'
+    + '<button type="button" class="pomo-settings-link" data-action="settings" title="在设置中开关严厉打卡">⚙ 规则</button>'
+    + '</div></div>'
+    + (strictOn
+      ? '<div class="pomo-strict-notice" role="note"><strong>严厉打卡规则：</strong>开始计时后，切换页面/标签、切回桌面、锁屏或刷新关闭都会立即作废本轮未保存时长，不可恢复。</div>'
+      : '<div class="pomo-strict-notice is-soft">离开当前计时区或切到后台时将自动暂停，返回后可继续专注；可在「设置 → 严厉打卡」中开启防分心作废模式。</div>')
+    + (isVoided
+      ? '<div class="pomo-voided-banner" role="alert"><div><strong>⚠ 本轮专注已作废</strong><p>' + esc(pomoSession.voidReason || '在严厉打卡模式下离开了计时页面，未保存计时已清零，不可提交。') + '</p></div><button type="button" class="pomo-btn primary" data-action="pomo-toggle">重新开始计时</button></div>'
+      : '')
+    + '<div class="pomo-main">'
+    + '<div class="pomo-clock-wrap"><strong id="' + (compact ? 'modal-pomo-clock' : 'pomo-clock') + '" class="pomo-clock-digits" aria-live="off">' + formatTimer(leftSec) + '</strong><small class="pomo-elapsed-live">已专注 ' + Math.floor(elapsed / 60) + ' 分 ' + (elapsed % 60) + ' 秒</small></div>'
+    + '<div class="pomo-ctrl">'
+    + '<button type="button" class="pomo-btn primary" data-action="pomo-toggle"' + (pomoSession.state === 'running' && strictOn ? ' aria-disabled="true"' : '') + '>' + primaryBtnLabel + '</button>'
+    + '<button type="button" class="pomo-btn" data-action="pomo-reset">重置</button>'
+    + '<button type="button" class="pomo-btn accent" data-action="pomo-finish"' + (!canSave ? ' disabled' : '') + '>' + (pomoSession.state === 'saving' ? '保存中…' : '结束并保存') + '</button>'
+    + '</div></div>'
+    + '<div class="pomo-hint" id="' + (compact ? 'modal-pomo-elapsed-hint' : 'pomo-elapsed-hint') + '">已专注 ' + Math.floor(elapsed / 60) + ' 分 ' + (elapsed % 60) + ' 秒 · 满 60 秒可结束并保存真实时长</div>'
+    + (pomoSession.errorMsg
+      ? '<div class="pomo-error" role="alert"><span>' + esc(pomoSession.errorMsg) + '</span><span class="pomo-error-actions"><button type="button" class="ck-btn ck-btn-retry" data-action="pomo-finish">重试同步</button><button type="button" class="ck-btn ck-btn-ghost" data-action="pomo-save-local">先存本机</button></span></div>'
+      : '')
+    + '<div class="pomo-target-select"><label for="' + (compact ? 'modal-pomo-target-sel' : 'pomo-target-sel') + '">绑定学习目标</label><select id="' + (compact ? 'modal-pomo-target-sel' : 'pomo-target-sel') + '" data-action="pomo-target">' + targetOptions + '</select></div>'
+    + '</section>';
+}
+
+function selectStatsDate(key) {
+  if (typeof key !== 'string') return;
+  const raw = key.replace(/^(mo:|yr:)/, '');
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) { statsDayDate = raw; return; }
+  if (/^\d{4}-\d{2}$/.test(raw)) {
+    statsAnchorDate = raw + '-01';
+    const maxDay = new Date(Number(raw.slice(0, 4)), Number(raw.slice(5)), 0, 12).getDate();
+    statsDayDate = raw + '-' + pad(Math.min(Number(statsDayDate.slice(8)) || 1, maxDay));
+  }
+}
+
 function progress() {
-  const mySport = mine(state.records);
-  const myStudy = mineStudy(state.studyRecords);
+  if (!['all', 'sport', 'study'].includes(statsTab)) statsTab = 'all';
   const bjToday = today();
+  const mySport = mine(state.records).filter(r => r.date <= bjToday);
+  const myStudy = mineStudy(state.studyRecords).filter(r => r.date <= bjToday);
   const bjYesterday = dateShift(-1);
   const bjTomorrow = dateShift(1);
   const anchorDt = new Date(statsAnchorDate + 'T12:00:00');
@@ -3082,54 +3359,55 @@ function progress() {
   const pScore = Math.round(pSportKm * 10 + pStudyH * 15 + pHbRate * 0.5);
   const ds = dualStreak();
 
-  // Top Overview Hero with Storm Pixel Canvas (auto-initialized by initPixelMatrices(), obeys motion-paused & reduced-motion)
+  // Top Overview Hero with Storm Pixel Canvas
   const topCardHtml = '<section class="poster-hero poster-storm rd-stats-hero" data-wm="STATS">'
     + '<div class="rd-stats-hero-inner">'
+    + '<div class="rd-stats-hero-top">'
+    + '<span class="rd-hero-eyebrow">[ 统计中心 · STORM PIXEL ]</span>'
     + '<div class="rd-stats-head-row">'
-    + '<div class="rd-stats-hero-title"><span class="rd-hero-eyebrow">[ 统计总览 · STORM PIXEL ]</span><h2>统计数据</h2></div>'
-    + '<div class="rd-stats-head-icons">'
-    + '<button type="button" class="rd-icon-btn is-hero" data-action="go-view" data-value="calendar" title="日历时间表" aria-label="打开日历">' + icon('calendar') + '</button>'
-    + '<button type="button" class="rd-icon-btn is-hero" data-action="go-view" data-value="records" title="打卡流水" aria-label="打开记录">' + icon('pulse') + '</button>'
-    + '<button type="button" class="rd-icon-btn is-hero" data-action="go-view" data-value="achievements" title="成就勋章" aria-label="打开成就">' + icon('medal') + '</button>'
-    + '<button type="button" class="rd-icon-btn is-hero" data-action="stats-open-settings" title="统计图表设置" aria-label="统计图表设置">⚙</button>'
-    + '</div></div>'
+    + '<div class="rd-stats-hero-title"><h2>统计数据</h2></div>'
+    + '<div class="rd-stats-head-icons rd-stats-primary-actions">'
+    + '<button type="button" class="rd-pill-btn rd-stats-log-btn" data-action="checkin" data-mode="' + (statsTab === 'study' ? 'study' : 'sport') + '" data-focus-key="stats-log">' + (statsTab === 'study' ? '记学习' : '记运动') + '</button>'
+    + '<button type="button" class="rd-pill-btn is-hero-light" data-action="stats-scroll-day" data-focus-key="stats-day-shortcut">当日明细</button>'
+    + '<details class="rd-stats-more"><summary id="stats-more-summary">更多</summary><div class="rd-stats-more-actions">'
+    + '<button type="button" data-action="checkin" data-mode="' + (statsTab === 'study' ? 'sport' : 'study') + '">' + (statsTab === 'study' ? '记运动' : '记学习') + '</button>'
+    + '<button type="button" data-action="go-ranking">查看排名</button>'
+    + '<button type="button" data-action="go-view" data-value="calendar">打开日历</button>'
+    + '<button type="button" data-action="go-view" data-value="records">所有记录</button>'
+    + '<button type="button" data-action="stats-open-settings">图表设置</button>'
+    + '</div></details>'
+    + '</div></div></div>'
     + '<div class="rd-stats-hero-kpis" aria-label="当前周期核心指标">'
     + '<div class="rd-hero-kpi"><small>' + esc(periodLabel) + ' · 综合分</small><strong>' + pScore + '<em>分</em></strong></div>'
-    + '<div class="rd-hero-kpi"><small>跑步里程</small><strong>' + pSportKm.toFixed(1) + '<em>km</em></strong></div>'
-    + '<div class="rd-hero-kpi"><small>学习投入</small><strong>' + pStudyH.toFixed(1) + '<em>h</em></strong></div>'
+    + '<div class="rd-hero-kpi"><small>' + esc(periodLabel) + ' · 跑量</small><strong>' + pSportKm.toFixed(1) + '<em>km</em></strong></div>'
+    + '<div class="rd-hero-kpi"><small>' + esc(periodLabel) + ' · 学习</small><strong>' + pStudyH.toFixed(1) + '<em>h</em></strong></div>'
     + '<div class="rd-hero-kpi"><small>双轨连胜</small><strong>' + ds + '<em>天</em></strong></div>'
     + '</div>'
-    + '<div class="rd-seg is-stretch is-hero-seg" role="tablist" aria-label="统计维度">'
-    + [['all', '总览'], ['sport', '运动'], ['study', '学习'], ['rank', '排名']].map(([id, lbl]) =>
-      '<button type="button" role="tab" aria-selected="' + (statsTab === id) + '" class="' + (statsTab === id ? 'active' : '') + '" data-action="stats-tab" data-value="' + id + '">' + lbl + '</button>'
+    + '<div class="rd-seg is-stretch is-hero-seg" role="group" aria-label="统计维度">'
+    + [['all', '总览'], ['sport', '运动'], ['study', '学习']].map(([id, lbl]) =>
+      '<button type="button" aria-pressed="' + (statsTab === id) + '" class="' + (statsTab === id ? 'active' : '') + '" data-action="stats-tab" data-value="' + id + '">' + lbl + '</button>'
     ).join('')
     + '</div>'
-    + (statsTab !== 'rank'
-      ? '<div class="rd-stats-filter-row">'
-        + '<div class="rd-seg is-hero-seg" role="tablist" aria-label="时间周期">'
-        + [['week', '周'], ['month', '月'], ['year', '年'], ['all', '全部']].map(([id, lbl]) =>
-          '<button type="button" role="tab" aria-selected="' + (statsPeriod === id) + '" class="' + (statsPeriod === id ? 'active' : '') + '" data-action="stats-period" data-value="' + id + '">' + lbl + '</button>'
-        ).join('')
+    + '<div class="rd-stats-filter-row">'
+    + '<div class="rd-seg is-hero-seg" role="group" aria-label="时间周期">'
+    + [['week', '周'], ['month', '月'], ['year', '年'], ['all', '全部']].map(([id, lbl]) =>
+      '<button type="button" aria-pressed="' + (statsPeriod === id) + '" class="' + (statsPeriod === id ? 'active' : '') + '" data-action="stats-period" data-value="' + id + '">' + lbl + '</button>'
+    ).join('')
+    + '</div>'
+    + (statsPeriod !== 'all'
+      ? '<div class="rd-period-nav is-hero-nav">'
+        + '<button type="button" class="rd-icon-btn is-hero" data-action="stats-shift-period" data-value="-1" aria-label="上一周期">‹</button>'
+        + '<span class="rd-period-label">' + esc(periodLabel) + '</span>'
+        + '<button type="button" class="rd-icon-btn is-hero" data-action="stats-shift-period" data-value="1" aria-label="下一周期">›</button>'
         + '</div>'
-        + (statsPeriod !== 'all'
-          ? '<div class="rd-period-nav is-hero-nav">'
-            + '<button type="button" class="rd-icon-btn is-hero" data-action="stats-shift-period" data-value="-1" aria-label="上一周期">‹</button>'
-            + '<span class="rd-period-label">' + esc(periodLabel) + '</span>'
-            + '<button type="button" class="rd-icon-btn is-hero" data-action="stats-shift-period" data-value="1" aria-label="下一周期">›</button>'
-            + '</div>'
-          : '<span class="rd-period-label is-hero-lbl">全部历史</span>')
-        + '</div>'
-      : '')
+      : '<span class="rd-period-label is-hero-lbl">全部历史</span>')
+    + '</div>'
     + '</div></section>';
 
-  if (statsTab === 'rank') {
-    return '<div class="rd-stats-page">' + topCardHtml + '<div class="rd-rank-embed">' + ranking() + '</div></div>';
-  }
-
-  // Card 1 & 2: Independent Cumulative Overview & Yesterday/Today/Tomorrow Daily Card
+  // Card 1 & 2: Flame Cumulative+Monthly Target Card & Yesterday/Today/Tomorrow Daily Card
   const totalCountAll = (statsTab === 'sport' ? mySport.length : statsTab === 'study' ? myStudy.length : mySport.length + myStudy.length);
   const totalSportKmAll = total(mySport);
-  const totalStudyMinAll = myStudy.reduce((s, r) => s + studyMinutesOf(r), 0);
+  const totalStudyMinAll = totalStudyMinutes(myStudy);
   const totalSportMinAll = mySport.reduce((s, r) => s + Number(r.minutes || 0), 0);
   const uniqueDaysAll = new Set([
     ...(statsTab === 'study' ? [] : mySport.map(r => r.date)),
@@ -3141,15 +3419,19 @@ function progress() {
   const daySt = myStudy.filter(r => r.date === statsDayDate);
   const dayCount = (statsTab === 'sport' ? daySp.length : statsTab === 'study' ? daySt.length : daySp.length + daySt.length);
   const daySportKm = total(daySp);
-  const dayStudyMin = daySt.reduce((s, r) => s + studyMinutesOf(r), 0);
-  const dayHb = habitRateForDate(statsDayDate);
+  const dayStudyMin = totalStudyMinutes(daySt);
+  const dayHb = statsDayDate > bjToday ? { done: 0, total: activeHabits().length } : habitRateForDate(statsDayDate);
   const isFutureDay = statsDayDate > bjToday;
   const dayRelLabel = statsDayDate === bjYesterday ? '昨天' : statsDayDate === bjToday ? '今天' : statsDayDate === bjTomorrow ? '明天' : (isFutureDay ? '未来计划' : '历史实绩');
 
   const dNow = chinaNow();
+  const curMonthLabel = dNow.getFullYear() + '年' + (dNow.getMonth() + 1) + '月';
   const daysLeftMo = Math.max(1, new Date(dNow.getFullYear(), dNow.getMonth() + 1, 0).getDate() - dNow.getDate() + 1);
   const myMtNow = total(mine(monthly())), myStNow = totalStudy(monthly(mineStudy()));
   const remSportNow = Math.max(0, state.goal - myMtNow), remStudyNow = Math.max(0, state.studyGoal - myStNow);
+  const monthPace = monthElapsedPct();
+  const sPct = Math.round(myMtNow / Math.max(1, state.goal) * 100);
+  const stPct = Math.round(myStNow / Math.max(1, state.studyGoal) * 100);
   const sportPlannedDay = isSportPlanned(statsDayDate);
   const studyPlannedDay = isStudyPlanned(statsDayDate);
 
@@ -3171,7 +3453,7 @@ function progress() {
           ? '<div class="rd-day-plan-targets"><span>重点目标：</span>' + activeT.map(t => '<button type="button" class="rd-mini-chip" data-action="edit-study-target" data-value="' + esc(t.id) + '">' + esc(t.title.slice(0, 12)) + ' (' + t.doneHours.toFixed(1) + '/' + t.targetHours + 'h)</button>').join('') + '</div>'
           : '')
         + '<div class="rd-day-plan-row is-subtle"><div><strong>自律待办提醒</strong><small>共 ' + activeHabits().length + ' 项每日作息习惯（可在下方分布卡直接编辑）</small></div>'
-        + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-habits-modal">调整清单</button></div>'
+        + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-habits-modal" data-date="' + esc(statsDayDate) + '">管理习惯模板</button></div>'
         + '</div></div>';
     })()
     : (() => {
@@ -3181,43 +3463,100 @@ function progress() {
       ].sort((a, b) => String(b.time || '').localeCompare(String(a.time || '')));
       if (!dayItems.length) {
         return '<div class="rd-day-actual-empty"><span>' + esc(dayRelLabel) + '（' + esc(statsDayDate) + '）暂无实际打卡记录</span>'
-          + '<button type="button" class="rd-pill-btn is-primary" data-action="checkin" data-mode="' + (statsTab === 'study' ? 'study' : 'sport') + '">+ 补记一条</button></div>';
+          + '<button type="button" class="rd-pill-btn is-primary" data-action="stats-backfill" data-mode="' + (statsTab === 'study' ? 'study' : 'sport') + '" data-focus-key="stats-backfill:' + esc(statsDayDate) + '">+ 补记一条</button></div>';
       }
       return '<div class="rd-day-actual-list">'
         + dayItems.slice(0, 4).map(it => {
           const isSt = it._kind === 'study';
           const valTxt = isSt ? (studyMinutesOf(it) + ' 分钟') : (Number(it.km).toFixed(2) + ' km');
           const subTxt = isSt ? (it.subject || findTargetTitle(it.targetId)) : (it.note || ('配速 ' + pace(it)));
-          return '<button type="button" class="rd-day-actual-row" data-action="open-receipt-modal" data-value="' + esc(it._key) + '">'
+          return '<button type="button" class="rd-day-actual-row" data-action="open-receipt-modal" data-focus-key="stats-day:' + esc(statsDayDate) + ':' + esc(it._key) + '" data-value="' + esc(it._key) + '">'
             + '<span class="rd-feed-pill ' + (isSt ? 'is-study' : 'is-sport') + '">' + (isSt ? '学习' : '运动') + '</span>'
             + '<span class="rd-day-actual-main"><strong>' + esc(valTxt) + '</strong><small>' + esc(subTxt) + '</small></span>'
             + '<span class="rd-day-actual-time">' + esc(it.time || '--:--') + ' ›</span>'
             + '</button>';
         }).join('')
-        + '</div>';
+        + '</div>'
+        + (dayItems.length > 4 ? '<button type="button" class="rd-pill-btn rd-day-all-link" data-action="stats-go-records" data-value="' + esc(statsDayDate) + '" data-kind="' + esc(statsTab) + '" data-focus-key="stats-day-all:' + esc(statsDayDate) + '">查看当天全部 ' + dayItems.length + ' 条 →</button>' : '');
     })();
 
-  const summaryCardsHtml = statsVisibleCards.summary
-    ? '<article class="rd-card rd-stat-card">'
-      + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>累计总览</h3><small>全周期真实累计（按北京时间）</small></div><span class="rd-day-badge is-neutral">累计实绩</span></div>'
-      + '<div class="rd-usage-totals">'
-      + '<div class="rd-usage-total-cell"><small>累计打卡</small><strong>' + totalCountAll + '<em>次</em></strong><span>活跃 ' + uniqueDaysAll + ' 天</span></div>'
-      + '<div class="rd-usage-total-cell"><small>' + (statsTab === 'study' ? '累计学习' : '累计跑量') + '</small><strong>' + (statsTab === 'study' ? (totalStudyMinAll / 60).toFixed(1) + '<em>h</em>' : totalSportKmAll.toFixed(1) + '<em>km</em>') + '</strong><span>' + (statsTab === 'all' ? ('学习 ' + (totalStudyMinAll / 60).toFixed(1) + ' h') : ('日均 ' + formatDurHm(avgDailyMin))) + '</span></div>'
-      + '</div>'
-      + '<div class="rd-usage-subrow"><span>日均总投入 <b>' + formatDurHm(avgDailyMin) + '</b></span><span>本月已跑 <b>' + myMtNow.toFixed(1) + ' km</b> · 已学 <b>' + myStNow.toFixed(1) + ' h</b></span></div>'
-      + '</article>'
-      + '<article class="rd-card rd-stat-card">'
+  // Flame Cumulative + Monthly Target Overview Card (Single source of cumulative truth — zero duplication!)
+  const flameRatio = statsTab === 'sport'
+    ? Math.min(1.35, myMtNow / Math.max(1, state.goal))
+    : statsTab === 'study'
+      ? Math.min(1.35, myStNow / Math.max(1, state.studyGoal))
+      : Math.min(1.35, ((myMtNow / Math.max(1, state.goal)) + (myStNow / Math.max(1, state.studyGoal))) / 2);
+  const flamePct = statsTab === 'sport' ? sPct : statsTab === 'study' ? stPct : Math.round((sPct + stPct) / 2);
+
+  const flameOverviewCardHtml = (() => {
+    const isFlame = statsTab !== 'study';
+    const cardCls = isFlame
+      ? 'poster-hero poster-flame rd-stat-card rd-flame-overview-card' + (flamePct >= 100 ? ' is-goal-cleared' : '')
+      : 'rd-card rd-stat-card rd-study-overview-card';
+    const dataAttrs = isFlame ? ' data-wm="' + flamePct + '%" data-goal-ratio="' + flameRatio.toFixed(3) + '" data-goal-pct="' + flamePct + '"' : '';
+    const metricsHtml = statsTab === 'all'
+      ? '<div class="rd-flame-kpis">'
+        + '<div class="rd-flame-kpi"><small>累计打卡</small><strong>' + totalCountAll + '<em>次</em></strong><span>活跃 ' + uniqueDaysAll + ' 天</span></div>'
+        + '<div class="rd-flame-kpi"><small>全历史跑量</small><strong>' + totalSportKmAll.toFixed(1) + '<em>km</em></strong><span>日均 ' + formatDurHm(avgDailyMin) + '</span></div>'
+        + '<div class="rd-flame-kpi"><small>全历史学习</small><strong>' + (totalStudySeconds(myStudy) / 3600).toFixed(1) + '<em>h</em></strong><span>双轨连胜 ' + ds + ' 天</span></div>'
+        + '</div>'
+      : statsTab === 'sport'
+        ? '<div class="rd-flame-kpis is-2">'
+          + '<div class="rd-flame-kpi"><small>全历史跑步次数</small><strong>' + totalCountAll + '<em>次</em></strong><span>活跃 ' + uniqueDaysAll + ' 天</span></div>'
+          + '<div class="rd-flame-kpi"><small>全历史累计跑量</small><strong>' + totalSportKmAll.toFixed(1) + '<em>km</em></strong><span>日均投入 ' + formatDurHm(avgDailyMin) + '</span></div>'
+          + '</div>'
+        : '<div class="rd-flame-kpis is-2 is-light">'
+          + '<div class="rd-flame-kpi"><small>全历史学习次数</small><strong>' + totalCountAll + '<em>次</em></strong><span>活跃 ' + uniqueDaysAll + ' 天</span></div>'
+          + '<div class="rd-flame-kpi"><small>全历史累计学习</small><strong>' + (totalStudySeconds(myStudy) / 3600).toFixed(1) + '<em>h</em></strong><span>日均投入 ' + formatDurHm(avgDailyMin) + '</span></div>'
+          + '</div>';
+
+    const monthlyBarsHtml = '<div class="rd-flame-monthly">'
+      + '<div class="rd-flame-monthly-head"><span>本月目标 · ' + curMonthLabel + '</span><small>本月已过 ' + monthPace + '%</small></div>'
+      + (statsTab !== 'study'
+        ? '<div class="rd-flame-track">'
+          + '<div class="rd-flame-track-top"><strong>🏃 运动 ' + myMtNow.toFixed(1) + ' / ' + state.goal + ' km <em>(' + sPct + '%)</em></strong>'
+          + (statsTab === 'all' ? '<button type="button" class="rd-flame-link" data-action="go-stats-plan" data-value="sport">调整计划 ›</button>' : '<button type="button" class="rd-flame-link" data-action="stats-edit-goal">✎ 改目标</button>')
+          + '</div>'
+          + PixelProgressBar.renderHtml({ progress: Math.min(100, sPct), height: 14, width: '100%', bare: true, variant: 'orange', pacePct: monthPace, className: 'rd-flame-ppb', ariaLabel: '本月运动目标像素进度' })
+          + '<small class="rd-flame-track-sub">' + (remSportNow > 0 ? ('还差 ' + remSportNow.toFixed(1) + ' km · 建议日均 ' + (remSportNow / daysLeftMo).toFixed(1) + ' km') : '本月运动目标已达成 ✓') + '</small>'
+          + '</div>'
+        : '')
+      + (statsTab !== 'sport'
+        ? '<div class="rd-flame-track">'
+          + '<div class="rd-flame-track-top"><strong>⚡ 学习 ' + myStNow.toFixed(1) + ' / ' + state.studyGoal + ' h <em>(' + stPct + '%)</em></strong>'
+          + (statsTab === 'all' ? '<button type="button" class="rd-flame-link" data-action="go-stats-plan" data-value="study">学习专注 ›</button>' : '<button type="button" class="rd-flame-link" data-action="stats-edit-study-goal">✎ 改目标</button>')
+          + '</div>'
+          + PixelProgressBar.renderHtml({ progress: Math.min(100, stPct), height: 14, width: '100%', bare: true, variant: 'blue', pacePct: monthPace, className: 'rd-flame-ppb', ariaLabel: '本月学习目标像素进度' })
+          + '<small class="rd-flame-track-sub">' + (remStudyNow > 0 ? ('还差 ' + remStudyNow.toFixed(1) + ' h · 建议日均 ' + (remStudyNow / daysLeftMo).toFixed(1) + ' h') : '本月学习目标已达成 ✓') + '</small>'
+          + '</div>'
+        : '')
+      + '</div>';
+
+    return '<article class="' + cardCls + '"' + dataAttrs + '>'
+      + '<div class="rd-flame-card-inner">'
       + '<div class="rd-stat-card-head">'
-      + '<div class="rd-stat-card-title"><h3>当日统计 · ' + esc(dayRelLabel) + '</h3><small>' + esc(statsDayDate) + '（北京时间）</small></div>'
+      + '<div class="rd-stat-card-title"><h3>' + (statsTab === 'sport' ? '运动累计与本月目标' : statsTab === 'study' ? '学习累计与本月目标' : '累计总览与本月目标') + '</h3><small>全历史累计实绩 · 按北京时间</small></div>'
+      + '<span class="rd-day-badge ' + (isFlame ? 'is-flame' : 'is-neutral') + '">全历史实绩</span>'
+      + '</div>'
+      + metricsHtml
+      + monthlyBarsHtml
+      + '</div></article>';
+  })();
+
+  const summaryCardsHtml = statsVisibleCards.summary
+    ? flameOverviewCardHtml
+      + '<article class="rd-card rd-stat-card rd-daily-overview-card" id="stats-day-card">'
+      + '<div class="rd-stat-card-head">'
+      + '<div class="rd-stat-card-title"><h3 id="stats-day-title" tabindex="-1">当日统计 · ' + esc(dayRelLabel) + '</h3><small>' + esc(statsDayDate) + '（北京时间）</small></div>'
       + '<div class="rd-day-head-right">'
       + '<span class="rd-day-badge ' + (isFutureDay ? 'is-plan' : 'is-actual') + '">' + (isFutureDay ? '计划与待办' : '实际记录') + '</span>'
       + '<div class="rd-stat-arrows">'
       + '<button type="button" data-action="stats-shift-day" data-value="-1" aria-label="前一天">‹</button>'
       + '<button type="button" data-action="stats-shift-day" data-value="1" aria-label="后一天">›</button>'
       + '</div></div></div>'
-      + '<div class="rd-seg is-stretch rd-day-preset-seg" role="tablist" aria-label="切换昨天今天明天">'
+      + '<div class="rd-seg is-stretch rd-day-preset-seg" role="group" aria-label="切换昨天今天明天">'
       + [[-1, '昨天', bjYesterday], [0, '今天', bjToday], [1, '明天', bjTomorrow]].map(([offset, lbl, dk]) =>
-        '<button type="button" role="tab" aria-selected="' + (statsDayDate === dk) + '" class="' + (statsDayDate === dk ? 'active' : '') + '" data-action="stats-day-preset" data-value="' + offset + '">' + lbl + '</button>'
+        '<button type="button" aria-pressed="' + (statsDayDate === dk) + '" class="' + (statsDayDate === dk ? 'active' : '') + '" data-action="stats-day-preset" data-value="' + offset + '">' + lbl + '</button>'
       ).join('')
       + '</div>'
       + '<div class="rd-kpi-row is-3">'
@@ -3229,85 +3568,85 @@ function progress() {
       + '</article>'
     : '';
 
-  // Card 2.5: Embedded Sport Plan & Study Plan (Pixel Edition — Big % + PixelProgressBar, NO circular rings!)
-  const plansHtml = statsVisibleCards.plans ? (() => {
-    const monthPace = monthElapsedPct();
-    const sPct = Math.round(myMtNow / Math.max(1, state.goal) * 100);
-    const stPct = Math.round(myStNow / Math.max(1, state.studyGoal) * 100);
-    const dows = [[1, '一'], [2, '二'], [3, '三'], [4, '四'], [5, '五'], [6, '六'], [0, '日']];
-    const next7 = Array.from({ length: 7 }, (_, i) => dateShift(i));
-    let out = '';
-    if (statsTab !== 'study') {
-      const sport7Html = next7.map((dk, idx) => {
-        const planned = isSportPlanned(dk);
-        const done = mySport.some(r => r.date === dk);
-        const lbl = idx === 0 ? '今' : idx === 1 ? '明' : dk.slice(5);
-        return '<button type="button" class="rd-plan-day-chip ' + (done ? 'is-done' : planned ? 'is-planned-sport' : 'is-rest') + '" data-action="toggle-sport-date" data-value="' + dk + '" aria-pressed="' + planned + '" title="点击切换 ' + dk + ' 跑步计划"><span>' + lbl + '</span><b>' + (done ? '✓' : planned ? '跑' : '休') + '</b></button>';
-      }).join('');
-      out += '<article class="rd-card rd-stat-card rd-plan-pixel-card is-sport-plan" id="stats-sport-plan">'
+  // Card 2.5: Unified Plan Hub inside Statistics (Sport tab = Sport Plan & 28-day schedule; Study tab = Lightning Study Hero + Unified Timer + 28-day schedule + Targets CRUD)
+  const plansHtml = (statsVisibleCards.plans && (statsTab === 'sport' || statsTab === 'study')) ? (() => {
+    const planSwitcherHtml = '<div class="rd-plan-hub-switch">'
+      + '<div class="rd-seg" role="group" aria-label="切换计划模块">'
+      + '<button type="button" aria-pressed="' + (statsTab === 'sport') + '" class="' + (statsTab === 'sport' ? 'active' : '') + '" data-action="stats-tab" data-value="sport">🏃 运动计划</button>'
+      + '<button type="button" aria-pressed="' + (statsTab === 'study') + '" class="' + (statsTab === 'study' ? 'active' : '') + '" data-action="stats-tab" data-value="study">⚡ 学习计划与专注</button>'
+      + '</div>'
+      + '<button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="calendar">在日历查看 →</button>'
+      + '</div>';
+
+    if (statsTab === 'sport') {
+      const presets = [100, 150, 200, 245, 300];
+      return '<article class="rd-card rd-stat-card is-wide rd-plan-hub-card is-sport-hub" id="stats-plan-hub">'
         + '<div class="rd-stat-card-head">'
-        + '<div class="rd-stat-card-title"><h3>运动计划 · 像素进度</h3><small>双向同步至「运动计划」数据源</small></div>'
+        + '<div class="rd-stat-card-title"><h3>运动计划与 28 天排程</h3><small>月目标 · 每周跑步日 · 单日排程切换（与日历实时同步）</small></div>'
         + '<div class="rd-plan-head-acts">'
         + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-goal">✎ 改目标</button>'
-        + '<button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="plan">28天排程 →</button>'
+        + '<button type="button" class="rd-pill-btn is-primary" data-action="checkin" data-mode="sport">＋ 记录跑步</button>'
         + '</div></div>'
-        + '<div class="rd-pixel-plan-hero">'
-        + '<div class="rd-pixel-big-pct is-sport">' + sPct + '<em>%</em></div>'
-        + '<div class="rd-pixel-plan-meta"><strong>' + myMtNow.toFixed(1) + ' <em>/ ' + state.goal + ' km</em></strong><small>' + (remSportNow > 0 ? ('还差 ' + remSportNow.toFixed(1) + ' km · 日均 ' + (remSportNow / daysLeftMo).toFixed(1) + ' km') : '本月运动目标已达成 ✓') + '</small></div>'
-        + '</div>'
-        + '<div class="rd-pixel-bar-row">' + PixelProgressBar.renderHtml({ progress: Math.min(100, sPct), height: 18, width: '100%', bare: true, variant: 'orange', pacePct: monthPace, className: 'rd-stats-ppb', ariaLabel: '本月运动目标像素进度' }) + '</div>'
-        + '<div class="rd-plan-quick-bar">'
+        + planSwitcherHtml
+        + '<div class="rd-plan-hub-controls">'
+        + '<div class="preset-row">' + presets.map(g => '<button type="button" class="preset-chip ' + (state.goal === g ? 'active' : '') + '" data-action="goal-set" data-value="' + g + '">' + g + 'K</button>').join('') + '</div>'
         + '<div class="rd-plan-step-btns">' + [-10, -5, 5, 10].map(n => '<button type="button" class="rd-mini-step" data-action="goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + 'km</button>').join('') + '</div>'
-        + '<div class="rd-plan-dow-pills" role="group" aria-label="每周跑步日">' + dows.map(([dNum, lbl]) => '<button type="button" class="rd-dow-pill ' + (state.days.includes(dNum) ? 'active is-sport' : '') + '" data-action="day" data-value="' + dNum + '" aria-pressed="' + state.days.includes(dNum) + '">' + lbl + '</button>').join('') + '</div>'
+        + '<div class="rd-plan-next-pill"><span>下次计划出发：</span><strong>' + esc(nextRun()) + '</strong></div>'
         + '</div>'
-        + '<div class="rd-plan-7day-strip"><span class="rd-plan-sub-lbl">近7天排程（点日期切换）</span><div class="rd-plan-7day-grid">' + sport7Html + '</div></div>'
+        + render28DayPlanSection('sport')
         + '</article>';
     }
-    if (statsTab !== 'sport') {
-      const study7Html = next7.map((dk, idx) => {
-        const planned = isStudyPlanned(dk);
-        const done = myStudy.some(r => r.date === dk);
-        const lbl = idx === 0 ? '今' : idx === 1 ? '明' : dk.slice(5);
-        return '<button type="button" class="rd-plan-day-chip ' + (done ? 'is-done' : planned ? 'is-planned-study' : 'is-rest') + '" data-action="toggle-study-date" data-value="' + dk + '" aria-pressed="' + planned + '" title="点击切换 ' + dk + ' 学习计划"><span>' + lbl + '</span><b>' + (done ? '✓' : planned ? '学' : '休') + '</b></button>';
-      }).join('');
-      const activeTargets = activeStudyTargets();
-      const targetsMiniHtml = activeTargets.length
-        ? '<div class="rd-plan-targets-list">' + activeTargets.slice(0, 4).map(t => {
-          const tp = Math.min(100, Math.round((t.doneHours / Math.max(1, t.targetHours)) * 100));
-          return '<div class="rd-plan-target-row">'
-            + '<div class="rd-plan-target-top"><strong>' + esc(t.title) + '</strong><span>' + t.doneHours.toFixed(1) + '/' + t.targetHours + 'h (' + tp + '%)</span></div>'
-            + '<div class="rd-plan-target-bar-wrap">'
-            + PixelProgressBar.renderHtml({ progress: tp, height: 10, width: '100%', bare: true, color: t.color || '#203f91', state: tp >= 100 ? 'success' : 'loading', className: 'rd-target-ppb', ariaLabel: t.title + ' 进度' })
-            + '<button type="button" class="rd-mini-act" data-action="quick-study" data-value="' + esc(t.id) + ':0.5" title="快捷+0.5h">+0.5h</button>'
-            + '<button type="button" class="rd-mini-act" data-action="edit-study-target" data-value="' + esc(t.id) + '" aria-label="编辑 ' + esc(t.title) + '">✎</button>'
-            + '</div></div>';
-        }).join('') + '</div>'
-        : '<div class="rd-empty-box">暂无学习目标</div>';
 
-      out += '<article class="rd-card rd-stat-card rd-plan-pixel-card is-study-plan" id="stats-study-plan">'
-        + '<div class="rd-stat-card-head">'
-        + '<div class="rd-stat-card-title"><h3>学习计划 · 像素进度</h3><small>双向同步至「学习目标」数据源</small></div>'
-        + '<div class="rd-plan-head-acts">'
-        + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-study-goal">✎ 改目标</button>'
-        + '<button type="button" class="rd-pill-btn is-ghost" data-action="add-study-target">＋ 目标</button>'
-        + '<button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="study">专注舱 →</button>'
-        + '</div></div>'
-        + '<div class="rd-pixel-plan-hero">'
-        + '<div class="rd-pixel-big-pct is-study">' + stPct + '<em>%</em></div>'
-        + '<div class="rd-pixel-plan-meta"><strong>' + myStNow.toFixed(1) + ' <em>/ ' + state.studyGoal + ' h</em></strong><small>' + (remStudyNow > 0 ? ('还差 ' + remStudyNow.toFixed(1) + ' h · 日均 ' + (remStudyNow / daysLeftMo).toFixed(1) + ' h') : '本月学习目标已达成 ✓') + '</small></div>'
-        + '</div>'
-        + '<div class="rd-pixel-bar-row">' + PixelProgressBar.renderHtml({ progress: Math.min(100, stPct), height: 18, width: '100%', bare: true, variant: 'blue', pacePct: monthPace, className: 'rd-stats-ppb', ariaLabel: '本月学习目标像素进度' }) + '</div>'
-        + '<div class="rd-plan-quick-bar">'
-        + '<div class="rd-plan-step-btns">' + [-10, -5, 5, 10].map(n => '<button type="button" class="rd-mini-step" data-action="study-goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + 'h</button>').join('') + '</div>'
-        + '<div class="rd-plan-dow-pills" role="group" aria-label="每周学习日">' + dows.map(([dNum, lbl]) => '<button type="button" class="rd-dow-pill ' + (state.studyDays.includes(dNum) ? 'active is-study' : '') + '" data-action="study-day" data-value="' + dNum + '" aria-pressed="' + state.studyDays.includes(dNum) + '">' + lbl + '</button>').join('') + '</div>'
-        + '</div>'
-        + '<div class="rd-plan-7day-strip"><span class="rd-plan-sub-lbl">近7天排程（点日期切换）</span><div class="rd-plan-7day-grid">' + study7Html + '</div></div>'
-        + targetsMiniHtml
-        + '</article>';
-    }
-    return out;
+    // Study tab: Lightning topic header + Unified Study Timer + Monthly Goal + 28-Day Schedule + Study Targets CRUD
+    const presets = [40, 80, 120, 160, 200];
+    const fc = getStudyFocusCharge();
+    const sweepOn = performance.now() < electricSweepUntil;
+    const archivedTargetCount = state.studyTargets.filter(t => t.archived).length;
+    const visibleTargets = showArchivedTargets ? state.studyTargets : activeStudyTargets();
+    const targetsHtml = visibleTargets.length
+      ? '<div class="study-targets-grid rd-hub-targets-grid">' + visibleTargets.map(t => {
+        const pct = Math.min(100, Math.round(t.doneHours / Math.max(1, t.targetHours) * 100));
+        return '<article class="study-target-card ' + (t.archived ? 'is-archived' : '') + '" style="--accent:' + esc(t.color) + '">'
+          + '<div class="st-top"><span class="st-cat">' + esc(t.category) + ' · ' + esc(t.deadline) + (t.archived ? ' · 已归档' : '') + '</span>'
+          + '<span class="st-top-actions">'
+          + '<button type="button" class="st-act" data-action="edit-study-target" data-value="' + esc(t.id) + '" title="编辑目标" aria-label="编辑目标">✎</button>'
+          + '<button type="button" class="st-act" data-action="archive-study-target" data-value="' + esc(t.id) + '" title="' + (t.archived ? '恢复在研' : '归档目标') + '">' + (t.archived ? '恢复' : '归档') + '</button>'
+          + '<button type="button" class="st-del" data-action="del-study-target" data-value="' + esc(t.id) + '" aria-label="删除目标">×</button></span></div>'
+          + '<h4>' + esc(t.title) + '</h4>'
+          + '<div class="st-progress-row">' + PixelProgressBar.renderHtml({ progress: pct, height: 12, width: '100%', bare: true, color: t.color, state: pct >= 100 ? 'success' : 'loading', className: 'st-ppb', ariaLabel: t.title + ' 学习进度' }) + '<span>' + t.doneHours.toFixed(1) + ' / ' + t.targetHours + 'h (' + pct + '%)</span></div>'
+          + '<div class="st-actions">'
+          + '<button type="button" class="st-checkin-btn" data-action="study-focus-target" data-value="' + esc(t.id) + '">▶ 专注计时</button>'
+          + '<button type="button" data-action="checkin" data-mode="study" data-target="' + esc(t.id) + '" data-subtab="backfill">历史补录</button>'
+          + '</div></article>';
+      }).join('') + '</div>'
+      : '<div class="rd-empty-box rd-actionable-empty"><p>还没有在研学习目标，建一个目标来拆解本月学习时长。</p><button type="button" class="rd-pill-btn is-primary" data-action="add-study-target">＋ 新建第一个学习目标</button></div>';
+
+    return '<article class="rd-card rd-stat-card is-wide rd-plan-hub-card is-study-hub" id="stats-plan-hub">'
+      + '<section class="poster-hero poster-lightning rd-study-topic-hero ' + (sweepOn ? 'electric-sweep-active' : '') + '" data-wm="' + stPct + '%" data-focus-charge="' + fc.chargeNorm.toFixed(3) + '" data-focusing="' + (fc.isFocusing ? '1' : '0') + '">'
+      + '<div class="rd-study-topic-inner">'
+      + '<div class="rd-study-topic-top"><span>[ 学习专注区 · LIGHTNING PIXEL ]</span><span>' + esc(state.name) + ' · 每周 ' + state.studyDays.length + ' 天</span></div>'
+      + '<div class="rd-study-topic-main">'
+      + '<div><h3>本月学习 ' + myStNow.toFixed(1) + ' <em>/ ' + state.studyGoal + ' h (' + stPct + '%)</em></h3><p>' + (remStudyNow > 0 ? ('还差 ' + remStudyNow.toFixed(1) + ' h · 下次计划：' + esc(nextStudy())) : '本月学习目标已达成 ✓') + '</p></div>'
+      + '<div class="rd-study-topic-acts">'
+      + '<button type="button" class="rd-pill-btn is-hero-light" data-action="stats-edit-study-goal">✎ 改目标</button>'
+      + '<button type="button" class="rd-pill-btn is-hero-light" data-action="add-study-target">＋ 新建目标</button>'
+      + '<button type="button" class="rd-pill-btn is-hero-light" data-action="checkin" data-mode="study" data-subtab="backfill">历史补录</button>'
+      + '</div></div></div></section>'
+      + planSwitcherHtml
+      + renderStudyTimerPanel({ compact: false })
+      + '<div class="rd-plan-hub-controls">'
+      + '<div class="preset-row">' + presets.map(g => '<button type="button" class="preset-chip ' + (state.studyGoal === g ? 'active' : '') + '" data-action="study-goal-set" data-value="' + g + '">' + g + 'H</button>').join('') + '</div>'
+      + '<div class="rd-plan-step-btns">' + [-10, -5, 5, 10].map(n => '<button type="button" class="rd-mini-step" data-action="study-goal" data-value="' + n + '">' + (n > 0 ? '+' : '') + n + 'h</button>').join('') + '</div>'
+      + '<div class="rd-plan-next-pill"><span>下次计划学习：</span><strong>' + esc(nextStudy()) + '</strong></div>'
+      + '</div>'
+      + render28DayPlanSection('study')
+      + '<section class="study-targets-section rd-hub-targets">'
+      + '<div class="week-head"><h3 class="eyebrow">' + icon('target') + ' 学习目标拆解</h3><button type="button" class="add-target-btn" data-action="add-study-target">＋ 新建目标</button></div>'
+      + targetsHtml
+      + (archivedTargetCount ? '<button type="button" class="archived-toggle" data-action="toggle-archived-targets">' + (showArchivedTargets ? '收起已归档目标 (' + archivedTargetCount + ')' : '查看已归档目标 (' + archivedTargetCount + ')') + '</button>' : '')
+      + '</section>'
+      + '</article>';
   })() : '';
-
   // Card 3: 12-Month Dot Matrix Calendar (preserving Noodle's larger, high-contrast dots)
   const yearDotsHtml = statsVisibleCards.yearDots ? renderYearDotMatrixCard(yr, mySport, myStudy) : '';
 
@@ -3346,11 +3685,11 @@ function progress() {
     }
     const durBuckets = periodBuckets.map(b => {
       const spM = statsTab === 'study' ? 0 : pSport.filter(b.match).reduce((s, r) => s + Number(r.minutes || 0), 0);
-      const stM = statsTab === 'sport' ? 0 : pStudy.filter(b.match).reduce((s, r) => s + studyMinutesOf(r), 0);
+      const stM = statsTab === 'sport' ? 0 : totalStudySeconds(pStudy.filter(b.match)) / 60;
       const v = Math.round(spM + stM);
       return { key: b.key, label: b.label, fullLabel: b.fullLabel, val: v, valDisplay: v + ' 分钟', extra: v > 0 ? formatDurHm(v) : '零记录', tip: b.fullLabel + ' · ' + formatDurHm(v) };
     });
-    const totalDurMin = durBuckets.reduce((s, b) => s + b.val, 0);
+    const totalDurMin = Math.round((statsTab === 'study' ? 0 : pSport.reduce((s, r) => s + Number(r.minutes || 0), 0)) + (statsTab === 'sport' ? 0 : totalStudySeconds(pStudy) / 60));
     cards.push('<article class="rd-card rd-stat-card">'
       + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>总投入时长 · Duration</h3><small>' + periodLabel + '</small></div></div>'
       + '<div class="rd-mbar-headline">' + formatDurHm(totalDurMin) + '</div>'
@@ -3405,7 +3744,7 @@ function progress() {
     const pts = Array.from({ length: daysInMo }, (_, i) => {
       const dk = ymStr + '-' + pad(i + 1);
       const spKm = total(mySport.filter(r => r.date === dk));
-      const stMin = myStudy.filter(r => r.date === dk).reduce((s, r) => s + studyMinutesOf(r), 0);
+      const stMin = totalStudyMinutes(myStudy.filter(r => r.date === dk));
       const val = statsTab === 'sport' ? Number(spKm.toFixed(2)) : statsTab === 'study' ? stMin : Math.round(spKm * 10 + stMin);
       const tip = dk + ' · 运动 ' + spKm.toFixed(1) + ' km · 学习 ' + stMin + ' 分钟';
       return { key: 'mo:' + dk, label: (i + 1) + '日', val, tip };
@@ -3421,7 +3760,14 @@ function progress() {
       + '<button type="button" data-action="stats-shift-period" data-value="1" aria-label="下一月">›</button>'
       + '</div></div>'
       + renderSmoothSplineCardSvg(pts, col, 'rd-mo-grad', unitFn)
-      + '<div class="rd-spline-readout" role="status" aria-live="polite"><span>' + esc(activePt ? activePt.tip : '点击曲线圆点查看单日详情') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看明细 →</button></div>'
+      + '<div class="rd-spline-readout" role="status" aria-live="polite">'
+      + '<div class="rd-chart-step-nav" role="group" aria-label="切换趋势节点日期">'
+      + '<button type="button" class="rd-chart-step-btn" data-action="stats-step-spline" data-curve-type="month" data-dir="-1" aria-label="前一天">‹</button>'
+      + '<span class="rd-spline-readout-txt">' + esc(activePt ? activePt.tip : '点击曲线圆点查看单日详情') + '</span>'
+      + '<button type="button" class="rd-chart-step-btn" data-action="stats-step-spline" data-curve-type="month" data-dir="1" aria-label="后一天">›</button>'
+      + '</div>'
+      + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-go-records" data-value="' + esc(statsDayDate) + '">查看明细 →</button>'
+      + '</div>'
       + '</article>';
   })() : '';
 
@@ -3437,7 +3783,7 @@ function progress() {
         const hh = Math.floor(parseTimeToMins(r.time) / 60);
         return hh >= h0 && hh < h1;
       });
-      const mins = Math.round(list.reduce((s, r) => s + (r.km !== undefined ? Number(r.minutes || 30) : studyMinutesOf(r)), 0));
+      const mins = Math.round(list.filter(r => r.km !== undefined).reduce((s, r) => s + Number(r.minutes || 0), 0) + totalStudySeconds(list.filter(r => r.km === undefined)) / 60);
       const slotLbl = pad(h0) + ':00-' + pad(h1) + ':00';
       return { key: 'h' + pad(h0), label: pad(h0) + 'h', fullLabel: slotLbl, val: mins, valDisplay: mins + ' 分钟', extra: list.length + ' 次打卡', tip: slotLbl + ' · ' + list.length + ' 次 · ' + formatDurHm(mins) };
     });
@@ -3488,20 +3834,20 @@ function progress() {
     if (statsVisibleCards.habits) {
       const daysInMo = new Date(yr, mo, 0, 12).getDate();
       const hbList = activeHabits();
-      const toggleDk = statsDayDate <= bjToday ? statsDayDate : bjToday;
+      const toggleDk = statsDayDate || bjToday;
       const doneOnToggle = state.habitLogs[toggleDk] || [];
       const hbRows = hbList.map((h, i) => {
         let cnt = 0;
         for (let d = 1; d <= daysInMo; d++) {
           const dk = ymStr + '-' + pad(d);
-          if ((state.habitLogs[dk] || []).includes(h.id)) cnt++;
+          if (dk <= bjToday && (state.habitLogs[dk] || []).includes(h.id)) cnt++;
         }
         const pct = Math.round((cnt / Math.max(1, daysInMo)) * 100);
-        const isChecked = doneOnToggle.includes(h.id);
+        const isChecked = toggleDk <= bjToday && doneOnToggle.includes(h.id);
         return '<div class="rd-hbar-row rd-habit-edit-row">'
           + '<div class="rd-hbar-top">'
           + '<span class="rd-hbar-name rd-habit-name-wrap">'
-          + '<button type="button" class="rd-habit-check-btn' + (isChecked ? ' is-done' : '') + '" data-action="toggle-habit-date" data-value="' + esc(toggleDk + ':' + h.id) + '" aria-pressed="' + isChecked + '" aria-label="切换 ' + esc(toggleDk) + ' 的' + esc(h.title) + '完成状态">' + (isChecked ? '✓' : '') + '</button>'
+          + '<button type="button" class="rd-habit-check-btn' + (isChecked ? ' is-done' : '') + '" data-action="toggle-habit-date" data-value="' + esc(toggleDk + ':' + h.id) + '" aria-pressed="' + isChecked + '" aria-label="切换 ' + esc(toggleDk) + ' 的' + esc(h.title) + '完成状态"' + (toggleDk > bjToday ? ' disabled' : '') + '>' + (isChecked ? '✓' : '') + '</button>'
           + '<span class="rd-habit-title-txt">' + esc(h.title) + '</span>'
           + '<em class="rd-habit-tag-pill">' + esc(h.tag || '作息') + '</em>'
           + '</span>'
@@ -3511,8 +3857,9 @@ function progress() {
           + '<div class="rd-hbar-track" style="min-height:14px"><div class="rd-hbar-fill" style="height:10px;width:' + Math.max(cnt ? 6 : 2, pct) + '%;background:' + MEMBER_PALETTE[i % MEMBER_PALETTE.length] + '"></div></div>'
           + '</div>';
       }).join('');
+const toggleDkLabel = toggleDk === bjTomorrow ? '明天 ' + toggleDk : toggleDk === bjToday ? '今天 ' + toggleDk : toggleDk === bjYesterday ? '昨天 ' + toggleDk : toggleDk;
       out += '<article class="rd-card rd-stat-card" id="stats-habits-card">'
-        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>作息与自律达成分布</h3><small>' + yr + '年' + mo + '月 · 勾选 ' + esc(toggleDk) + ' 即时重算</small></div>'
+        + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>作息与自律达成分布</h3><small>' + yr + '年' + mo + '月 · ' + (toggleDk > bjToday ? '未来只管理习惯模板，完成后再勾选' : ('勾选归日 ' + esc(toggleDkLabel))) + '</small></div>'
         + '<div class="rd-plan-head-acts">'
         + '<button type="button" class="rd-pill-btn is-ghost" data-action="add-habit">＋ 新增</button>'
         + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-edit-habits-modal">✎ 编辑作息</button>'
@@ -3553,7 +3900,14 @@ function progress() {
     return '<article class="rd-card rd-stat-card is-wide">'
       + '<div class="rd-stat-card-head"><div class="rd-stat-card-title"><h3>年度丝滑趋势曲线</h3><small>' + yr + ' 年 1–12 月</small></div></div>'
       + renderSmoothSplineCardSvg(pts, '#0ea5a4', 'rd-yr-grad', v => statsTab === 'sport' ? (v.toFixed(0) + 'k') : statsTab === 'study' ? (v.toFixed(0) + 'h') : String(Math.round(v)))
-      + '<div class="rd-spline-readout" role="status" aria-live="polite"><span>' + esc(activePt ? activePt.tip : '点击月份节点查看汇总') + '</span><button type="button" class="rd-pill-btn is-ghost" data-action="go-view" data-value="records">查看 ' + yr + ' 年全部记录 →</button></div>'
+      + '<div class="rd-spline-readout" role="status" aria-live="polite">'
+      + '<div class="rd-chart-step-nav" role="group" aria-label="切换年度月份节点">'
+      + '<button type="button" class="rd-chart-step-btn" data-action="stats-step-spline" data-curve-type="year" data-dir="-1" aria-label="前一月">‹</button>'
+      + '<span class="rd-spline-readout-txt">' + esc(activePt ? activePt.tip : '点击月份节点查看汇总') + '</span>'
+      + '<button type="button" class="rd-chart-step-btn" data-action="stats-step-spline" data-curve-type="year" data-dir="1" aria-label="后一月">›</button>'
+      + '</div>'
+      + '<button type="button" class="rd-pill-btn is-ghost" data-action="stats-go-records" data-value="' + esc(yr) + '">查看 ' + yr + ' 年全部记录 →</button>'
+      + '</div>'
       + '</article>';
   })() : '';
 
@@ -3572,6 +3926,7 @@ function progress() {
     + '</div>'
     + '<div class="rd-stats-footer">'
     + '<button type="button" class="rd-pill-btn" data-action="go-view" data-value="records">查看打卡记录</button>'
+    + '<button type="button" class="rd-pill-btn" data-action="go-ranking">🏆 查看竞技排名</button>'
     + '<button type="button" class="rd-pill-btn" data-action="stats-open-settings">⚙ 统计图表设置</button>'
     + '</div>'
     + '</div>';
@@ -3971,6 +4326,28 @@ function achievements() {
     + '<div><small>累计跑步</small><strong>' + totalKm.toFixed(1) + '<em>KM</em></strong></div>'
     + '<div><small>累计学习</small><strong>' + totalHrs.toFixed(1) + '<em>H</em></strong></div>'
     + '</div></section>'
+    + (() => {
+      const lockedSorted = all.filter(m => m[5] < m[6]).sort((a, b) => (b[5] / Math.max(0.01, b[6])) - (a[5] / Math.max(0.01, a[6])));
+      const nextM = lockedSorted[0];
+      const unlockedList = all.filter(m => m[5] >= m[6]);
+      if (!nextM) {
+        return '<section class="rd-card rd-ach-spotlight"><div><span class="rd-day-badge is-actual">已全部解锁</span><h3>🎉 全部 ' + all.length + ' 枚成就勋章已获得</h3><p>运动、学习与自律全里程碑已达成，继续保持双轨连胜。</p></div><button type="button" class="rd-pill-btn is-primary" data-action="go-view" data-value="progress">查看统计总览 →</button></section>';
+      }
+      const nPct = Math.min(99, Math.round((nextM[5] / Math.max(0.01, nextM[6])) * 100));
+      const nCur = nextM[5].toFixed(nextM[6] % 1 ? 1 : 0);
+      const nRem = Math.max(0, nextM[6] - nextM[5]).toFixed(nextM[6] % 1 ? 1 : 0);
+      const ctaAttr = nextM[1] === '学习' ? 'data-action="go-focus"' : nextM[1] === '自律' ? 'data-action="stats-edit-habits-modal"' : 'data-action="checkin" data-mode="sport"';
+      const ctaText = nextM[1] === '学习' ? '去专注学习 →' : nextM[1] === '自律' ? '去勾今日自律 →' : '去运动打卡 →';
+      return '<section class="rd-card rd-ach-spotlight" aria-label="下一项冲刺勋章">'
+        + '<div class="rd-ach-spot-main">'
+        + '<div class="rd-ach-spot-badges"><span class="rd-day-badge is-plan">下一项冲刺 · ' + esc(nextM[1]) + '</span><span class="rd-day-badge is-actual">已获得 ' + unlockedList.length + ' 枚</span></div>'
+        + '<h3>' + esc(nextM[2]) + ' <em>(' + nPct + '%)</em></h3>'
+        + '<p class="rd-ach-spot-cond">解锁条件：' + esc(nextM[4]) + ' · 当前 ' + nCur + '/' + nextM[6] + nextM[7] + '（还差 ' + nRem + nextM[7] + '）</p>'
+        + PixelProgressBar.renderHtml({ progress: nPct, height: 12, width: '100%', bare: true, variant: nextM[1] === '学习' ? 'blue' : nextM[1] === '自律' ? 'gold' : 'orange', className: 'rd-ach-ppb', ariaLabel: nextM[2] + ' 冲刺进度' })
+        + '</div>'
+        + '<div class="rd-ach-spot-acts"><button type="button" class="rd-pill-btn is-primary" ' + ctaAttr + '>' + ctaText + '</button></div>'
+        + '</section>';
+    })()
     + subtabs(['全部', '运动', '学习', '自律', '已解锁', '冲刺中'], achFilter, 'ach-filter', 'equal', { '全部': 'medal', '运动': 'shoe', '学习': 'book', '自律': 'bolt', '已解锁': 'check', '冲刺中': 'target' })
     + '<div class="medal-grid">' + (list.length ? list.map((m, idx) => {
       const unlocked = m[5] >= m[6];
@@ -3978,13 +4355,13 @@ function achievements() {
       const pct = Math.min(100, Math.round(m[5] / m[6] * 100));
       const catCls = m[1] === '学习' ? 'cat-study' : m[1] === '自律' ? 'cat-habit' : 'cat-sport';
       const isComboMilestone = /连续|双轨|长期主义/.test(m[2]);
-      return '<button class="medal-card ' + (unlocked && isComboMilestone ? 'is-combo-milestone' : '') + '" data-action="flip" aria-label="' + m[2] + '，点击翻面" aria-pressed="false"><span class="medal-inner">'
+      return '<button class="medal-card ' + (unlocked && isComboMilestone ? 'is-combo-milestone' : '') + '" data-action="flip" aria-label="' + m[2] + '，解锁条件：' + m[4] + '，点击翻面" aria-pressed="false"><span class="medal-inner">'
         + '<span class="medal-front ' + (unlocked ? 'unlocked ' : '') + catCls + '">'
         + '<span class="medal-code">#' + pad(idx + 1) + ' · ' + m[1] + '</span>'
         + '<span class="medal-flip-hint">↻</span>'
         + '<span class="medal-symbol">' + icon(m[0]) + '</span>'
         + '<p>' + m[2] + '</p>'
-        + (unlocked ? '<small class="medal-title-tag">✓ ' + m[3] + '</small>' : '<span class="medal-ratio">' + curVal + '/' + m[6] + m[7] + ' · ' + pct + '%</span><span class="medal-progress"><i style="width:' + pct + '%"></i></span>')
+        + (unlocked ? '<small class="medal-title-tag">✓ 已获得 · ' + m[3] + '</small>' : '<span class="medal-ratio">' + curVal + '/' + m[6] + m[7] + ' · ' + pct + '%</span><span class="medal-progress"><i style="width:' + pct + '%"></i></span><small class="medal-cond-hint">' + esc(m[4]) + '</small>')
         + '</span>'
         + '<span class="medal-back">' + icon(m[0], 'medal-back-ico') + '<strong>' + m[3] + '</strong><p>' + m[4] + '</p><small>' + curVal + ' / ' + m[6] + ' ' + m[7] + '</small></span>'
         + '</span></button>';
@@ -4469,7 +4846,8 @@ function ensureReceiptDialog() {
   });
   $('#receipt-dialog-close', dlg).addEventListener('click', () => closeReceiptDialog());
   dlg.addEventListener('close', () => {
-    restoreFocusBySelector(lastReceiptFocusSelector, '.wall-card.is-selected, .records-filter-panel button');
+    const fallback = lastReceiptFallbackSelector || '.wall-card.is-selected, .records-filter-panel button, .rd-day-actual-row, .rd-day-actual-empty button, .rd-day-card, #page';
+    restoreFocusBySelector(lastReceiptFocusSelector, fallback);
   });
   return dlg;
 }
@@ -4512,9 +4890,10 @@ function refreshReceiptDialog() {
   $('#receipt-dialog-body', dlg).innerHTML = buildReceiptCardMarkup(target, effectiveIdx, effectiveList.length);
 }
 
-function openReceiptDialog(key, focusSelector = '') {
+function openReceiptDialog(key, focusSelector = '', fallbackSelector = '') {
   if (key) recordSelectKey = key;
   if (focusSelector) lastReceiptFocusSelector = focusSelector;
+  if (fallbackSelector) lastReceiptFallbackSelector = fallbackSelector;
   const dlg = ensureReceiptDialog();
   if (!dlg.open) dlg.showModal();
   refreshReceiptDialog();
@@ -4528,6 +4907,28 @@ function closeReceiptDialog() {
 }
 
 function recordsPage() {
+  const statsBackHtml = statsRecordsReturn ? '<button type="button" class="rd-pill-btn" data-action="stats-return-day">← 返回 ' + esc(statsRecordsReturn.date) + ' 统计</button>' : '';
+  const sharedHeadHtml = '<header class="rd-card rd-records-shell-head">'
+    + '<div class="rd-records-shell-title">'
+    + '<h2>' + (recordsMainTab === 'ranking' ? '记录与排名 · 竞技榜单' : '记录与排名 · 打卡流水') + '</h2>'
+    + '<small>' + (recordsMainTab === 'ranking' ? '与记录页统一视觉与间距，筛选条件彼此独立' : '按北京时间归档 · 支持多维度筛选、小票详情与补录') + '</small>'
+    + '</div>'
+    + '<div class="rd-records-shell-controls">'
+    + statsBackHtml
+    + '<div class="rd-seg" role="tablist" aria-label="记录与排名切换">'
+    + '<button type="button" role="tab" aria-selected="' + (recordsMainTab === 'records') + '" class="' + (recordsMainTab === 'records' ? 'active' : '') + '" data-action="records-main-tab" data-value="records">记录</button>'
+    + '<button type="button" role="tab" aria-selected="' + (recordsMainTab === 'ranking') + '" class="' + (recordsMainTab === 'ranking' ? 'active' : '') + '" data-action="records-main-tab" data-value="ranking">排名</button>'
+    + '</div>'
+    + '<button type="button" class="rd-pill-btn is-primary" data-action="checkin" data-mode="sport">＋ 记一笔</button>'
+    + '</div></header>';
+
+  if (recordsMainTab === 'ranking') {
+    return '<div class="rd-records-page is-ranking-tab">'
+      + sharedHeadHtml
+      + '<div class="rd-records-ranking-wrap">' + ranking() + '</div>'
+      + '</div>';
+  }
+
   const dataset = getRecordsPageDataset();
   const inRangeList = dataset.inRangeList;
   const displayList = dataset.displayList;
@@ -4669,14 +5070,18 @@ function recordsPage() {
   const anyTodayRecForPerson = allUnifiedRecords('all', recordPersonFilter === 'mine').some(x => beijingDateOf(x) === todayDk);
   const isTodayEmpty = recordSelectedDate === todayDk && !anyTodayRecForPerson;
   const emptyWallHtml = isTodayEmpty
-    ? '<div class="empty records-empty" role="status"><p><strong>今天还没有记录</strong></p><div class="records-empty-actions"><button type="button" class="today-act-btn is-sport" data-action="checkin" data-mode="sport">记运动</button><button type="button" class="today-act-btn is-study" data-action="checkin" data-mode="study">记学习</button><button type="button" class="btn-back-range" data-action="clear-date-filter">查看' + rangeText + '记录</button></div></div>'
-    : '<div class="empty records-empty ck-empty-state" role="status"><p><strong>没有符合筛选条件的记录</strong><span>可以立即记一次，或重置筛选查看默认区间。</span></p><div class="records-empty-actions ck-empty-actions">'
-      + '<button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记一次</button>'
-      + (recordSelectedDate ? '<button type="button" class="btn-back-range ck-empty-cta is-subtle" data-action="clear-date-filter">清除日期</button>' : '')
-      + '<button type="button" class="btn-back-range ck-empty-cta is-subtle" data-action="reset-filter-default">恢复默认筛选</button>'
+    ? '<div class="empty records-empty ck-empty-state" role="status"><p><strong>今天还没有记录</strong><span>可以立即记运动或开始学习专注，也可以清除筛选查看历史记录。</span></p><div class="records-empty-actions ck-empty-actions">'
+      + '<button type="button" class="ck-empty-cta is-sport" data-action="checkin" data-mode="sport">记运动</button>'
+      + '<button type="button" class="ck-empty-cta is-study" data-action="go-focus">学习专注</button>'
+      + '<button type="button" class="btn-back-range ck-empty-cta is-subtle" data-action="reset-filter-default">清除筛选</button>'
+      + '</div></div>'
+    : '<div class="empty records-empty ck-empty-state" role="status"><p><strong>没有符合筛选条件的记录</strong><span>可以清除筛选查看全部记录，或直接跳到今日查看当天状态。</span></p><div class="records-empty-actions ck-empty-actions">'
+      + '<button type="button" class="btn-back-range ck-empty-cta is-sport" data-action="reset-filter-default">清除筛选</button>'
+      + '<button type="button" class="btn-back-range ck-empty-cta is-subtle" data-action="go-today-records">跳到今日</button>'
+      + '<button type="button" class="ck-empty-cta is-subtle" data-action="checkin" data-mode="sport">记一笔</button>'
       + '</div></div>';
 
-  return filterPanelHtml + '<div class="records-layout"><div class="records-left">'
+  return '<div class="rd-records-page is-records-tab">' + sharedHeadHtml + filterPanelHtml + '<div class="records-layout"><div class="records-left">'
     + '<section class="poster-hero poster-frost poster-compact" data-wm="LOG">'
     + '<div class="poster-meta" id="records-poster-meta"><span>' + personText + ' · ' + kindText + ' · ' + rangeText + '</span><span>活跃 ' + activeDays + ' 天 · 共 ' + inRangeList.length + ' 条</span></div>'
     + '<div class="poster-kpis poster-kpis-4" id="records-poster-kpis">'
@@ -4694,10 +5099,14 @@ function recordsPage() {
     + heading('记录', '<span class="pager"><button type="button" data-action="record-prev" aria-label="上一条记录" ' + (curIdx <= 0 ? 'disabled' : '') + '>‹</button><span>' + (r ? curIdx + 1 : 0) + ' / ' + displayList.length + '</span><button type="button" data-action="record-next" aria-label="下一条记录" ' + (curIdx >= displayList.length - 1 || !displayList.length ? 'disabled' : '') + '>›</button></span>', 'spark')
     + wallScopeBarHtml
     + (displayList.length ? '<div class="record-wall-grid records-wall-scoped" aria-label="按日期分组的记录">' + wallCards + '</div>' : emptyWallHtml)
-    + '</div></div>';
+    + '</div></div></div>';
 }
 
 function updateRecordsPageInPlace() {
+  if (recordsMainTab !== 'records') {
+    render(true);
+    return;
+  }
   const filters = $('#records-shared-filters');
   const leftDyn = $('#records-left-dynamic');
   const rightDyn = $('#records-right-dynamic');
@@ -4851,7 +5260,7 @@ function render(preserveScroll = false) {
   }).join('');
   // Floating + FAB (TickTick style) on core daily views
   let fab = $('#rd-quick-fab');
-  const showFab = !embedded && ['home', 'calendar', 'records', 'progress'].includes(view);
+  const showFab = !embedded && ['home', 'calendar', 'records'].includes(view);
   if (showFab) {
     if (!fab) {
       fab = document.createElement('button');
@@ -4874,6 +5283,7 @@ function render(preserveScroll = false) {
 }
 function nextQuote() { quoteIndex = (quoteIndex + 1) % quotes.length; const el = $('#quote'); if (el) el.outerHTML = quoteMarkup(); initPixelMatrices(); }
 function buildRecordsHash() {
+  if (recordsMainTab === 'ranking') return '#ranking';
   const q = new URLSearchParams();
   if (recordKindFilter !== 'all') q.set('kind', recordKindFilter);
   if (recordPersonFilter !== 'mine') q.set('person', recordPersonFilter);
@@ -4912,8 +5322,19 @@ function applyRecordsHashQuery(hashStr) {
 applyRecordsHashQuery(typeof location !== 'undefined' ? location.hash : '');
 
 function navigate(v, fromPop = false) {
-  if (v === 'people') v = 'progress';
+  let targetStatsTab = null;
+  let targetRecordsTab = null;
+  if (v === 'plan') { targetStatsTab = 'sport'; v = 'progress'; }
+  else if (v === 'study') { targetStatsTab = 'study'; v = 'progress'; }
+  else if (v === 'ranking') { targetRecordsTab = 'ranking'; v = 'records'; }
+  else if (v === 'people') { v = 'progress'; }
   if (!VALID_VIEWS.includes(v)) v = 'home';
+
+  const leavingStudyTimer = (view === 'progress' && statsTab === 'study') && !(v === 'progress' && (targetStatsTab === 'study' || (targetStatsTab === null && statsTab === 'study')));
+  if (leavingStudyTimer) notifyStudyTimerContextLeave('切换到其他页面');
+
+  if (targetStatsTab) statsTab = targetStatsTab;
+  if (targetRecordsTab) recordsMainTab = targetRecordsTab;
   activeFilterSheet = '';
   if (v !== 'records') closeReceiptDialog();
   const prevView = view;
@@ -4928,14 +5349,33 @@ function navigate(v, fromPop = false) {
   render(false);
   $('#page').scrollTop = 0;
   $('#page').focus({ preventScroll: true });
+  if (targetStatsTab) {
+    requestAnimationFrame(() => {
+      const hub = $('#stats-plan-hub');
+      if (hub) hub.scrollIntoView({ behavior: 'auto', block: 'start' });
+    });
+  }
 }
 window.addEventListener('hashchange', () => {
   const rawHash = location.hash.replace(/^#/, '');
   const hv = rawHash.split('?')[0];
-  if (hv === 'records') applyRecordsHashQuery(location.hash);
+  if (hv === 'records') {
+    applyRecordsHashQuery(location.hash);
+    if (view !== 'records') navigate('records', true);
+    else { recordsMainTab = 'records'; updateRecordsPageInPlace(); }
+    return;
+  }
+  if (hv === 'ranking') {
+    recordsMainTab = 'ranking';
+    navigate('ranking', true);
+    return;
+  }
+  if (hv === 'plan' || hv === 'study') {
+    navigate(hv, true);
+    return;
+  }
   if (VALID_VIEWS.includes(hv)) {
     if (hv !== view) navigate(hv, true);
-    else if (hv === 'records') updateRecordsPageInPlace();
   }
 });
 
@@ -5056,24 +5496,90 @@ function openPixelProgressDemoModal() {
   });
 }
 
-$('#open-settings').onclick = () => {
+function renderImportStatusBoxMarkup() {
+  if (!lastImportStatus && !pendingCloudImportBackup) return '';
+  const st = lastImportStatus || { localOk: true, cloudState: 'failed', cloudError: '上次云端同步未确认' };
+  const cloudText = st.cloudState === 'syncing'
+    ? '云端同步中，请等待服务器确认…'
+    : st.cloudState === 'synced'
+      ? '云端已确认同步 ✓'
+      : st.cloudState === 'offline'
+        ? '离线模式：仅已存本机，联网后可重试同步至云端'
+        : ('云端同步失败：' + esc(st.cloudError || '服务器未响应'));
+  const cls = st.cloudState === 'failed' ? 'is-failed' : (st.cloudState === 'synced' ? 'is-synced' : 'is-pending');
+  const snap = loadPreRestoreSnapshot();
+  return '<div id="import-status-box" class="import-status-box ' + cls + '" role="' + (st.cloudState === 'failed' ? 'alert' : 'status') + '">'
+    + '<div class="isb-row"><span>本地恢复：</span><strong>' + (st.localOk ? '已存本机 ✓' : '本机写入失败') + '</strong></div>'
+    + '<div class="isb-row"><span>云端结果：</span><strong>' + cloudText + '</strong></div>'
+    + '<div class="ip-actions">'
+    + ((st.cloudState === 'failed' || st.cloudState === 'offline') && pendingCloudImportBackup
+      ? '<button type="button" class="ip-confirm" id="retry-cloud-import-btn">重试云端同步 ↻</button>' : '')
+    + (snap ? '<button type="button" id="rollback-import-btn">撤销恢复（回到导入前快照）</button>' : '')
+    + '</div></div>';
+}
+
+function openSettingsDialog() {
   const stopped = motionPaused || reducedMotion.matches || document.hidden;
   const motionLabel = reducedMotion.matches ? '跟随系统：减少动效' : motionPaused ? '开启动效 ▶' : '暂停动效 Ⅱ';
   const motionStatusText = reducedMotion.matches ? '已跟随系统减少动态效果' : (motionPaused ? '已暂停动效' : '动效运行中');
+  const ops = roomPendingOps();
+  const failedOps = ops.filter(x => x.status === 'failed');
+  const queueStateKey = failedOps.length ? 'failed' : (ops.length ? (isServerOnline ? 'pending' : 'local') : (isServerOnline ? 'synced' : 'local'));
+  const queueMeta = syncStatusMeta(queueStateKey);
+  const preSnap = loadPreRestoreSnapshot();
+
+  const strictRow = '<div class="ck-settings-row ck-settings-strict-row">'
+    + '<div class="ck-settings-row-info"><strong>严厉打卡（学习计时）</strong><small id="ck-settings-strict-state">'
+    + (strictStudyMode ? '已开启：切页、切后台/隐藏标签页、刷新或关闭将作废本次未保存计时' : '已关闭（默认）：离开计时页自动暂停，返回可续计')
+    + '</small></div>'
+    + '<button type="button" class="ck-toggle-pill ' + (strictStudyMode ? 'is-on' : '') + '" id="strict-study-toggle" role="switch" aria-checked="' + String(strictStudyMode) + '">' + (strictStudyMode ? '已开启' : '已关闭') + '</button>'
+    + '</div>';
+
   const motionRow = '<div class="ck-settings-row ck-settings-motion-row">'
     + '<div class="ck-settings-row-info"><strong>动效控制</strong><small id="ck-settings-motion-state">' + motionStatusText + '</small></div>'
     + '<button type="button" class="motion-toggle ck-settings-motion-btn" id="motion-toggle" data-action="toggle-motion" aria-pressed="' + String(stopped) + '"' + (reducedMotion.matches ? ' disabled' : '') + '>' + motionLabel + '</button>'
     + '</div>';
-  const renameRow = '<button type="button" class="settings-link ck-settings-rename-btn" id="settings-rename" aria-label="改名字，当前昵称 ' + esc(state.name) + '"><span>✎ 改名字</span><span class="ck-settings-meta">当前：' + esc(state.name) + '</span></button>';
-  const modeBadge = isServerOnline
-    ? '<div style="margin-bottom:12px;padding:8px 12px;background:#eef7ed;border:1px solid #7bc676;color:#1e4620;font-size:12px;display:flex;align-items:center;justify-content:space-between"><span><strong>● 在线后端已连接</strong> (房间: ' + esc(currentRoomCode) + ')</span><button type="button" id="btn-sync-to-cloud" style="border:1px solid #7bc676;background:#fff;padding:2px 8px;font-size:11px;cursor:pointer">将本地缓存推送到云端 ↑</button></div>'
-    : '<div style="margin-bottom:12px;padding:8px 12px;background:#fff8ee;border:1px solid #e4a334;color:#7a4b04;font-size:12px"><strong>○ 离线模式 (localStorage)</strong><br><small>双击打开网页.cmd 或纯本地使用；启动后端后刷新即享 SQLite 真持久化与云端多人同步。</small></div>';
 
-  openEditor('设置与备份', motionRow + renameRow + modeBadge + '<button type="button" class="settings-link" id="export-data">↗ 导出完整数据备份 .json</button><label for="import-data">从备份恢复（将替换当前数据）</label><input id="import-data" type="file" accept=".json,application/json"><button type="button" class="settings-link" id="open-ppb-demo">🧩 像素进度条组件演示 (0%–100% / 不确定状态)</button><a class="settings-link" href="pixel-progress-demo.html" target="_blank">↗ 在独立窗口打开完整组件演示页</a><a class="settings-link" href="film.html">品牌短片</a><button type="button" class="settings-link" id="download-poster">↓ 保存今日双轨打卡海报 .png</button><button type="button" class="settings-link danger" id="clear-records">清空当前运动与学习记录</button>', null);
+  const renameRow = '<button type="button" class="settings-link ck-settings-rename-btn" id="settings-rename" aria-label="改名字，当前昵称 ' + esc(state.name) + '"><span>✎ 改名字</span><span class="ck-settings-meta">当前：' + esc(state.name) + '</span></button>';
+
+  const syncSummaryBar = '<div class="ck-settings-sync-box is-' + queueMeta.key + '" role="status">'
+    + '<div class="ck-settings-sync-top"><span><strong>' + (isServerOnline ? '● 在线后端已连接' : '○ 离线模式（仅本机）') + '</strong> · <span class="ck-sync-pill is-' + queueMeta.key + '">' + queueMeta.label + '</span></span>'
+    + (ops.length ? '<button type="button" class="ck-btn ck-btn-retry" data-action="retry-sync">重试同步 (' + ops.length + ')</button>' : (isServerOnline ? '<button type="button" id="btn-sync-to-cloud" class="ck-btn ck-btn-ghost">推送本机到云端 ↑</button>' : ''))
+    + '</div>'
+    + '<small>' + (ops.length
+      ? (failedOps.length ? ('有 ' + failedOps.length + ' 条同步失败（已存本机），可随时重试：' + esc(failedOps[0].lastError || '网络错误')) : ('共 ' + ops.length + ' 条记录' + (isServerOnline ? '待同步到云端' : '已存本机，联网后可同步')))
+      : (isServerOnline ? ('房间：' + esc(currentRoomCode) + ' · 本地与云端状态一致') : '数据已存本机浏览器；启动或恢复后端连接后可同步至 SQLite'))
+    + '</small></div>';
+
+  const preSnapBar = preSnap && !lastImportStatus && !pendingCloudImportBackup
+    ? '<div class="ck-settings-snap-bar"><span>已保留上次恢复前快照（' + esc(preSnap.backup.name) + ' · 运动 ' + preSnap.backup.records.length + ' 条 / 学习 ' + (preSnap.backup.studyRecords || []).length + ' 条）</span><button type="button" id="rollback-import-btn">恢复到导入前</button></div>'
+    : '';
+
+  const html = ''
+    + '<section class="ck-settings-group" aria-labelledby="sg-focus"><h4 id="sg-focus" class="ck-settings-group-title">专注与动效</h4>' + strictRow + motionRow + '</section>'
+    + '<section class="ck-settings-group" aria-labelledby="sg-profile"><h4 id="sg-profile" class="ck-settings-group-title">个人显示</h4>' + renameRow + '</section>'
+    + '<section class="ck-settings-group" aria-labelledby="sg-data"><h4 id="sg-data" class="ck-settings-group-title">数据备份</h4>'
+    + syncSummaryBar
+    + '<button type="button" class="settings-link" id="export-data">↗ 导出完整数据备份 .json</button>'
+    + '<div class="ck-settings-import-wrap"><label for="import-data">从备份恢复（导入前展示数量核对并保留恢复前快照）</label><input id="import-data" type="file" accept=".json,application/json"></div>'
+    + '<div id="import-preview-slot">' + renderImportStatusBoxMarkup() + preSnapBar + '</div>'
+    + '<div class="ck-settings-danger-box">'
+    + '<button type="button" class="settings-link danger" id="clear-records">清空当前运动与学习记录</button>'
+    + '<small class="ck-danger-note">影响范围：清空全部运动与学习打卡记录并归零目标完成小时；个人目标配置、自律清单与昵称会保留，建议先导出备份。</small>'
+    + '</div></section>'
+    + '<section class="ck-settings-group" aria-labelledby="sg-about"><h4 id="sg-about" class="ck-settings-group-title">关于</h4>'
+    + '<button type="button" class="settings-link" id="download-poster">↓ 保存今日双轨打卡海报 .png</button>'
+    + '<button type="button" class="settings-link" id="open-ppb-demo">🧩 像素进度条组件演示 (0%–100% / 不确定状态)</button>'
+    + '<a class="settings-link" href="pixel-progress-demo.html" target="_blank">↗ 在独立窗口打开完整组件演示页</a>'
+    + '<a class="settings-link" href="film.html">▶ 品牌短片</a>'
+    + '</section>';
+
+  openEditor('设置与备份', html, null);
   syncMotion();
-  const firstSettingCtrl = $('#motion-toggle:not(:disabled)') || $('#settings-rename');
+  const firstSettingCtrl = $('#strict-study-toggle') || $('#motion-toggle:not(:disabled)') || $('#settings-rename');
   if (firstSettingCtrl) firstSettingCtrl.focus({ preventScroll: true });
-};
+}
+$('#open-settings').onclick = () => openSettingsDialog();
 
 function downloadBlob(blob, name) {
   const a = document.createElement('a'), url = URL.createObjectURL(blob);
@@ -5091,20 +5597,86 @@ function exportData() {
   toast('完整备份已导出 (schemaVersion: 2)。');
 }
 function validateBackup(s) {
-  return s && (s.version === 1 || s.schemaVersion === 2) && typeof s.name === 'string' && s.name.length > 0 && s.name.length <= 12
-    && Number.isFinite(s.goal) && s.goal >= 5 && s.goal <= 10000
+  return Boolean(
+    s && typeof s === 'object'
+    && (s.version === 1 || s.schemaVersion === 2)
+    && typeof s.name === 'string' && s.name.trim().length > 0 && s.name.length <= 12
+    && Number.isFinite(Number(s.goal)) && Number(s.goal) >= 5 && Number(s.goal) <= 10000
     && Array.isArray(s.days) && s.days.every(d => Number.isInteger(d) && d >= 0 && d <= 6)
     && Array.isArray(s.members) && s.members.every(n => typeof n === 'string' && n.length <= 12)
-    && Array.isArray(s.records);
+    && Array.isArray(s.records)
+    && (s.studyRecords === undefined || Array.isArray(s.studyRecords))
+    && (s.habits === undefined || Array.isArray(s.habits))
+    && (s.studyTargets === undefined || Array.isArray(s.studyTargets))
+  );
 }
-function applyConfirmedBackupImport(backup) {
+function updateImportStatusSlot() {
+  const slot = $('#import-preview-slot');
+  if (slot) slot.innerHTML = renderImportStatusBoxMarkup();
+}
+async function pushBackupToCloudImport(backup) {
+  if (!isServerOnline) {
+    pendingCloudImportBackup = backup;
+    lastImportStatus = { localOk: true, cloudState: 'offline', cloudError: '' };
+    updateImportStatusSlot();
+    toast('本地已恢复（已存本机）；当前离线，未同步到云端。');
+    return false;
+  }
+  pendingCloudImportBackup = backup;
+  lastImportStatus = { localOk: true, cloudState: 'syncing', cloudError: '' };
+  updateImportStatusSlot();
+  const res = await serverFetch('/import', 'POST', backup);
+  if (res && res.ok) {
+    pendingCloudImportBackup = null;
+    lastImportStatus = { localOk: true, cloudState: 'synced', cloudError: '' };
+    updateImportStatusSlot();
+    toast('本地已恢复，云端已确认同步 ✓');
+    return true;
+  }
+  const errMsg = (res && res.error) ? res.error : '云端接口返回失败或网络中断';
+  lastImportStatus = { localOk: true, cloudState: 'failed', cloudError: errMsg };
+  updateImportStatusSlot();
+  toast('本地已恢复，但云端同步失败，可点击「重试云端同步」或撤销恢复。');
+  return false;
+}
+async function applyConfirmedBackupImport(backup) {
+  if (!validateBackup(backup)) {
+    toast('备份结构校验未通过，未执行恢复。');
+    return false;
+  }
+  savePreRestoreSnapshot(state);
   state = hydrateState(backup);
-  persistLocalOnly();
-  if (isServerOnline) serverFetch('/import', 'POST', backup);
+  const localOk = persistLocalOnly();
   pendingImportBackup = null;
-  $('#editor').close();
   render();
-  toast('数据已恢复。');
+  const prevCard = $('#editor-body .import-preview-card');
+  if (prevCard) prevCard.remove();
+  if (!localOk) {
+    lastImportStatus = { localOk: false, cloudState: isServerOnline ? 'syncing' : 'offline', cloudError: '' };
+  }
+  const synced = await pushBackupToCloudImport(backup);
+  if (synced) {
+    const dlg = $('#editor');
+    if (dlg && dlg.open) {
+      updateImportStatusSlot();
+    }
+  }
+  return synced;
+}
+async function rollbackPreRestoreSnapshot() {
+  const snap = loadPreRestoreSnapshot();
+  if (!snap || !snap.backup) { toast('未找到恢复前快照。'); return; }
+  state = hydrateState(snap.backup);
+  persistLocalOnly();
+  pendingCloudImportBackup = null;
+  lastImportStatus = null;
+  clearPreRestoreSnapshot();
+  if (isServerOnline) {
+    await serverFetch('/import', 'POST', snap.backup);
+  }
+  render();
+  updateImportStatusSlot();
+  toast('已回滚至导入前快照。');
 }
 document.addEventListener('change', async e => {
   if (e.target.id === 'records-date-jump') {
@@ -5129,27 +5701,51 @@ document.addEventListener('change', async e => {
     restoreFocusBySelector('#records-date-jump');
     return;
   }
-  if (e.target.id === 'pomo-target-sel') {
+  if (e.target.id === 'pomo-target-sel' || e.target.id === 'modal-pomo-target-sel') {
     pomodoroTargetId = e.target.value;
     pomoSession.targetId = pomodoroTargetId;
     savePomoSession();
     return;
   }
   if (e.target.id !== 'import-data') return;
+  const slot = $('#import-preview-slot') || $('#editor-body');
   try {
-    const file = e.target.files[0]; if (!file || file.size > 8e6) throw Error();
-    const backup = JSON.parse(await file.text()); if (!validateBackup(backup)) throw Error();
-    pendingImportBackup = backup;
-    const host = $('#editor-body');
-    const oldPrev = host.querySelector('.import-preview-card');
+    const file = e.target.files[0];
+    if (!file || file.size > 8e6) throw new Error('文件为空或超过 8MB 限制');
+    const parsed = JSON.parse(await file.text());
+    if (!validateBackup(parsed)) throw new Error('备份缺少必要字段（name/goal/days/members/records）或版本不受支持');
+    pendingImportBackup = parsed;
+    const oldPrev = $('#editor-body')?.querySelector('.import-preview-card');
     if (oldPrev) oldPrev.remove();
+    const hydratedPreview = hydrateState(parsed);
+    const habitDaysCount = Object.keys(hydratedPreview.habitLogs || {}).length;
+    const planDatesCount = Object.keys(hydratedPreview.sportDatePlan || {}).length + Object.keys(hydratedPreview.studyDatePlan || {}).length;
+    const schemaTag = parsed.schemaVersion === 2 ? 'v2 完整备份' : 'v1 旧版备份（自动兼容补齐）';
     const prev = document.createElement('div');
     prev.className = 'import-preview-card';
-    prev.innerHTML = '<strong>导入前校验预览</strong>'
-      + '<div>将替换恢复：用户「' + esc(backup.name) + '」 · 运动 ' + backup.records.length + ' 条 · 学习 ' + (backup.studyRecords || []).length + ' 条 · 伙伴 ' + backup.members.length + ' 位</div>'
+    prev.innerHTML = '<strong>导入前校验预览 · ' + schemaTag + '</strong>'
+      + '<div class="import-preview-grid">'
+      + '<span>用户：<b>' + esc(hydratedPreview.name) + '</b></span>'
+      + '<span>运动记录：<b>' + hydratedPreview.records.length + ' 条</b></span>'
+      + '<span>学习记录：<b>' + hydratedPreview.studyRecords.length + ' 条</b></span>'
+      + '<span>自律项 / 打卡日：<b>' + hydratedPreview.habits.length + ' 项 / ' + habitDaysCount + ' 天</b></span>'
+      + '<span>计划配置：<b>跑 ' + hydratedPreview.goal + 'km · 学 ' + hydratedPreview.studyGoal + 'h · ' + hydratedPreview.studyTargets.length + ' 个目标 · ' + planDatesCount + ' 条排程</b></span>'
+      + '<span>竞技伙伴：<b>' + hydratedPreview.members.length + ' 位</b></span>'
+      + '</div>'
+      + '<small class="ip-snap-note">确认恢复前将自动保存一份本机「恢复前快照」，云端结果将等待服务器确认后分别回显。</small>'
       + '<div class="ip-actions"><button type="button" id="export-before-import">先导出当前备份</button><button type="button" class="ip-confirm" id="confirm-import-btn">确认替换恢复 →</button><button type="button" id="cancel-import-btn">取消</button></div>';
-    host.appendChild(prev);
-  } catch { pendingImportBackup = null; toast('无法读取备份，请选择有效的 JSON 数据文件。'); }
+    slot.prepend(prev);
+  } catch (err) {
+    pendingImportBackup = null;
+    const oldPrev = $('#editor-body')?.querySelector('.import-preview-card');
+    if (oldPrev) oldPrev.remove();
+    const errCard = document.createElement('div');
+    errCard.className = 'import-preview-card is-error';
+    errCard.setAttribute('role', 'alert');
+    errCard.innerHTML = '<strong>备份校验失败</strong><div>' + esc(err?.message || '无法读取备份，请选择有效的 JSON 数据文件。') + '</div>';
+    slot.prepend(errCard);
+    toast('无法读取备份，请选择有效的 JSON 数据文件。');
+  }
 });
 
 function poster() {
@@ -5175,17 +5771,26 @@ function poster() {
   c.toBlob(b => { if (b) downloadBlob(b, 'run-study-poster-' + today() + '.png'); }, 'image/png');
 }
 
-/* ---------- Pomodoro Engine (Wall-Clock Persistent) & Record Edit Modal ---------- */
+/* ---------- Pomodoro Engine (Wall-Clock Persistent + Normal/Strict Lifecycle) & Record Edit Modal ---------- */
+function refreshStudyTimerModalIfOpen() {
+  if (draft && draft.mode === 'study' && draft.studySubTab !== 'backfill') drawModal();
+}
 function syncPomoClock() {
   const elapsed = getPomoElapsedSec();
   const left = getPomoLeftSec();
   pomodoroLeft = left;
-  const el = $('#pomo-clock');
-  if (el) el.textContent = formatTimer(left);
-  const hint = $('#pomo-elapsed-hint');
-  if (hint) hint.textContent = '已专注 ' + Math.floor(elapsed / 60) + ' 分 ' + (elapsed % 60) + ' 秒 · 满 60 秒可记入';
-  const finBtn = $('[data-action="pomo-finish"]');
-  if (finBtn) finBtn.disabled = elapsed < 60 || pomoSession.state === 'saving';
+  ['#pomo-clock', '#modal-pomo-clock'].forEach(sel => {
+    const el = $(sel);
+    if (el) el.textContent = formatTimer(left);
+  });
+  const liveStr = '已专注 ' + Math.floor(elapsed / 60) + ' 分 ' + (elapsed % 60) + ' 秒';
+  $$('.pomo-elapsed-live').forEach(el => { el.textContent = liveStr; });
+  ['#pomo-elapsed-hint', '#modal-pomo-elapsed-hint'].forEach(sel => {
+    const hint = $(sel);
+    if (hint) hint.textContent = liveStr + ' · 满 60 秒可结束并保存真实时长';
+  });
+  const canSave = pomoSession.state !== 'voided' && elapsed >= 60 && pomoSession.state !== 'saving';
+  $$('[data-action="pomo-finish"]').forEach(btn => { btn.disabled = !canSave; });
   const homeNote = $('#home-focus-note');
   if (homeNote) {
     const fm = getStudyFocusEntryMeta();
@@ -5207,6 +5812,67 @@ function stopPomodoro(newState = 'paused') {
   }
   savePomoSession();
 }
+function voidStrictPomoSession(reason = '离开了专注计时页面，本次未保存时长已作废。') {
+  if (pomoSession.state !== 'running' && !(isStrictStudyMode() && pomoSession.state === 'paused')) return false;
+  clearInterval(pomodoroTick);
+  pomodoroTick = null;
+  pomodoroRunning = false;
+  pomoSession = {
+    ...createIdlePomoSession(pomoSession.totalSec, pomodoroTargetId),
+    state: 'voided',
+    voidReason: reason
+  };
+  pomodoroLeft = pomoSession.totalSec;
+  savePomoSession();
+  toast('⚠ 严厉打卡：' + reason);
+  render(true);
+  refreshStudyTimerModalIfOpen();
+  return true;
+}
+function pauseNormalPomoSession(reason = '已自动暂停专注计时') {
+  if (pomoSession.state !== 'running') return false;
+  stopPomodoro('paused');
+  render(true);
+  refreshStudyTimerModalIfOpen();
+  return true;
+}
+studyTimerLeaveHandler = reason => {
+  if (pomoSession.state !== 'running') return;
+  if (isStrictStudyMode()) {
+    voidStrictPomoSession('严厉打卡模式下' + reason + '，未保存计时已清零作废，不可提交。');
+  } else {
+    pauseNormalPomoSession(reason);
+  }
+};
+if (typeof document !== 'undefined') {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden || pomoSession.state !== 'running') return;
+    if (isStrictStudyMode()) {
+      voidStrictPomoSession('切换标签页或切回桌面，严厉打卡模式下本次未保存计时已作废。');
+    } else {
+      pauseNormalPomoSession('切到后台自动暂停');
+    }
+  });
+}
+if (typeof window !== 'undefined') {
+  const onUnloadOrHide = () => {
+    if (pomoSession.state !== 'running') return;
+    if (isStrictStudyMode()) {
+      pomoSession = {
+        ...createIdlePomoSession(pomoSession.totalSec, pomodoroTargetId),
+        state: 'voided',
+        voidReason: '刷新、关闭或切出应用，严厉打卡模式下本次未保存计时已作废。'
+      };
+      savePomoSession();
+    } else {
+      pomoSession.state = 'paused';
+      pomoSession.pauseStartedAt = Date.now();
+      savePomoSession();
+    }
+  };
+  window.addEventListener('pagehide', onUnloadOrHide);
+  window.addEventListener('beforeunload', onUnloadOrHide);
+}
 function startPomodoroLoop() {
   clearInterval(pomodoroTick);
   pomodoroTick = setInterval(() => {
@@ -5218,8 +5884,9 @@ function startPomodoroLoop() {
       savePomoSession();
       triggerElectricSweep(2400);
       triggerLightningSurge(1800);
-      toast('专注计时蓄能满格！电流已扫过边框，请点击「记入学习 ✓」落库。');
+      toast('专注计时蓄能满格！请点击「结束并保存」落库。');
       render(true);
+      refreshStudyTimerModalIfOpen();
     }
   }, 500);
 }
@@ -5241,7 +5908,12 @@ function openRecordEditModal(key) {
   const isStudy = kind === 'study';
   const tagsPool = isStudy ? studyTags : tags;
   const feelsPool = isStudy ? studyFocusLevels : feelings;
-  const body = '<div class="record-edit-form">'
+  const pendingOp = pendingOps.find(op => (op.recordId === id) || (rec.operationId && op.operationId === rec.operationId));
+  const isConflict = Boolean(pendingOp?.conflict || (rec.syncError && rec.syncError.includes('其他设备')));
+  const conflictBanner = isConflict
+    ? '<div id="er-conflict-alert" style="margin-bottom:12px;padding:8px 12px;border:1px solid #e5492b;border-radius:6px;background:rgba(229,73,43,0.1);color:#e5492b;font-size:13px;">⚠️ 冲突提示：该记录已在其他设备更新。已保留你的最新修改输入，可核对后重新提交保存。</div>'
+    : (rec.syncError ? '<div id="er-conflict-alert" style="margin-bottom:12px;padding:8px 12px;border:1px solid #e5492b;border-radius:6px;background:rgba(229,73,43,0.1);color:#e5492b;font-size:13px;">⚠️ 同步提示：' + esc(rec.syncError) + '（已保留修改，可在此重新保存同步）</div>' : '');
+  const body = '<div class="record-edit-form">' + conflictBanner
     + '<div class="form-grid-2">'
     + '<div class="field-group"><label for="er-date">日期</label><input id="er-date" type="date" value="' + esc(rec.date) + '"></div>'
     + '<div class="field-group"><label for="er-time">时间</label><input id="er-time" type="time" value="' + esc(rec.time || '06:10') + '"></div>'
@@ -5289,6 +5961,29 @@ function openRecordEditModal(key) {
       markSelfOpId(editOpId);
       const res = await serverFetch('/records/' + kind + '/' + id, 'PATCH', fullPatch);
       if (!res.ok) {
+        if (res.status === 409) {
+          const conflictMsg = res.error || '该记录已在其他设备更新，请确认冲突';
+          let alertEl = $('#er-conflict-alert');
+          if (alertEl) {
+            alertEl.hidden = false;
+            alertEl.textContent = '⚠️ 冲突提示：' + conflictMsg + '（你的输入已保留，可修改后重新保存）';
+          } else {
+            const box = document.createElement('div');
+            box.id = 'er-conflict-alert';
+            box.style.cssText = 'margin-bottom:12px;padding:8px 12px;border:1px solid #e5492b;border-radius:6px;background:rgba(229,73,43,0.1);color:#e5492b;font-size:13px;';
+            box.textContent = '⚠️ 冲突提示：' + conflictMsg + '（你的输入已保留，可修改后重新保存）';
+            $('#editor-body')?.prepend(box);
+          }
+          if (res.currentRecord && res.currentRecord.version) {
+            rec.version = res.currentRecord.version;
+          }
+          rec.syncStatus = 'failed';
+          rec.syncError = conflictMsg;
+          enqueuePendingOp({ operationId: editOpId, coalesceKey: 'edit:' + kind + ':' + id, kind, recordId: rec.id, endpoint: '/records/' + kind + '/' + id, method: 'PATCH', payload: fullPatch, status: 'failed', lastError: conflictMsg, conflict: true, currentRecord: res.currentRecord || null });
+          savePendingOps();
+          toast('版本冲突：' + conflictMsg + '（输入已保留）');
+          return false;
+        }
         if (res.status === 0 || res.offline) {
           Object.assign(rec, isStudy ? normalizeStudyRecord(patchPayload) : patchPayload, { operationId: editOpId, syncStatus: 'failed', syncError: res.error || '无法连接到服务器' });
           enqueuePendingOp({ operationId: editOpId, coalesceKey: 'edit:' + kind + ':' + id, kind, recordId: rec.id, endpoint: '/records/' + kind + '/' + id, method: 'PATCH', payload: fullPatch, status: 'failed', lastError: rec.syncError });
@@ -5335,9 +6030,25 @@ document.addEventListener('click', async e => {
     navigate(navButton.dataset.view);
     return;
   }
+  if (e.target.closest('#strict-study-toggle')) {
+    saveStrictStudyMode(!strictStudyMode);
+    const btn = $('#strict-study-toggle');
+    if (btn) {
+      btn.classList.toggle('is-on', strictStudyMode);
+      btn.setAttribute('aria-checked', String(strictStudyMode));
+      btn.textContent = strictStudyMode ? '已开启' : '已关闭';
+    }
+    const stText = $('#ck-settings-strict-state');
+    if (stText) stText.textContent = strictStudyMode ? '已开启：切页、切后台/隐藏标签页、刷新或关闭将作废本次未保存计时' : '已关闭（默认）：离开计时页自动暂停，返回可续计';
+    render(true);
+    toast(strictStudyMode ? '已开启严厉打卡：计时期间离页/切后台/刷新将作废本次未保存计时' : '已关闭严厉打卡：离开计时页将自动暂停');
+    return;
+  }
   if (e.target.closest('#motion-toggle, [data-action="toggle-motion"]')) { if (!reducedMotion.matches) { motionPaused = !motionPaused; syncMotion(); } return; }
   if (e.target.closest('#settings-rename')) { openRenameEditor(); return; }
   if (e.target.closest('#btn-sync-to-cloud')) { syncLocalToCloud(); return; }
+  if (e.target.closest('#retry-cloud-import-btn')) { if (pendingCloudImportBackup) pushBackupToCloudImport(pendingCloudImportBackup); return; }
+  if (e.target.closest('#rollback-import-btn')) { rollbackPreRestoreSnapshot(); return; }
   if (e.target.closest('#open-ppb-demo')) { $('#editor').close(); openPixelProgressDemoModal(); return; }
   if (e.target.closest('#export-data') || e.target.closest('#export-before-import')) { exportData(); return; }
   if (e.target.closest('#confirm-import-btn')) { if (pendingImportBackup) applyConfirmedBackupImport(pendingImportBackup); return; }
@@ -5451,7 +6162,14 @@ document.addEventListener('click', async e => {
   const b = e.target.closest('[data-action]'); if (!b) return;
   const a = b.dataset.action, v = b.dataset.value;
 
-  if (a === 'checkin') { openCheckin(b.dataset.mode || 'sport', b.dataset.target || null, b.dataset.person || state.name); return; }
+  if (a === 'checkin') { openCheckin(b.dataset.mode || 'sport', b.dataset.target || null, b.dataset.person || state.name, { subtab: b.dataset.subtab || '' }); return; }
+  if (a === 'settings') { openSettingsDialog(); return; }
+  if (a === 'records-main-tab') {
+    recordsMainTab = v === 'ranking' ? 'ranking' : 'records';
+    syncRecordsHashUrl(true);
+    render(true);
+    return;
+  }
   if (a === 'resume-draft') { openCheckin(b.dataset.mode || 'sport'); return; }
   if (a === 'discard-draft') { clearSavedDraft(b.dataset.mode || 'sport'); render(true); toast('已丢弃未完成草稿'); return; }
   if (a === 'retry-sync') { await retryPendingOps(v || null); return; }
@@ -5492,29 +6210,71 @@ document.addEventListener('click', async e => {
     const dt = b.dataset.date || calAnchorDate;
     const tm = b.dataset.time || '08:00';
     const md = b.dataset.mode || (calKindFilter === 'study' ? 'study' : 'sport');
-    openCheckin(md, null, calPersonFilter !== 'all' ? calPersonFilter : state.name, { fresh: true, date: dt, time: tm });
+    openCheckin(md, null, calPersonFilter !== 'all' ? calPersonFilter : state.name, { fresh: true, date: dt, time: tm, subtab: (md === 'study' && dt < today()) ? 'backfill' : 'timer' });
     return;
   }
   // Statistics actions
-  if (a === 'stats-tab') { statsTab = v; clearStatsSelections(); render(true); return; }
-  if (a === 'stats-period') { statsPeriod = v; clearStatsSelections(); render(true); return; }
-  if (a === 'stats-day-preset') { statsDayDate = dateShift(Number(v) || 0); render(true); return; }
+  if (a === 'stats-tab') {
+    if (statsTab === 'study' && v !== 'study') notifyStudyTimerContextLeave('切换统计切页');
+    statsTab = ['all', 'sport', 'study'].includes(v) ? v : 'all';
+    clearStatsSelections();
+    render(true);
+    restoreFocusBySelector('[data-action="stats-tab"][data-value="' + v + '"]');
+    return;
+  }
+  if (a === 'stats-period') { statsPeriod = v; clearStatsSelections(); render(true); restoreFocusBySelector('[data-action="stats-period"][data-value="' + v + '"]'); return; }
+  if (a === 'stats-day-preset') {
+    statsDayDate = dateShift(Number(v) || 0);
+    if (statsSelectedNode && statsSelectedNode.startsWith('mo:')) statsSelectedNode = 'mo:' + statsDayDate;
+    render(true);
+    restoreFocusBySelector('[data-action="stats-day-preset"][data-value="' + v + '"]');
+    return;
+  }
+  if (a === 'go-ranking') {
+    recordsMainTab = 'ranking';
+    navigate('records');
+    return;
+  }
   if (a === 'go-stats-plan') {
     statsVisibleCards.plans = true;
     saveStatsVisibleCards();
-    if (v === 'sport' && statsTab === 'study') statsTab = 'all';
-    if (v === 'study' && statsTab === 'sport') statsTab = 'all';
-    if (statsTab === 'rank') statsTab = 'all';
+    const wantTab = v === 'study' ? 'study' : 'sport';
+    if (view === 'progress' && statsTab === 'study' && wantTab !== 'study') notifyStudyTimerContextLeave('切换到运动计划');
+    statsTab = wantTab;
     navigate('progress');
     requestAnimationFrame(() => {
-      const targetEl = $(v === 'study' ? '#stats-study-plan' : '#stats-sport-plan');
-      if (targetEl) targetEl.scrollIntoView({ behavior: 'auto', block: 'center' });
+      const targetEl = $('#stats-plan-hub');
+      if (targetEl) targetEl.scrollIntoView({ behavior: 'auto', block: 'start' });
+    });
+    return;
+  }
+  if (a === 'study-focus-target') {
+    if (v) {
+      pomodoroTargetId = v;
+      pomoSession.targetId = v;
+      savePomoSession();
+    }
+    statsVisibleCards.plans = true;
+    saveStatsVisibleCards();
+    statsTab = 'study';
+    if (view !== 'progress') navigate('progress');
+    else render(true);
+    requestAnimationFrame(() => {
+      const panel = $('#pomodoro-panel');
+      if (panel) {
+        panel.scrollIntoView({ behavior: 'auto', block: 'center' });
+        panel.focus({ preventScroll: true });
+      }
+      if (['idle', 'saved', 'voided'].includes(pomoSession.state) && !pomoSession.errorMsg) {
+        $('#pomodoro-panel [data-action="pomo-toggle"]')?.click();
+      }
     });
     return;
   }
   if (a === 'stats-pick-node') {
     const keepFocus = document.activeElement && document.activeElement.closest('.rd-spline-node');
     statsSelectedNode = v;
+    selectStatsDate(v);
     render(true);
     if (keepFocus) restoreFocusBySelector('[data-focus-key="spline:' + v.replace(/"/g, '\"') + '"]');
     return;
@@ -5525,9 +6285,98 @@ document.addEventListener('click', async e => {
     if (sep > 0) {
       const cid = v.slice(0, sep), bkey = v.slice(sep + 1);
       statsSelectedBars[cid] = bkey;
+      selectStatsDate(bkey);
       render(true);
       if (keepFocus) restoreFocusBySelector('[data-focus-key="bar:' + v.replace(/"/g, '\"') + '"]');
     }
+    return;
+  }
+  if (a === 'stats-step-bar') {
+    const cid = b.dataset.chartId;
+    const dir = Number(b.dataset.dir) || 0;
+    const barEls = Array.from(document.querySelectorAll('.rd-bar-col[data-chart-id="' + cid + '"]'));
+    if (barEls.length) {
+      let curIdx = barEls.findIndex(el => el.classList.contains('is-selected'));
+      let targetIdx;
+      if (curIdx < 0) {
+        targetIdx = dir > 0 ? 0 : barEls.length - 1;
+      } else {
+        targetIdx = Math.max(0, Math.min(barEls.length - 1, curIdx + dir));
+      }
+      const targetEl = barEls[targetIdx];
+      if (targetEl) {
+        const val = targetEl.dataset.value;
+        const sep = String(val || '').indexOf(':');
+        if (sep > 0) {
+          const bkey = val.slice(sep + 1);
+          statsSelectedBars[cid] = bkey;
+          selectStatsDate(bkey);
+        }
+        render(true);
+        restoreFocusBySelector('[data-action="stats-step-bar"][data-chart-id="' + cid + '"][data-dir="' + dir + '"]', '.rd-bar-col[data-chart-id="' + cid + '"]');
+      }
+    }
+    return;
+  }
+  if (a === 'stats-step-spline') {
+    const dir = Number(b.dataset.dir) || 0;
+    const nodeEls = Array.from(b.closest('article').querySelectorAll('.rd-spline-node'));
+    if (nodeEls.length) {
+      let curIdx = nodeEls.findIndex(el => el.classList.contains('is-selected'));
+      if (curIdx < 0) curIdx = nodeEls.findIndex(el => el.dataset.value === (b.dataset.curveType === 'year' ? 'yr:' + statsDayDate.slice(0, 7) : 'mo:' + statsDayDate));
+      let targetIdx;
+      if (curIdx < 0) {
+        targetIdx = dir > 0 ? 0 : nodeEls.length - 1;
+      } else {
+        targetIdx = Math.max(0, Math.min(nodeEls.length - 1, curIdx + dir));
+      }
+      const targetEl = nodeEls[targetIdx];
+      if (targetEl) {
+        const val = targetEl.dataset.value;
+        statsSelectedNode = val;
+        selectStatsDate(val);
+        render(true);
+        restoreFocusBySelector('[data-action="stats-step-spline"][data-curve-type="' + b.dataset.curveType + '"][data-dir="' + dir + '"]', '.rd-spline-node');
+      }
+    }
+    return;
+  }
+  if (a === 'stats-backfill') {
+    if (statsDayDate > today()) return;
+    const mode = b.dataset.mode || 'sport';
+    openCheckin(mode, null, state.name, { fresh: true, date: statsDayDate, subtab: mode === 'study' ? 'backfill' : '' });
+    return;
+  }
+  if (a === 'stats-scroll-day') {
+    statsVisibleCards.summary = true;
+    render(true);
+    restoreFocusBySelector('#stats-day-title');
+    return;
+  }
+  if (a === 'stats-go-records') {
+    statsRecordsReturn = { date: statsDayDate, tab: statsTab, anchor: statsAnchorDate, period: statsPeriod,
+      scroll: $('#page').scrollTop, focus: buildStableFocusSelector(b) };
+    recordSelectedDate = /^\d{4}-\d{2}-\d{2}$/.test(v || '') ? v : '';
+    selectedBarDate = recordSelectedDate;
+    recordKindFilter = ['all', 'sport', 'study'].includes(b.dataset.kind) ? b.dataset.kind : statsTab;
+    recordPersonFilter = 'mine';
+    recordRangeFilter = 'all';
+    recordTrendMode = 'daily';
+    recordSelectKey = '';
+    externalFilterNotice = '';
+    recordsMainTab = 'records';
+    navigate('records');
+    return;
+  }
+  if (a === 'stats-return-day' && statsRecordsReturn) {
+    const back = statsRecordsReturn;
+    statsDayDate = back.date; statsTab = back.tab; statsAnchorDate = back.anchor; statsPeriod = back.period;
+    statsRecordsReturn = null;
+    navigate('progress');
+    requestAnimationFrame(() => {
+      $('#page').scrollTop = back.scroll;
+      restoreFocusBySelector(back.focus, '#stats-day-title');
+    });
     return;
   }
   if (a === 'stats-edit-goal') {
@@ -5547,18 +6396,21 @@ document.addEventListener('click', async e => {
     return;
   }
   if (a === 'stats-edit-habits-modal') {
-    const toggleDk = statsDayDate <= today() ? statsDayDate : today();
-    const doneIds = state.habitLogs[toggleDk] || [];
+    const toggleDk = statsDayDate || today();
+    const editDate = b.dataset.date || (view === 'progress' ? toggleDk : today());
+    const canComplete = editDate <= today();
+    const doneIds = state.habitLogs[editDate] || [];
     const listHtml = state.habits.map((h, idx) => {
       const on = doneIds.includes(h.id);
       return '<div class="rd-habit-modal-item' + (h.archived ? ' is-archived' : '') + '">'
-        + '<label class="rd-habit-modal-check"><input type="checkbox" data-hb-check="' + esc(h.id) + '"' + (on ? ' checked' : '') + (h.archived ? ' disabled' : '') + '></label>'
+        + '<label class="rd-habit-modal-check"><input type="checkbox" data-hb-check="' + esc(h.id) + '" aria-label="' + esc(h.title + ' · ' + editDate + ' 完成状态') + '"' + (on ? ' checked' : '') + (h.archived || !canComplete ? ' disabled' : '') + '></label>'
         + '<input class="rd-habit-modal-title" type="text" maxlength="24" data-hb-title="' + esc(h.id) + '" value="' + esc(h.title) + '" aria-label="习惯名称">'
         + '<input class="rd-habit-modal-tag" type="text" maxlength="6" data-hb-tag="' + esc(h.id) + '" value="' + esc(h.tag || '作息') + '" aria-label="习惯标签">'
         + '<label class="rd-habit-modal-arch" title="停用后保留历史记录"><input type="checkbox" data-hb-arch="' + esc(h.id) + '"' + (h.archived ? ' checked' : '') + '><span>停用</span></label>'
         + '</div>';
     }).join('');
-    const body = '<p class="hint" style="margin-top:0">正在编辑个人作息与自律项（勾选框对应 <strong>' + esc(toggleDk) + '</strong> 完成状态），保存后立即重算统计分布：</p>'
+    const dateLabel = editDate === dateShift(1) ? '明天 ' + editDate : editDate === today() ? '今天 ' + editDate : editDate === dateShift(-1) ? '昨天 ' + editDate : editDate;
+    const body = (canComplete ? '' : '<p class="hint rd-future-habit-note">未来日期只管理习惯模板，不记录完成状态。已有历史勾选保持不变。</p>') + '<p class="hint" style="margin-top:0">正在编辑个人作息与自律项（<strong>' + esc(dateLabel) + '</strong> · ' + (canComplete ? '完成勾选与模板编辑' : '仅编辑模板') + '），保存后立即重算统计分布：</p>'
       + '<div class="rd-habit-modal-list">' + listHtml + '</div>'
       + '<div class="rd-habit-modal-add">'
       + '<input id="new-hb-inline-title" type="text" maxlength="24" placeholder="新增一条习惯（可选，例如：23:00 放下手机）">'
@@ -5566,34 +6418,89 @@ document.addEventListener('click', async e => {
       + '</div>';
     openEditor('编辑作息与自律习惯', body, () => {
       const nextDone = [];
+      // 1. Habit definitions updates (queueOrSendWriteOp for consistency & retry)
       state.habits.forEach(h => {
         const tInp = $('#editor-body [data-hb-title="' + h.id + '"]');
         const tagInp = $('#editor-body [data-hb-tag="' + h.id + '"]');
         const archInp = $('#editor-body [data-hb-arch="' + h.id + '"]');
         const chkInp = $('#editor-body [data-hb-check="' + h.id + '"]');
         const newTitle = tInp ? tInp.value.trim() : h.title;
-        if (newTitle) h.title = newTitle;
-        if (tagInp) h.tag = tagInp.value.trim() || '作息';
-        if (archInp) h.archived = archInp.checked;
-        if (chkInp && chkInp.checked && !h.archived) nextDone.push(h.id);
-        if (isServerOnline) serverFetch('/habits/' + h.id, 'PATCH', { title: h.title, tag: h.tag, archived: h.archived });
+        let modified = false;
+        if (newTitle && newTitle !== h.title) { h.title = newTitle; modified = true; }
+        const newTag = tagInp ? (tagInp.value.trim() || '作息') : h.tag;
+        if (newTag !== h.tag) { h.tag = newTag; modified = true; }
+        const newArch = archInp ? archInp.checked : h.archived;
+        if (newArch !== h.archived) { h.archived = newArch; modified = true; }
+        if (chkInp && chkInp.checked) nextDone.push(h.id);
+        if (modified) {
+          queueOrSendWriteOp({
+            operationId: nextOpId('hbedit'),
+            coalesceKey: 'habit:edit:' + h.id,
+            kind: 'habit',
+            endpoint: '/habits/' + h.id,
+            method: 'PATCH',
+            payload: { title: h.title, tag: h.tag, archived: h.archived }
+          });
+        }
       });
+      // 2. New habit addition (enqueued BEFORE habit-logs so dependency order is preserved!)
       const addTitle = ($('#new-hb-inline-title')?.value || '').trim();
       const addTag = ($('#new-hb-inline-tag')?.value || '').trim() || '作息';
       if (addTitle) {
         const newH = { id: 'hb-' + Date.now(), title: addTitle, tag: addTag, icon: 'bolt', archived: false };
         state.habits.push(newH);
-        if (isServerOnline) serverFetch('/habits', 'POST', newH);
+        queueOrSendWriteOp({
+          operationId: nextOpId('hbadd'),
+          coalesceKey: 'habit:add:' + newH.id,
+          kind: 'habit',
+          endpoint: '/habits',
+          method: 'POST',
+          payload: newH
+        });
       }
-      state.habitLogs[toggleDk] = nextDone;
+      // A template edit for a future date must never rewrite completion logs.
+      if (canComplete) {
+        state.habitLogs[editDate] = nextDone;
+        queueOrSendWriteOp({
+          operationId: nextOpId('hblog'),
+          coalesceKey: 'hblog:' + state.name + ':' + editDate,
+          kind: 'habit-log', endpoint: '/habit-logs', method: 'PUT',
+          payload: { person: state.name, date: editDate, habitIds: nextDone }
+        });
+      }
       persistLocalOnly();
-      queueOrSendWriteOp({ operationId: nextOpId('hblog'), coalesceKey: 'hblog:' + state.name + ':' + toggleDk, kind: 'habit-log', endpoint: '/habit-logs', method: 'PUT', payload: { person: state.name, date: toggleDk, habitIds: nextDone } });
       render(true);
-      toast('作息与自律习惯已保存，分布已重算');
+      toast(canComplete ? ('作息已保存，完成状态归日 ' + dateLabel) : '习惯模板已保存，历史完成状态保持不变');
     }, '保存并重算 →');
     return;
   }
-  if (a === 'stats-shift-day') { statsDayDate = addDaysStr(statsDayDate, Number(v)); render(true); return; }
+  if (a === 'stats-shift-day') {
+    statsDayDate = addDaysStr(statsDayDate, Number(v));
+    if (statsSelectedNode && statsSelectedNode.startsWith('mo:')) statsSelectedNode = 'mo:' + statsDayDate;
+    render(true);
+    restoreFocusBySelector('[data-action="stats-shift-day"][data-value="' + v + '"]');
+    return;
+  }
+  if (a === 'stats-shift-year' || (a === 'stats-shift-period' && b.dataset.unit === 'year')) {
+    const delta = Number(v) || 0;
+    const dt = new Date(statsAnchorDate + 'T12:00:00');
+    const targetYear = dt.getFullYear() + delta;
+    const curMonth = dt.getMonth();
+    const curDay = dt.getDate();
+    const maxDay = new Date(targetYear, curMonth + 1, 0, 12).getDate();
+    dt.setFullYear(targetYear, curMonth, Math.min(curDay, maxDay));
+    statsAnchorDate = dateKey(dt);
+    const dayDt = new Date(statsDayDate + 'T12:00:00');
+    const dayTargetYear = dayDt.getFullYear() + delta;
+    const dayMonth = dayDt.getMonth();
+    const dayLast = new Date(dayTargetYear, dayMonth + 1, 0, 12).getDate();
+    dayDt.setFullYear(dayTargetYear, dayMonth, Math.min(dayDt.getDate(), dayLast));
+    statsDayDate = dateKey(dayDt);
+    clearStatsSelections();
+    render(true);
+    restoreFocusBySelector('[data-action="stats-shift-year"][data-value="' + delta + '"]');
+    return;
+  }
   if (a === 'stats-shift-period') {
     const delta = Number(v);
     const dt = new Date(statsAnchorDate + 'T12:00:00');
@@ -5606,6 +6513,7 @@ document.addEventListener('click', async e => {
     statsAnchorDate = dateKey(dt);
     clearStatsSelections();
     render(true);
+    restoreFocusBySelector('[data-action="stats-shift-period"][data-value="' + v + '"]');
     return;
   }
   if (a === 'stats-open-settings') {
@@ -5636,6 +6544,7 @@ document.addEventListener('click', async e => {
   }
   if (a === 'go-today-records') {
     const t = today();
+    recordsMainTab = 'records';
     recordKindFilter = 'all';
     recordPersonFilter = 'mine';
     recordSelectedDate = t;
@@ -5644,20 +6553,18 @@ document.addEventListener('click', async e => {
     navigate('records');
     return;
   }
-  if (a === 'go-focus') {
-    navigate('study');
-    $('[data-action="study-focus-entry"]')?.click();
-    return;
-  }
-  if (a === 'study-focus-entry') {
-    if (['idle', 'saved', 'paused'].includes(pomoSession.state) && !pomoSession.errorMsg) {
-      $('[data-action="pomo-toggle"]')?.click();
-    }
+  if (a === 'go-focus' || a === 'study-focus-entry') {
+    statsVisibleCards.plans = true;
+    saveStatsVisibleCards();
+    statsTab = 'study';
+    if (view !== 'progress') navigate('progress');
+    else render(true);
     requestAnimationFrame(() => {
       const panel = $('#pomodoro-panel');
-      if (panel) panel.scrollIntoView({ behavior: 'auto', block: 'nearest' });
-      const btn = $((pomoSession.state === 'completed' || pomoSession.errorMsg) ? '[data-action="pomo-finish"]' : '[data-action="pomo-toggle"]');
-      if (btn) btn.focus({ preventScroll: true });
+      if (panel) {
+        panel.scrollIntoView({ behavior: 'auto', block: 'center' });
+        panel.focus({ preventScroll: true });
+      }
     });
     return;
   }
@@ -5769,10 +6676,13 @@ document.addEventListener('click', async e => {
   }
   if (a === 'open-receipt-modal') {
     const fKey = b.dataset.focusKey;
-    const focusSel = fKey ? ('[data-focus-key="' + fKey + '"]') : ('.wall-card[data-value="' + v + '"]');
+    const focusSel = fKey ? ('[data-focus-key="' + fKey + '"]') : (buildStableFocusSelector(b) || ('.wall-card[data-value="' + v + '"]'));
+    const fallbackSel = view === 'progress'
+      ? '#stats-day-title'
+      : '.wall-card.is-selected, .records-filter-panel button, #page';
     recordSelectKey = v;
     render(true);
-    openReceiptDialog(v, focusSel);
+    openReceiptDialog(v, focusSel, fallbackSel);
     return;
   }
   if (a === 'ach-filter') { achFilter = v; render(true); return; }
@@ -5880,7 +6790,14 @@ document.addEventListener('click', async e => {
       const title = $('#st-title').value.trim(); if (!title) return false;
       t.title = title; t.category = $('#st-cat').value.trim() || '深度学习'; t.targetHours = Math.max(1, Number($('#st-hrs').value) || t.targetHours); t.deadline = $('#st-dead').value.trim() || '本月';
       persistLocalOnly(); render(true); toast('学习目标已更新');
-      if (isServerOnline) serverFetch('/study-targets/' + t.id, 'PATCH', { title: t.title, category: t.category, targetHours: t.targetHours, deadline: t.deadline });
+      queueOrSendWriteOp({
+        operationId: nextOpId('stedit'),
+        coalesceKey: 'target:edit:' + t.id,
+        kind: 'target',
+        endpoint: '/study-targets/' + t.id,
+        method: 'PATCH',
+        payload: { title: t.title, category: t.category, targetHours: t.targetHours, deadline: t.deadline }
+      });
     });
     return;
   }
@@ -5889,7 +6806,14 @@ document.addEventListener('click', async e => {
     t.archived = !t.archived;
     persistLocalOnly(); render(true);
     toast(t.archived ? '目标已归档（关联历史记录保留）' : '目标已恢复在研');
-    if (isServerOnline) serverFetch('/study-targets/' + t.id, 'PATCH', { archived: t.archived });
+    queueOrSendWriteOp({
+      operationId: nextOpId('starch'),
+      coalesceKey: 'target:edit:' + t.id,
+      kind: 'target',
+      endpoint: '/study-targets/' + t.id,
+      method: 'PATCH',
+      payload: { archived: t.archived }
+    });
     return;
   }
   if (a === 'del-study-target') {
@@ -5901,22 +6825,26 @@ document.addEventListener('click', async e => {
   }
 
   if (a === 'pomo-set') {
-    if (pomoSession.state === 'running') { toast('请先暂停当前专注再切换时长'); return; }
+    if (pomoSession.state === 'running') { toast('计时进行中不可切换预设，请先结束或重置'); return; }
     const sec = Number(v) * 60;
     pomodoroTotal = sec; pomodoroLeft = sec;
-    pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: sec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
-    savePomoSession(); render(true); return;
+    pomoSession = createIdlePomoSession(sec, pomodoroTargetId);
+    savePomoSession(); render(true); refreshStudyTimerModalIfOpen(); return;
   }
   if (a === 'pomo-toggle') {
     if (pomoSession.state === 'running') {
-      stopPomodoro('paused'); render(true);
+      if (isStrictStudyMode()) {
+        toast('严厉打卡模式下不可暂停；如需结束请点击「结束并保存」或「重置」。');
+        return;
+      }
+      stopPomodoro('paused');
+      render(true);
+      refreshStudyTimerModalIfOpen();
     } else {
-      if (pomoSession.state === 'idle' || pomoSession.state === 'saved' || pomoSession.state === 'completed') {
+      if (['idle', 'saved', 'completed', 'voided'].includes(pomoSession.state)) {
+        pomoSession = createIdlePomoSession(pomoSession.totalSec, pomodoroTargetId);
         pomoSession.sessionId = nextOpId('pomo');
         pomoSession.startedAt = Date.now();
-        pomoSession.pausedAccumMs = 0;
-        pomoSession.pauseStartedAt = 0;
-        pomoSession.completedAt = 0;
       } else if (pomoSession.state === 'paused' && pomoSession.pauseStartedAt) {
         pomoSession.pausedAccumMs += Math.max(0, Date.now() - pomoSession.pauseStartedAt);
         pomoSession.pauseStartedAt = 0;
@@ -5924,32 +6852,36 @@ document.addEventListener('click', async e => {
       pomoSession.targetId = pomodoroTargetId;
       pomoSession.state = 'running';
       pomoSession.errorMsg = '';
+      pomoSession.voidReason = '';
       pomodoroRunning = true;
       savePomoSession();
       startPomodoroLoop();
+      if (isStrictStudyMode()) toast('严厉打卡已开始：切页、切标签或刷新将直接作废本轮');
       render(true);
+      refreshStudyTimerModalIfOpen();
     }
     return;
   }
   if (a === 'pomo-reset') {
     const elapsed = getPomoElapsedSec();
-    if (elapsed >= 60) {
+    if (elapsed >= 60 && pomoSession.state !== 'voided') {
       openEditor('重置当前专注计时？', '<p>当前已投入 <strong>' + Math.floor(elapsed / 60) + '分' + (elapsed % 60) + '秒</strong>。重置将放弃本轮未保存计时，不会删除历史已保存记录。</p>', () => {
         stopPomodoro('idle');
-        pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+        pomoSession = createIdlePomoSession(pomoSession.totalSec, pomodoroTargetId);
         pomodoroLeft = pomoSession.totalSec;
-        savePomoSession(); render(true); toast('计时器已重置');
+        savePomoSession(); render(true); refreshStudyTimerModalIfOpen(); toast('计时器已重置');
       }, '确认重置');
       return;
     }
     stopPomodoro('idle');
-    pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+    pomoSession = createIdlePomoSession(pomoSession.totalSec, pomodoroTargetId);
     pomodoroLeft = pomoSession.totalSec;
-    savePomoSession(); render(true); return;
+    savePomoSession(); render(true); refreshStudyTimerModalIfOpen(); return;
   }
   if (a === 'pomo-save-local') {
+    if (pomoSession.state === 'voided') { toast('本轮专注已作废，无法提交，请重新开始计时'); return; }
     const elapsedSec = getPomoElapsedSec();
-    if (elapsedSec < 60) { toast('专注不足 60 秒（当前 ' + elapsedSec + ' 秒），满 60 秒后可记入'); return; }
+    if (elapsedSec < 60) { toast('专注不足 60 秒（当前 ' + elapsedSec + ' 秒），满 60 秒后可结束并保存'); return; }
     const opId = pomoSession.sessionId || nextOpId('pomo');
     const tObj = state.studyTargets.find(x => x.id === pomodoroTargetId) || state.studyTargets[0];
     const pRec = normalizeStudyRecord({
@@ -5959,7 +6891,7 @@ document.addEventListener('click', async e => {
       sessionId: opId, operationId: opId,
       focus: 4, targetId: tObj?.id || 'st-1', subject: tObj?.title || '专注计时',
       note: '专注 ' + Math.floor(elapsedSec / 60) + ' 分 ' + (elapsedSec % 60) + ' 秒。',
-      tags: ['番茄钟'], likes: 0, liked: false,
+      tags: ['专注计时'], likes: 0, liked: false,
       syncStatus: isServerOnline ? 'pending' : 'local', syncError: ''
     });
     enqueuePendingOp({ operationId: opId, kind: 'study', recordId: pRec.id, endpoint: '/records/study', method: 'POST', payload: pRec, status: 'pending', lastError: '' });
@@ -5971,9 +6903,10 @@ document.addEventListener('click', async e => {
     recordSelectKey = newlyArchivedRecordKey;
     persistLocalOnly();
     stopPomodoro('idle');
-    pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+    pomoSession = createIdlePomoSession(pomoSession.totalSec, pomodoroTargetId);
     pomodoroLeft = pomoSession.totalSec;
     savePomoSession();
+    if (draft && draft.mode === 'study' && draft.studySubTab !== 'backfill') closeCheckin({ discard: true });
     triggerElectricSweep(2800);
     triggerArenaSprint(2600);
     triggerLightningSurge(2000);
@@ -5983,8 +6916,9 @@ document.addEventListener('click', async e => {
     return;
   }
   if (a === 'pomo-finish') {
+    if (pomoSession.state === 'voided') { toast('本轮专注已作废，无法提交，请重新开始计时'); return; }
     const elapsedSec = getPomoElapsedSec();
-    if (elapsedSec < 60) { toast('专注不足 60 秒（当前 ' + elapsedSec + ' 秒），满 60 秒后可记入'); return; }
+    if (elapsedSec < 60) { toast('专注不足 60 秒（当前 ' + elapsedSec + ' 秒），满 60 秒后可结束并保存'); return; }
     const opId = pomoSession.sessionId || nextOpId('pomo');
     if (pomoSession.state === 'saving' || inFlightOpIds.has(opId)) return;
     if (pomoSession.state === 'running' && !pomoSession.pauseStartedAt) {
@@ -5994,7 +6928,7 @@ document.addEventListener('click', async e => {
     stopPomodoro('saving');
     pomoSession.errorMsg = '';
     inFlightOpIds.add(opId);
-    savePomoSession(); render(true);
+    savePomoSession(); render(true); refreshStudyTimerModalIfOpen();
 
     const tObj = state.studyTargets.find(x => x.id === pomodoroTargetId) || state.studyTargets[0];
     const pRec = normalizeStudyRecord({
@@ -6004,7 +6938,7 @@ document.addEventListener('click', async e => {
       sessionId: opId, operationId: opId,
       focus: 4, targetId: tObj?.id || 'st-1', subject: tObj?.title || '专注计时',
       note: '专注 ' + Math.floor(elapsedSec / 60) + ' 分 ' + (elapsedSec % 60) + ' 秒。',
-      tags: ['番茄钟'], likes: 0, liked: false,
+      tags: ['专注计时'], likes: 0, liked: false,
       syncStatus: isServerOnline ? 'pending' : 'local', syncError: ''
     });
     try {
@@ -6013,7 +6947,7 @@ document.addEventListener('click', async e => {
         if (!res.ok) {
           pomoSession.state = 'paused';
           pomoSession.errorMsg = '同步失败：' + (res.error || '服务器未响应') + '（已保留计时、目标与原操作编号）';
-          savePomoSession(); render(true);
+          savePomoSession(); render(true); refreshStudyTimerModalIfOpen();
           return;
         }
         if (res.record) Object.assign(pRec, normalizeStudyRecord(res.record));
@@ -6030,9 +6964,10 @@ document.addEventListener('click', async e => {
       newlyArchivedRecordKey = 'study:' + pRec.id;
       recordSelectKey = newlyArchivedRecordKey;
       persistLocalOnly();
-      pomoSession = { sessionId: nextOpId('pomo'), targetId: pomodoroTargetId, totalSec: pomoSession.totalSec, state: 'idle', startedAt: 0, pausedAccumMs: 0, pauseStartedAt: 0, completedAt: 0, errorMsg: '' };
+      pomoSession = createIdlePomoSession(pomoSession.totalSec, pomodoroTargetId);
       pomodoroLeft = pomoSession.totalSec;
       savePomoSession();
+      if (draft && draft.mode === 'study' && draft.studySubTab !== 'backfill') closeCheckin({ discard: true });
       triggerElectricSweep(2800);
       triggerArenaSprint(2600);
       triggerLightningSurge(2000);
@@ -6048,6 +6983,7 @@ document.addEventListener('click', async e => {
 
   if (a === 'toggle-habit-date') {
     const [dk, hid] = v.split(':');
+    if (dk > today()) { toast('未来日期只做计划，完成后再勾选'); return; }
     const arr = state.habitLogs[dk] || [];
     state.habitLogs[dk] = arr.includes(hid) ? arr.filter(id => id !== hid) : [...arr, hid];
     persistLocalOnly(); render(true);
@@ -6068,7 +7004,14 @@ document.addEventListener('click', async e => {
       const newH = { id: 'hb-' + Date.now(), title, tag, icon: 'bolt', archived: false };
       state.habits.push(newH);
       persistLocalOnly(); render(true); toast('新自律习惯已加入每日清单！');
-      if (isServerOnline) serverFetch('/habits', 'POST', newH);
+      queueOrSendWriteOp({
+        operationId: nextOpId('hbadd'),
+        coalesceKey: 'habit:add:' + newH.id,
+        kind: 'habit',
+        endpoint: '/habits',
+        method: 'POST',
+        payload: newH
+      });
     });
     return;
   }
@@ -6078,7 +7021,14 @@ document.addEventListener('click', async e => {
       const title = $('#hb-title').value.trim(); if (!title) return false;
       h.title = title; h.tag = $('#hb-tag').value.trim() || '每日';
       persistLocalOnly(); render(true); toast('习惯已更新');
-      if (isServerOnline) serverFetch('/habits/' + h.id, 'PATCH', { title: h.title, tag: h.tag });
+      queueOrSendWriteOp({
+        operationId: nextOpId('hbedit'),
+        coalesceKey: 'habit:edit:' + h.id,
+        kind: 'habit',
+        endpoint: '/habits/' + h.id,
+        method: 'PATCH',
+        payload: { title: h.title, tag: h.tag }
+      });
     });
     return;
   }
@@ -6091,7 +7041,14 @@ document.addEventListener('click', async e => {
       state.habits[idx] = state.habits[targetIdx];
       state.habits[targetIdx] = tmp;
       persistLocalOnly(); render(true);
-      if (isServerOnline) serverFetch('/habits/order', 'PUT', { ids: state.habits.map(x => x.id) });
+      queueOrSendWriteOp({
+        operationId: nextOpId('hborder'),
+        coalesceKey: 'habit:order',
+        kind: 'habit',
+        endpoint: '/habits/order',
+        method: 'PUT',
+        payload: { ids: state.habits.map(x => x.id) }
+      });
     }
     return;
   }
@@ -6100,13 +7057,27 @@ document.addEventListener('click', async e => {
     h.archived = !h.archived;
     persistLocalOnly(); render(true);
     toast(h.archived ? '习惯已停用（历史记录保留）' : '习惯已恢复启用');
-    if (isServerOnline) serverFetch('/habits/' + h.id, 'PATCH', { archived: h.archived });
+    queueOrSendWriteOp({
+      operationId: nextOpId('hbarch'),
+      coalesceKey: 'habit:edit:' + h.id,
+      kind: 'habit',
+      endpoint: '/habits/' + h.id,
+      method: 'PATCH',
+      payload: { archived: h.archived }
+    });
     return;
   }
   if (a === 'del-habit') {
     state.habits = state.habits.filter(h => h.id !== v);
     persistLocalOnly(); render(true); toast('已移除该自律项');
-    if (isServerOnline) serverFetch('/habits/' + v, 'DELETE');
+    queueOrSendWriteOp({
+      operationId: nextOpId('hbdel'),
+      coalesceKey: 'habit:del:' + v,
+      kind: 'habit',
+      endpoint: '/habits/' + v,
+      method: 'DELETE',
+      payload: {}
+    });
     return;
   }
 
@@ -6251,6 +7222,12 @@ function openCheckin(mode = 'sport', targetId = null, personName = state.name, o
   }
   if (opts && opts.date && /^\d{4}-\d{2}-\d{2}$/.test(opts.date)) draft.date = opts.date;
   if (opts && opts.time && /^\d{2}:\d{2}$/.test(opts.time)) draft.time = opts.time;
+  draft.studySubTab = (opts && opts.subtab === 'backfill') ? 'backfill' : 'timer';
+  if (mode === 'study' && targetId && pomoSession.state !== 'running') {
+    pomodoroTargetId = targetId;
+    pomoSession.targetId = targetId;
+    savePomoSession();
+  }
   $('#app').inert = true; drawModal();
 }
 
@@ -6279,11 +7256,12 @@ function syncDraftFromDom() {
 function closeCheckin(opts = {}) {
   const discard = Boolean(opts && opts.discard);
   const prevMode = draft ? draft.mode : null;
+  const wasStudyTimerModal = draft && draft.mode === 'study' && draft.studySubTab !== 'backfill';
   if (draft?.saving && !discard) return;
   if (draft) {
     if (discard) {
       clearSavedDraft(draft.mode);
-    } else {
+    } else if (!wasStudyTimerModal) {
       syncDraftFromDom();
       persistCheckinDraft(draft, step);
     }
@@ -6291,6 +7269,9 @@ function closeCheckin(opts = {}) {
   draft = null;
   $('#modal-root').innerHTML = '';
   $('#app').inert = false;
+  if (wasStudyTimerModal && pomoSession.state === 'running' && !(view === 'progress' && statsTab === 'study')) {
+    notifyStudyTimerContextLeave('关闭了专注计时窗口');
+  }
   if (!discard && prevMode) render(true);
   if (modalPreviousFocus && modalPreviousFocus.isConnected && typeof modalPreviousFocus.focus === 'function') {
     try { modalPreviousFocus.focus({ preventScroll: true }); } catch { try { modalPreviousFocus.focus(); } catch {} }
@@ -6326,13 +7307,25 @@ function updateCheckinPace() {
 
 function stepMarkup() {
   const isStudy = draft.mode === 'study';
-  const draftBanner = draft.restoredFromDraft
+  const isStudyTimer = isStudy && draft.studySubTab !== 'backfill';
+  const draftBanner = (!isStudyTimer && draft.restoredFromDraft)
     ? '<div class="ck-draft-banner" role="status"><span>已恢复草稿</span><button type="button" class="ck-btn ck-btn-ghost" data-modal="discard-draft">丢弃草稿</button></div>'
     : '';
   const modeBar = draftBanner + '<div class="modal-mode-switch ck-form-type" role="group" aria-label="选择打卡类型">'
     + '<button type="button" class="' + (!isStudy ? 'active' : '') + '" aria-pressed="' + (!isStudy) + '" data-modal="switch-mode" data-value="sport">🏃 运动打卡</button>'
     + '<button type="button" class="' + (isStudy ? 'active' : '') + '" aria-pressed="' + isStudy + '" data-modal="switch-mode" data-value="study">📚 学习打卡</button>'
-    + '</div>';
+    + '</div>'
+    + (isStudy
+      ? '<div class="rd-seg is-stretch rd-study-modal-subtabs" role="tablist" aria-label="学习记录方式">'
+        + '<button type="button" role="tab" aria-selected="' + isStudyTimer + '" class="' + (isStudyTimer ? 'active' : '') + '" data-modal="study-subtab" data-value="timer">⏱ 专注计时（默认）</button>'
+        + '<button type="button" role="tab" aria-selected="' + (!isStudyTimer) + '" class="' + (!isStudyTimer ? 'active' : '') + '" data-modal="study-subtab" data-value="backfill">📝 历史补录</button>'
+        + '</div>'
+      : '');
+  if (isStudyTimer) {
+    return modeBar
+      + renderStudyTimerPanel({ compact: true })
+      + '<p class="rd-study-timer-foot-note">学习计时与「统计 → 学习」共用同一套真实时钟计时器；如需补记已完成的过往学习，请切换到上方「历史补录」。</p>';
+  }
 
   const minutes = isStudy ? studyMinutesOf(draft) : draft.minutes;
   const levels = isStudy ? studyFocusLevels : feelings;
@@ -6399,10 +7392,14 @@ function stepMarkup() {
 function drawModal() {
   const root = $('#modal-root');
   const isStudy = draft.mode === 'study';
+  const isStudyTimer = isStudy && draft.studySubTab !== 'backfill';
   const saveBtnText = draft.saving
     ? (isServerOnline ? '同步中…' : '保存中…')
-    : (draft.saveState === 'failed' ? '重试同步 ↻' : (draft.saveState === 'local-failed' ? '重试保存 ↻' : '保存打卡 ✓'));
-  root.innerHTML = '<div class="modal-overlay"><section class="checkin-modal ck-checkin-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-heading"><div class="sheet-grabber" aria-hidden="true"><span></span></div><div class="modal-header"><h2 id="checkin-heading">' + (isStudy ? '学习打卡' : '运动打卡') + ' · ' + esc(draft.person) + '</h2><button type="button" class="close-modal" data-modal="close" aria-label="关闭弹窗（保留草稿）"><span aria-hidden="true">×</span></button></div><div class="step-content ck-step-content">' + stepMarkup() + '</div><div class="step-footer ck-form-footer"><button type="button" class="ck-cancel-btn" data-modal="back" ' + (draft.saving ? 'disabled' : '') + '>暂存退出</button><button type="button" class="ck-save-btn ' + (isStudy ? 'is-study' : 'is-sport') + '" data-modal="save" ' + (draft.photoUploading || draft.saving ? 'disabled' : '') + '>' + saveBtnText + '</button></div></section></div>';
+    : (draft.saveState === 'failed' ? '重试同步 ↻' : (draft.saveState === 'local-failed' ? '重试保存 ↻' : (isStudy ? '保存历史补录 ✓' : '保存打卡 ✓')));
+  const footerHtml = isStudyTimer
+    ? '<div class="step-footer ck-form-footer"><button type="button" class="ck-cancel-btn" data-modal="close">关闭窗口</button></div>'
+    : '<div class="step-footer ck-form-footer"><button type="button" class="ck-cancel-btn" data-modal="back" ' + (draft.saving ? 'disabled' : '') + '>暂存退出</button><button type="button" class="ck-save-btn ' + (isStudy ? 'is-study' : 'is-sport') + '" data-modal="save" ' + (draft.photoUploading || draft.saving ? 'disabled' : '') + '>' + saveBtnText + '</button></div>';
+  root.innerHTML = '<div class="modal-overlay"><section class="checkin-modal ck-checkin-modal" role="dialog" aria-modal="true" aria-labelledby="checkin-heading"><div class="sheet-grabber" aria-hidden="true"><span></span></div><div class="modal-header"><h2 id="checkin-heading">' + (isStudy ? (isStudyTimer ? '学习专注计时' : '学习历史补录') : '运动打卡') + ' · ' + esc(draft.person) + '</h2><button type="button" class="close-modal" data-modal="close" aria-label="关闭弹窗"><span aria-hidden="true">×</span></button></div><div class="step-content ck-step-content">' + stepMarkup() + '</div>' + footerHtml + '</section></div>';
   const overlay = $('.modal-overlay', root), sheet = $('.checkin-modal', root), grab = $('.sheet-grabber', root), header = $('.modal-header', root);
   if (overlay && sheet) {
     overlay.addEventListener('click', ev => { if (ev.target === overlay) closeCheckin(); });
@@ -6564,10 +7561,25 @@ $('#modal-root').addEventListener('click', async e => {
     toast('已丢弃草稿，重新开始填写');
     return;
   }
+  if (a === 'study-subtab') {
+    if (!draft || draft.mode !== 'study') return;
+    const nextSub = v === 'backfill' ? 'backfill' : 'timer';
+    if (draft.studySubTab !== 'backfill' && nextSub === 'backfill' && pomoSession.state === 'running' && !(view === 'progress' && statsTab === 'study')) {
+      notifyStudyTimerContextLeave('切换到历史补录标签');
+    }
+    draft.studySubTab = nextSub;
+    drawModal();
+    return;
+  }
   if (a === 'switch-mode') {
     if (!draft || draft.mode === v) return;
-    syncDraftFromDom();
-    persistCheckinDraft(draft, step);
+    if (draft.mode === 'study' && draft.studySubTab !== 'backfill' && pomoSession.state === 'running' && !(view === 'progress' && statsTab === 'study')) {
+      notifyStudyTimerContextLeave('切换到运动打卡');
+    }
+    if (!(draft.mode === 'study' && draft.studySubTab !== 'backfill')) {
+      syncDraftFromDom();
+      persistCheckinDraft(draft, step);
+    }
     const savedOther = getSavedDraft(v);
     if (savedOther) {
       draft = { ...createFreshDraft(v, savedOther.targetId, savedOther.person), ...savedOther, feel: savedOther.feel ?? 3, mode: v, saving: false, restoredFromDraft: true };
@@ -6586,6 +7598,7 @@ $('#modal-root').addEventListener('click', async e => {
       draft = createFreshDraft(v, draft.targetId, draft.person);
       step = 0;
     }
+    if (v === 'study' && !draft.studySubTab) draft.studySubTab = 'timer';
     drawModal();
     return;
   }
@@ -9243,6 +10256,12 @@ if (!embedded && !demo && typeof window !== 'undefined') {
   });
 }
 
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape' || document.querySelector('dialog[open]') || document.querySelector('#modal-root .modal-backdrop')) return;
+  const more = document.querySelector('.rd-stats-more[open]');
+  if (more) { e.preventDefault(); more.open = false; more.querySelector('summary').focus(); }
+});
+
 // Keyboard navigation for interactive slim bar charts (ArrowLeft / ArrowRight / Home / End)
 document.addEventListener('keydown', e => {
   if (!(e.target instanceof Element) || !e.target.matches('.rd-bar-col[data-action="stats-pick-bar"]')) return;
@@ -9264,6 +10283,7 @@ document.addEventListener('keydown', e => {
     const sep = val.indexOf(':');
     if (sep > 0) {
       statsSelectedBars[val.slice(0, sep)] = val.slice(sep + 1);
+      selectStatsDate(val.slice(sep + 1));
       render(true);
       restoreFocusBySelector('[data-focus-key="bar:' + val.replace(/"/g, '\"') + '"]');
     }
@@ -9289,6 +10309,7 @@ document.addEventListener('keydown', e => {
   if (target) {
     const val = target.dataset.value || '';
     statsSelectedNode = val;
+    selectStatsDate(val);
     render(true);
     restoreFocusBySelector('[data-focus-key="spline:' + val.replace(/"/g, '\"') + '"]');
   }
@@ -9372,3 +10393,4 @@ if (!embedded && !demo && typeof checkServerHealth === 'function') {
   });
 }
 })();
+

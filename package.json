@@ -1,10 +1,10 @@
-﻿{
+{
   "name": "running-root",
   "version": "1.0.0",
   "description": "RUN & STUDY LOG · 前后端一体化工程",
   "scripts": {
     "start": "node server/src/server.js",
     "server": "node server/src/server.js",
-    "test": "node server/verify-all.js"
+    "test": "node server/verify-all.js && node server/verify-offline-sync.js"
   }
 }

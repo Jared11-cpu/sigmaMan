@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'run-study-log-shell:' + self.registration.scope + ':';
-const CACHE_NAME = CACHE_PREFIX + 'v20261128-rd2';
+const CACHE_NAME = CACHE_PREFIX + 'v20261128-rd4-offline';
 const SHELL_ASSETS = [
   './',
   './index.html',
@@ -13,18 +13,34 @@ const SHELL_ASSETS = [
   './logo.svg'
 ];
 
+async function cacheShell() {
+  const indexUrl = new URL('./index.html', self.registration.scope);
+  const index = await fetch(indexUrl, { cache: 'reload' });
+  if (!index.ok) throw new Error('Could not load app entry page');
+  const markup = await index.clone().text();
+  const assets = new Set(SHELL_ASSETS);
+  for (const [, href] of markup.matchAll(/(?:href|src)=["']([^"']+)["']/g)) {
+    const asset = new URL(href, indexUrl);
+    if (asset.search && SHELL_ASSETS.some(path => new URL(path, indexUrl).href === asset.origin + asset.pathname)) {
+      assets.add(asset.href);
+    }
+  }
+  const cache = await caches.open(CACHE_NAME);
+  await cache.addAll([...assets].map(path => new Request(new URL(path, indexUrl), { cache: 'reload' })));
+  await cache.put(indexUrl, index);
+  await self.skipWaiting();
+}
+
 self.addEventListener('install', event => {
-  event.waitUntil(
-    caches.open(CACHE_NAME).then(cache => cache.addAll(SHELL_ASSETS).catch(() => {}))
-  );
-  self.skipWaiting();
+  event.waitUntil(cacheShell());
 });
 
 self.addEventListener('activate', event => {
-  event.waitUntil(
-    caches.keys().then(keys => Promise.all(keys.filter(k => k.startsWith(CACHE_PREFIX) && k !== CACHE_NAME).map(k => caches.delete(k))))
-  );
-  self.clients.claim();
+  event.waitUntil((async () => {
+    const keys = await caches.keys();
+    await Promise.all(keys.filter(key => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME).map(key => caches.delete(key)));
+    await self.clients.claim();
+  })());
 });
 
 self.addEventListener('fetch', event => {
