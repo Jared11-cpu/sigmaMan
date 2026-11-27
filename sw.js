@@ -1,5 +1,5 @@
 const CACHE_PREFIX = 'run-study-log-shell:' + self.registration.scope + ':';
-const CACHE_NAME = CACHE_PREFIX + 'v20261125-mobile';
+const CACHE_NAME = CACHE_PREFIX + 'v20261128-mobile-ab';
 const SHELL_ASSETS = [
   './',
   './index.html',

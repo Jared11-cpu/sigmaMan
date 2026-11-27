@@ -427,3 +427,14 @@
     top: 156px;
   }
 }
+
+
+/* ===== [v20261127-mobile-ab] Desktop .ck- Masthead Alignment ===== */
+@media (min-width: 760px) {
+  body:not(.embedded) .masthead.ck-masthead {
+    grid-template-columns: 204px 1fr auto;
+  }
+  body:not(.embedded) .bottom-nav.ck-bottom-nav .ck-nav-label {
+    display: inline-flex;
+  }
+}

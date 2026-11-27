@@ -179,7 +179,7 @@ if (demo) {
 
 const POMO_KEY = STORE + '_pomo_session';
 const PENDING_OPS_KEY = STORE + '_pending_ops';
-const VALID_VIEWS = ['home', 'progress', 'plan', 'study', 'ranking', 'achievements', 'records', 'people'];
+const VALID_VIEWS = ['home', 'progress', 'plan', 'study', 'ranking', 'achievements', 'records', 'people', 'more'];
 const hashView = (typeof location !== 'undefined' && location.hash) ? location.hash.replace(/^#/, '').split('?')[0] : '';
 let view = params.get('view') || (VALID_VIEWS.includes(hashView) ? hashView : 'home');
 let showArchivedTargets = false, showArchivedHabits = false, pendingImportBackup = null;
@@ -272,18 +272,22 @@ let pomodoroTotal = pomoSession.totalSec, pomodoroLeft = getPomoLeftSec(), pomod
 let pomodoroTargetId = pomoSession.targetId || state.studyTargets[0]?.id || 'st-1';
 
 let quoteIndex = params.has('quote') ? Number(params.get('quote')) : 0, quoteTimer, step = 0, draft = null, modalPreviousFocus = null, modalPreviousFocusSelector = '', toastTimer, dialogSave = null;
-if (!['home', 'progress', 'plan', 'study', 'ranking', 'achievements', 'records', 'people'].includes(view)) view = 'home';
+if (!VALID_VIEWS.includes(view)) view = 'home';
 
 const nav = [
   ['home', '今天', 'track'],
-  ['progress', '进度', 'pulse'],
-  ['plan', '运动', 'shoe'],
-  ['study', '学习', 'book'],
-  ['ranking', '排名', 'trophy'],
-  ['achievements', '成就', 'medal'],
   ['records', '记录', 'chart'],
-  ['people', '自律', 'sunrise']
+  ['ranking', '排名', 'trophy'],
+  ['more', '更多', 'more']
 ];
+const MORE_ITEMS = [
+  { id: 'progress', label: '进度', icon: 'pulse', sub: '目标完成率与趋势' },
+  { id: 'plan', label: '运动', icon: 'shoe', sub: '跑步计划与里程打卡' },
+  { id: 'study', label: '学习', icon: 'book', sub: '专注番茄与学习目标' },
+  { id: 'achievements', label: '成就', icon: 'medal', sub: '勋章与连续里程碑' },
+  { id: 'people', label: '自律', icon: 'sunrise', sub: '每日习惯与同行伙伴' }
+];
+const MORE_VIEWS = MORE_ITEMS.map(x => x.id);
 if (embedded) document.body.classList.add('embedded');
 
 const ICONS = {
@@ -311,7 +315,8 @@ const ICONS = {
   compass: '<circle cx="12" cy="12" r="9"/><polygon points="15.5,8.5 13.2,13.2 8.5,15.5 10.8,10.8"/>',
   infinity: '<path d="M18.2 8.8a3.8 3.8 0 0 0-5.4 0L11.2 10.4 9.6 8.8a3.8 3.8 0 1 0 0 5.4l1.6-1.6 1.6 1.6a3.8 3.8 0 0 0 5.4-5.4z"/>',
   flag: '<path d="M5 21V4M5 4h12l-2.5 4L17 12H5"/>',
-  spark: '<path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z"/>'
+  spark: '<path d="M12 3l2 6 6 2-6 2-2 6-2-6-6-2 6-2 2-6z"/>',
+  more: '<rect x="4" y="4" width="6.5" height="6.5" rx="1.2"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.2"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.2"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.2"/>'
 };
 
 function icon(name, cls = '') {
@@ -1451,30 +1456,67 @@ function homeTodayPanel() {
     + feedRowsHtml
     + '</div>';
 
-  return '<section class="home-today-panel" aria-labelledby="home-today-heading">'
-    + '<div class="today-panel-head">'
-    + '<div class="today-head-title"><h2 id="home-today-heading">今天</h2><span class="today-total-count" aria-label="今日打卡共 ' + totalCount + ' 次">' + totalCount + ' 次打卡</span></div>'
-    + '<div class="today-head-actions">'
-    + '<button type="button" class="today-records-btn is-subtle" data-action="add-person" title="添加同行伙伴">' + (members.length === 1 ? '＋ 加人物' : '＋ 加人物 (' + members.length + '人)') + '</button>'
-    + '<button type="button" class="today-records-btn" data-action="go-today-records" data-focus-key="home:today-records">查看今日记录 <span aria-hidden="true">→</span></button>'
-    + '</div></div>'
-    + '<div class="today-tracks">'
-    + '<div class="today-track-row is-sport">'
-    + '<div class="today-track-metric"><span class="today-track-name">运动</span><strong>' + rs.km.toFixed(1) + ' <em>km</em></strong><span class="today-track-count">' + rs.count + ' 次</span></div>'
-    + '<div class="today-track-actions">'
-    + '<button type="button" class="today-act-btn is-sport" data-action="checkin" data-mode="sport" data-focus-key="home:checkin-sport" aria-label="记运动，今日已跑 ' + rs.km.toFixed(1) + ' 公里，' + rs.count + ' 次">记运动</button>'
-    + '</div></div>'
-    + '<div class="today-track-row is-study">'
-    + '<div class="today-track-metric"><span class="today-track-name">学习</span><strong>' + ss.minutes + ' <em>分钟</em></strong><span class="today-track-count">' + ss.count + ' 次</span></div>'
-    + '<div class="today-track-actions">'
-    + '<button type="button" class="today-act-btn is-study" data-action="checkin" data-mode="study" data-focus-key="home:checkin-study" aria-label="记学习，今日已学 ' + ss.minutes + ' 分钟，' + ss.count + ' 次">记学习</button>'
-    + '<button type="button" class="today-act-btn is-focus" data-action="go-focus" data-focus-key="home:go-focus" aria-label="' + esc(focusMeta.aria) + '">' + focusMeta.label + '</button>'
-    + '</div></div>'
+  const hasTodayRecord = totalCount > 0;
+  const primaryCtaLabel = hasTodayRecord ? '再记一次' : '打卡';
+  const primaryDefaultMode = (!getSavedDraft('sport') && getSavedDraft('study')) ? 'study' : 'sport';
+  const primaryAria = primaryCtaLabel + '，今日已完成运动 ' + rs.km.toFixed(1) + ' 公里（' + rs.count + ' 次）、学习 ' + ss.minutes + ' 分钟（' + ss.count + ' 次），共 ' + totalCount + ' 次';
+
+  return '<section class="home-today-panel ck-today-panel" aria-labelledby="home-today-heading">'
+    + '<div class="ck-today-hero">'
+    + '<div class="ck-today-head">'
+    + '<div class="ck-today-title-wrap"><h2 id="home-today-heading">今天</h2><span class="ck-today-count" aria-label="今日打卡共 ' + totalCount + ' 次">' + (hasTodayRecord ? ('已记 ' + totalCount + ' 次') : '今日 0 次') + '</span></div>'
+    + '<button type="button" class="ck-today-link" data-action="go-today-records" data-focus-key="home:today-records">今日记录 <span aria-hidden="true">→</span></button>'
+    + '</div>'
+    + '<div class="ck-today-summary" role="group" aria-label="今日完成量与次数">'
+    + '<div class="ck-today-stat is-sport"><span class="ck-today-stat-label">运动</span><strong>' + rs.km.toFixed(1) + ' <em>km</em></strong><span class="ck-today-stat-count">' + rs.count + ' 次</span></div>'
+    + '<div class="ck-today-stat is-study"><span class="ck-today-stat-label">学习</span><strong>' + ss.minutes + ' <em>分钟</em></strong><span class="ck-today-stat-count">' + ss.count + ' 次</span></div>'
+    + '</div>'
+    + '<button type="button" class="ck-primary-cta ' + (hasTodayRecord ? 'is-again' : 'is-first') + '" data-action="checkin" data-mode="' + primaryDefaultMode + '" data-focus-key="home:primary-checkin" aria-label="' + esc(primaryAria) + '"><span>' + primaryCtaLabel + '</span><span class="ck-primary-cta-arrow" aria-hidden="true">→</span></button>'
+    + '<div class="ck-track-entries" role="group" aria-label="运动与学习独立入口">'
+    + '<button type="button" class="ck-track-entry is-sport" data-view="plan" aria-label="进入运动页，今日 ' + rs.km.toFixed(1) + ' 公里，' + rs.count + ' 次">' + icon('shoe', 'ck-entry-ico') + '<span class="ck-entry-body"><strong>运动</strong><small>' + rs.km.toFixed(1) + ' km · ' + rs.count + ' 次</small></span><span class="ck-entry-chevron" aria-hidden="true">›</span></button>'
+    + '<button type="button" class="ck-track-entry is-study" data-view="study" aria-label="进入学习页，今日 ' + ss.minutes + ' 分钟，' + ss.count + ' 次">' + icon('book', 'ck-entry-ico') + '<span class="ck-entry-body"><strong>学习</strong><small>' + ss.minutes + ' 分钟 · ' + ss.count + ' 次</small></span><span class="ck-entry-chevron" aria-hidden="true">›</span></button>'
+    + '</div>'
     + '</div>'
     + (focusMeta.stateText ? '<div class="today-focus-note" id="home-focus-note" role="status">专注计时：' + esc(findTargetTitle(pomodoroTargetId)) + ' · ' + esc(focusMeta.stateText) + '</div>' : '')
     + entryBars
+    + '<details class="ck-today-fold">'
+    + '<summary class="ck-today-fold-summary"><span>今日明细、自律与更多操作</span><small>自律 ' + hb.done + '/' + hb.total + ' · 明细 ' + todayItems.length + ' 条</small></summary>'
+    + '<div class="ck-today-fold-body">'
+    + '<div class="ck-today-tools">'
+    + '<button type="button" class="today-act-btn is-focus" data-action="go-focus" data-focus-key="home:go-focus" aria-label="' + esc(focusMeta.aria) + '">' + focusMeta.label + '</button>'
+    + '<button type="button" class="today-records-btn is-subtle" data-action="add-person" title="添加同行伙伴">' + (members.length === 1 ? '＋ 加人物' : '＋ 加人物 (' + members.length + '人)') + '</button>'
+    + '</div>'
     + habitsHtml
     + feedHtml
+    + '</div></details>'
+    + '</section>';
+}
+
+function morePage() {
+  const mt = total(mine(monthly())), stH = totalStudy(monthly(mineStudy()));
+  const sPct = Math.round(mt / Math.max(1, state.goal) * 100);
+  const stPct = Math.round(stH / Math.max(1, state.studyGoal) * 100);
+  const rs = todaySportSummary(), ss = todayStudySummary();
+  const hb = habitRateForDate(today());
+  const ds = dualStreak();
+  const metaMap = {
+    progress: '运动 ' + sPct + '% · 学习 ' + stPct + '%',
+    plan: '今日 ' + rs.km.toFixed(1) + ' km · 本月 ' + mt.toFixed(1) + '/' + state.goal + ' km',
+    study: '今日 ' + ss.minutes + ' 分钟 · 本月 ' + stH.toFixed(1) + '/' + state.studyGoal + ' h',
+    achievements: '勋章墙与连续里程碑',
+    people: '今日自律 ' + hb.done + '/' + hb.total + ' · COMBO ×' + ds
+  };
+  const rows = MORE_ITEMS.map(item => {
+    const summary = metaMap[item.id] || item.sub;
+    return '<li class="ck-more-item"><button type="button" class="ck-more-row" data-view="' + item.id + '" aria-label="打开' + item.label + '页，' + esc(summary) + '">'
+      + '<span class="ck-more-ico-wrap" aria-hidden="true">' + icon(item.icon, 'ck-more-ico') + '</span>'
+      + '<span class="ck-more-text"><strong>' + item.label + '</strong><small>' + esc(summary) + '</small></span>'
+      + '<span class="ck-more-chevron" aria-hidden="true">›</span>'
+      + '</button></li>';
+  }).join('');
+  return '<section class="ck-more-page" aria-labelledby="ck-more-heading">'
+    + '<header class="ck-more-header"><h2 id="ck-more-heading">更多</h2><p>进度、运动、学习、成就与自律</p></header>'
+    + '<ul class="ck-more-list" aria-label="全部扩展页面入口">' + rows + '</ul>'
     + '</section>';
 }
 
@@ -1494,8 +1536,8 @@ function home() {
   const studyLeadDelta = studyBoard[0] ? (studyBoard[0].hrs - stH).toFixed(1) : '0';
   const solo = board.length === 1;
 
-  return '<div class="home">'
-    + quoteMarkup() + homeTodayPanel()
+  return '<div class="home ck-home">'
+    + homeTodayPanel() + quoteMarkup()
     + '<section class="home-metrics home-metrics-4" aria-label="运动学习自律与核心进度">'
     + '<button class="metric-tile" data-action="go-view" data-value="plan"><div class="metric-top"><small>本月运动 / RUN</small><em class="metric-rank">' + (solo ? ('目标 ' + sPct + '%') : ('#' + mySportRank + (mySportRank === 1 ? ' 领跑' : ' 差' + sportLeadDelta + 'k'))) + '</em></div><strong>' + mt.toFixed(1) + '<em> KM</em></strong>' + PixelProgressBar.renderHtml({ progress: sPct, height: 12, width: '100%', bare: true, variant: 'orange', className: 'metric-ppb', ariaLabel: '本月运动目标进度' }) + '</button>'
     + '<button class="metric-tile" data-action="go-view" data-value="study"><div class="metric-top"><small>本月学习 / STUDY</small><em class="metric-rank is-blue">' + (solo ? ('目标 ' + stPct + '%') : ('#' + myStudyRank + (myStudyRank === 1 ? ' 领跑' : ' 差' + studyLeadDelta + 'h'))) + '</em></div><strong>' + stH.toFixed(1) + '<em> H</em></strong>' + PixelProgressBar.renderHtml({ progress: stPct, height: 12, width: '100%', bare: true, variant: 'blue', className: 'metric-ppb', ariaLabel: '本月学习目标进度' }) + '</button>'
@@ -3598,7 +3640,7 @@ function people() {
     + '</aside></div>';
 }
 
-const renderers = { home, progress, plan, study, ranking, achievements, records: recordsPage, people };
+const renderers = { home, progress, plan, study, ranking, achievements, records: recordsPage, people, more: morePage };
 function render(preserveScroll = false) {
   const page = $('#page');
   const prevTop = preserveScroll && page ? page.scrollTop : 0;
@@ -3611,7 +3653,14 @@ function render(preserveScroll = false) {
   page.innerHTML = '<div class="' + (preserveScroll ? 'page-stay' : 'page-enter') + '" style="display:flex;flex-direction:column;flex:1;min-height:0">' + renderers[view]() + '</div>';
   if (preserveScroll) page.scrollTop = prevTop;
   if (restoreAction) page.querySelector(restoreAction)?.focus({ preventScroll: true });
-  $('.bottom-nav').innerHTML = nav.map(([id, label, ico]) => '<button data-view="' + id + '" class="' + (id === view ? 'active' : '') + '" ' + (id === view ? 'aria-current="page"' : '') + '>' + icon(ico, 'nav-ico') + '<span class="nav-label">' + label + '</span></button>').join('');
+  const isMoreSubView = MORE_VIEWS.includes(view);
+  const activeMoreItem = isMoreSubView ? MORE_ITEMS.find(x => x.id === view) : null;
+  $('.bottom-nav').innerHTML = nav.map(([id, label, ico]) => {
+    const isExact = id === view;
+    const isActive = isExact || (id === 'more' && isMoreSubView);
+    const ariaLabel = (id === 'more' && activeMoreItem) ? ('更多，当前在' + activeMoreItem.label + '页') : label;
+    return '<button type="button" data-view="' + id + '" class="ck-nav-btn' + (isActive ? ' active' : '') + '" aria-label="' + esc(ariaLabel) + '"' + (isExact ? ' aria-current="page"' : (isActive ? ' aria-current="true"' : '')) + '>' + icon(ico, 'nav-ico') + '<span class="nav-label ck-nav-label">' + label + '</span></button>';
+  }).join('');
   clearInterval(quoteTimer);
   if (view === 'home' && !matchMedia('(prefers-reduced-motion: reduce)').matches) quoteTimer = setInterval(nextQuote, 7000);
   if (view === 'records') refreshReceiptDialog();
@@ -3696,8 +3745,11 @@ function buildStableFocusSelector(el) {
 }
 
 function openEditor(title, body, onSave, button = '保存 →') {
-  lastEditorOpener = document.activeElement;
-  lastEditorFocusSelector = buildStableFocusSelector(lastEditorOpener);
+  const dlgCheck = $('#editor');
+  if (!dlgCheck || !dlgCheck.open) {
+    lastEditorOpener = document.activeElement;
+    lastEditorFocusSelector = buildStableFocusSelector(lastEditorOpener);
+  }
   dialogSave = onSave;
   $('#editor-title').textContent = title;
   $('#editor-body').innerHTML = body;
@@ -3725,16 +3777,19 @@ $('#editor-form').addEventListener('submit', async e => {
     if (res !== false) $('#editor').close('save');
   }
 });
-$('#rename').onclick = () => openEditor('你的个人昵称', '<label for="name-input">在运动跑道与学习档案中，怎么称呼你？</label><input id="name-input" value="' + esc(state.name) + '" maxlength="12" required autocomplete="nickname">', () => {
-  const name = $('#name-input').value.trim();
-  if (!name) { $('#name-input').focus(); return false; }
-  if (state.members.includes(name)) { toast('这个名字已在伙伴名单里。'); return false; }
-  state.records.forEach(r => { if (r.person === state.name) r.person = name; });
-  state.studyRecords.forEach(r => { if (r.person === state.name) r.person = name; });
-  const oldName = state.name;
-  state.name = name; persist(); render(true); toast('新名字，新起点。');
-  queueOrSendWriteOp({ operationId: nextOpId('rename'), coalesceKey: 'rename', kind: 'rename', endpoint: '/rename', method: 'POST', payload: { oldName, newName: name } });
-});
+function openRenameEditor() {
+  openEditor('你的个人昵称', '<label for="name-input">在运动跑道与学习档案中，怎么称呼你？</label><input id="name-input" value="' + esc(state.name) + '" maxlength="12" required autocomplete="nickname">', () => {
+    const name = $('#name-input').value.trim();
+    if (!name) { $('#name-input').focus(); return false; }
+    if (state.members.includes(name)) { toast('这个名字已在伙伴名单里。'); return false; }
+    state.records.forEach(r => { if (r.person === state.name) r.person = name; });
+    state.studyRecords.forEach(r => { if (r.person === state.name) r.person = name; });
+    const oldName = state.name;
+    state.name = name; persist(); render(true); toast('新名字，新起点。');
+    queueOrSendWriteOp({ operationId: nextOpId('rename'), coalesceKey: 'rename', kind: 'rename', endpoint: '/rename', method: 'POST', payload: { oldName, newName: name } });
+  });
+}
+if ($('#rename')) $('#rename').onclick = openRenameEditor;
 
 function openPixelProgressDemoModal() {
   const milestones = [
@@ -3793,11 +3848,22 @@ function openPixelProgressDemoModal() {
 }
 
 $('#open-settings').onclick = () => {
+  const stopped = motionPaused || reducedMotion.matches || document.hidden;
+  const motionLabel = reducedMotion.matches ? '跟随系统：减少动效' : motionPaused ? '开启动效 ▶' : '暂停动效 Ⅱ';
+  const motionStatusText = reducedMotion.matches ? '已跟随系统减少动态效果' : (motionPaused ? '已暂停动效' : '动效运行中');
+  const motionRow = '<div class="ck-settings-row ck-settings-motion-row">'
+    + '<div class="ck-settings-row-info"><strong>动效控制</strong><small id="ck-settings-motion-state">' + motionStatusText + '</small></div>'
+    + '<button type="button" class="motion-toggle ck-settings-motion-btn" id="motion-toggle" data-action="toggle-motion" aria-pressed="' + String(stopped) + '"' + (reducedMotion.matches ? ' disabled' : '') + '>' + motionLabel + '</button>'
+    + '</div>';
+  const renameRow = '<button type="button" class="settings-link ck-settings-rename-btn" id="settings-rename" aria-label="改名字，当前昵称 ' + esc(state.name) + '"><span>✎ 改名字</span><span class="ck-settings-meta">当前：' + esc(state.name) + '</span></button>';
   const modeBadge = isServerOnline
     ? '<div style="margin-bottom:12px;padding:8px 12px;background:#eef7ed;border:1px solid #7bc676;color:#1e4620;font-size:12px;display:flex;align-items:center;justify-content:space-between"><span><strong>● 在线后端已连接</strong> (房间: ' + esc(currentRoomCode) + ')</span><button type="button" id="btn-sync-to-cloud" style="border:1px solid #7bc676;background:#fff;padding:2px 8px;font-size:11px;cursor:pointer">将本地缓存推送到云端 ↑</button></div>'
     : '<div style="margin-bottom:12px;padding:8px 12px;background:#fff8ee;border:1px solid #e4a334;color:#7a4b04;font-size:12px"><strong>○ 离线模式 (localStorage)</strong><br><small>双击打开网页.cmd 或纯本地使用；启动后端后刷新即享 SQLite 真持久化与云端多人同步。</small></div>';
 
-  openEditor('设置与备份', modeBadge + '<button type="button" class="settings-link" id="export-data">↗ 导出完整数据备份 .json</button><label for="import-data">从备份恢复（将替换当前数据）</label><input id="import-data" type="file" accept=".json,application/json"><button type="button" class="settings-link" id="open-ppb-demo">🧩 像素进度条组件演示 (0%–100% / 不确定状态)</button><a class="settings-link" href="pixel-progress-demo.html" target="_blank">↗ 在独立窗口打开完整组件演示页</a><a class="settings-link" href="film.html">品牌短片</a><button type="button" class="settings-link" id="download-poster">↓ 保存今日双轨打卡海报 .png</button><button type="button" class="settings-link danger" id="clear-records">清空当前运动与学习记录</button>', null);
+  openEditor('设置与备份', motionRow + renameRow + modeBadge + '<button type="button" class="settings-link" id="export-data">↗ 导出完整数据备份 .json</button><label for="import-data">从备份恢复（将替换当前数据）</label><input id="import-data" type="file" accept=".json,application/json"><button type="button" class="settings-link" id="open-ppb-demo">🧩 像素进度条组件演示 (0%–100% / 不确定状态)</button><a class="settings-link" href="pixel-progress-demo.html" target="_blank">↗ 在独立窗口打开完整组件演示页</a><a class="settings-link" href="film.html">品牌短片</a><button type="button" class="settings-link" id="download-poster">↓ 保存今日双轨打卡海报 .png</button><button type="button" class="settings-link danger" id="clear-records">清空当前运动与学习记录</button>', null);
+  syncMotion();
+  const firstSettingCtrl = $('#motion-toggle:not(:disabled)') || $('#settings-rename');
+  if (firstSettingCtrl) firstSettingCtrl.focus({ preventScroll: true });
 };
 
 function downloadBlob(blob, name) {
@@ -4054,6 +4120,8 @@ document.addEventListener('click', async e => {
     navigate(navButton.dataset.view);
     return;
   }
+  if (e.target.closest('#motion-toggle, [data-action="toggle-motion"]')) { if (!reducedMotion.matches) { motionPaused = !motionPaused; syncMotion(); } return; }
+  if (e.target.closest('#settings-rename')) { openRenameEditor(); return; }
   if (e.target.closest('#btn-sync-to-cloud')) { syncLocalToCloud(); return; }
   if (e.target.closest('#open-ppb-demo')) { $('#editor').close(); openPixelProgressDemoModal(); return; }
   if (e.target.closest('#export-data') || e.target.closest('#export-before-import')) { exportData(); return; }
@@ -7637,20 +7705,41 @@ function startPixelLoop() {
 }
 
 let motionPaused = false;
-const motionButton = $('#motion-toggle'), reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
+const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)');
 function syncMotion() {
   const stopped = motionPaused || reducedMotion.matches || document.hidden;
   document.body.classList.toggle('motion-paused', stopped);
-  motionButton.setAttribute('aria-pressed', String(stopped));
-  motionButton.textContent = reducedMotion.matches ? '跟随系统：减少动效' : motionPaused ? '开启动效 ▶' : '暂停动效 Ⅱ';
-  delete motionButton.dataset.staggered;
+  const motionButtons = [...document.querySelectorAll('#motion-toggle, [data-action="toggle-motion"]')];
+  const labelText = reducedMotion.matches ? '跟随系统：减少动效' : motionPaused ? '开启动效 ▶' : '暂停动效 Ⅱ';
+  motionButtons.forEach(btn => {
+    btn.setAttribute('aria-pressed', String(stopped));
+    btn.textContent = labelText;
+    delete btn.dataset.staggered;
+    btn.disabled = reducedMotion.matches;
+  });
+  const motionStateEl = $('#ck-settings-motion-state');
+  if (motionStateEl) {
+    motionStateEl.textContent = reducedMotion.matches ? '已跟随系统减少动态效果' : (motionPaused ? '已暂停动效' : '动效运行中');
+  }
   enhanceTextStagger();
-  motionButton.disabled = reducedMotion.matches;
   clearInterval(quoteTimer);
   if (!stopped && view === 'home') quoteTimer = setInterval(nextQuote, 7000);
   if (stopped) { stopPixelLoop(); const np = performance.now(); [...document.querySelectorAll('.pixel-matrix-canvas')].forEach(c => drawPixelMatrix(c, pixelPhase)); [...document.querySelectorAll('.arena-fx-canvas')].forEach(c => drawArenaCanvas(c, np)); [...document.querySelectorAll('.combo-particles-canvas')].forEach(c => drawComboParticlesCanvas(c, np)); } else startPixelLoop();
 }
-motionButton.addEventListener('click', () => { motionPaused = !motionPaused; syncMotion(); });
+$('.bottom-nav')?.addEventListener('keydown', e => {
+  const btns = [...document.querySelectorAll('.bottom-nav .ck-nav-btn')];
+  const idx = btns.indexOf(document.activeElement);
+  if (idx === -1 || !btns.length) return;
+  let nextIdx = -1;
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') nextIdx = (idx + 1) % btns.length;
+  else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') nextIdx = (idx - 1 + btns.length) % btns.length;
+  else if (e.key === 'Home') nextIdx = 0;
+  else if (e.key === 'End') nextIdx = btns.length - 1;
+  if (nextIdx >= 0) {
+    e.preventDefault();
+    btns[nextIdx].focus();
+  }
+});
 reducedMotion.addEventListener('change', syncMotion);
 document.addEventListener('visibilitychange', syncMotion);
 const originalRender = render;
